@@ -25,7 +25,9 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
         raise RegistrationError("Registered object must be callable or import path string")
 
     module_name = getattr(function_or_path, "__module__", None)
-    qualname = getattr(function_or_path, "__qualname__", getattr(function_or_path, "__name__", "callable"))
+    qualname = getattr(
+        function_or_path, "__qualname__", getattr(function_or_path, "__name__", "callable")
+    )
     import_path = None
     if module_name and "<locals>" not in qualname:
         import_path = f"{module_name}.{qualname}"

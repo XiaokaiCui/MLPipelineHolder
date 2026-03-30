@@ -12,7 +12,9 @@ if TYPE_CHECKING:
 
 
 class ExecutionBlock:
-    def __init__(self, parent: PipelineHandler, registration_name: str, execution_priority: int) -> None:
+    def __init__(
+        self, parent: PipelineHandler, registration_name: str, execution_priority: int
+    ) -> None:
         self.parent = parent
         self.registration_name = registration_name
         self.execution_priority = execution_priority
@@ -24,7 +26,11 @@ class ExecutionBlock:
         output_variable_names: str | list[str] | tuple[str, ...],
         save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
     ) -> FunctionRegistration:
-        output_names = [output_variable_names] if isinstance(output_variable_names, str) else list(output_variable_names)
+        output_names = (
+            [output_variable_names]
+            if isinstance(output_variable_names, str)
+            else list(output_variable_names)
+        )
         if not output_names:
             raise RegistrationError("At least one output variable name is required")
         if len(set(output_names)) != len(output_names):
@@ -32,7 +38,9 @@ class ExecutionBlock:
 
         disk_names = set(save_to_disk or [])
         if not disk_names.issubset(set(output_names)):
-            raise RegistrationError("Disk-saved output names must be a subset of output variable names")
+            raise RegistrationError(
+                "Disk-saved output names must be a subset of output variable names"
+            )
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         input_names = inspect_input_names(callable_obj)
@@ -60,7 +68,9 @@ class ExecutionBlock:
         if not self.functions:
             return []
 
-        block_output_names = {name for registration in self.functions for name in registration.output_names}
+        block_output_names = {
+            name for registration in self.functions for name in registration.output_names
+        }
         for registration in self.functions:
             same_block_dependencies = block_output_names.intersection(registration.input_names)
             if same_block_dependencies:
@@ -72,7 +82,9 @@ class ExecutionBlock:
         futures = []
         with ThreadPoolExecutor(max_workers=len(self.functions)) as executor:
             for registration in self.functions:
-                futures.append(executor.submit(self._execute_function, registration, run_id, overrides or {}))
+                futures.append(
+                    executor.submit(self._execute_function, registration, run_id, overrides or {})
+                )
 
         produced_outputs: list[str] = []
         for future in futures:

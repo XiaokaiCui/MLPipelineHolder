@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import pickle
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
@@ -10,12 +9,14 @@ from uuid import uuid4
 
 from .artifact_store import ArtifactStore
 from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
-from .function_registry import default_map, resolve_callable
+from .function_registry import default_map
 from .models import ArtifactRecord, FunctionRegistration, RunRecord
 
 
 class PipelineHandler:
-    def __init__(self, registration_name: str, configuration: Any, local_folder_path: str | Path) -> None:
+    def __init__(
+        self, registration_name: str, configuration: Any, local_folder_path: str | Path
+    ) -> None:
         self.registration_name = registration_name
         self.config = configuration
         self.project_root = Path(local_folder_path)
@@ -42,13 +43,21 @@ class PipelineHandler:
 
     def run_until(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
         block = self.blocks_by_name[block_name]
-        selected = [candidate for candidate in self._sorted_blocks() if candidate.execution_priority <= block.execution_priority]
+        selected = [
+            candidate
+            for candidate in self._sorted_blocks()
+            if candidate.execution_priority <= block.execution_priority
+        ]
         return self._execute_blocks(selected, mode=f"run_until:{block_name}", overrides=overrides)
 
     def run_from(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
         block = self.blocks_by_name[block_name]
         self._invalidate_from_priority(block.execution_priority)
-        selected = [candidate for candidate in self._sorted_blocks() if candidate.execution_priority >= block.execution_priority]
+        selected = [
+            candidate
+            for candidate in self._sorted_blocks()
+            if candidate.execution_priority >= block.execution_priority
+        ]
         return self._execute_blocks(selected, mode=f"run_from:{block_name}", overrides=overrides)
 
     def run_block(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
@@ -118,7 +127,9 @@ class PipelineHandler:
             local_folder_path=target,
         )
         for block_data in state_payload["blocks"]:
-            block = pipeline.add_block(block_data["registration_name"], block_data["execution_priority"])
+            block = pipeline.add_block(
+                block_data["registration_name"], block_data["execution_priority"]
+            )
             for function_data in block_data["functions"]:
                 block.register_function(
                     function_data["import_path"],
@@ -170,7 +181,9 @@ class PipelineHandler:
             pickle.dump(self.config, handle)
 
     def _sorted_blocks(self) -> list[Any]:
-        return sorted(self.blocks, key=lambda block: (block.execution_priority, block.registration_name))
+        return sorted(
+            self.blocks, key=lambda block: (block.execution_priority, block.registration_name)
+        )
 
     def _register_block(self, block: Any) -> None:
         if block.registration_name in self.blocks_by_name:
@@ -227,7 +240,9 @@ class PipelineHandler:
 
     def _config_has_field(self, field_name: str) -> bool:
         if is_dataclass(self.config) and not isinstance(self.config, type):
-            return any(field.name == field_name for field in self.config.__dataclass_fields__.values())
+            return any(
+                field.name == field_name for field in self.config.__dataclass_fields__.values()
+            )
         if isinstance(self.config, dict):
             return field_name in self.config
         return hasattr(self.config, field_name)

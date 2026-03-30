@@ -27,7 +27,11 @@ class ArtifactStore:
         safe_block = block_name.replace("/", "_")
         safe_function = function_name.replace("/", "_")
         safe_variable = variable_name.replace("/", "_")
-        artifact_path = self.artifact_root / safe_block / f"{safe_function}__{safe_variable}__{run_id}__{uuid4().hex}{suffix}"
+        artifact_path = (
+            self.artifact_root
+            / safe_block
+            / f"{safe_function}__{safe_variable}__{run_id}__{uuid4().hex}{suffix}"
+        )
         dump_value(value, serializer, artifact_path)
         return ArtifactRecord(
             variable_name=variable_name,

@@ -18,14 +18,16 @@ def importable(value: int) -> int:
 
 
 class SaveLoadTests(unittest.TestCase):
+    def local_callable(self, value):
+        return value + 1
+
     def test_non_importable_callables_cannot_be_saved(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist", SaveConfig(value=1), tmp_path)
             block = pipeline.add_block("block", 1)
 
-            local_callable = lambda value: value + 1
-            block.register_function(local_callable, ["result"])
+            block.register_function(self.local_callable, ["result"])
 
             with self.assertRaises(PersistenceError):
                 pipeline.save_project(tmp_path / "bundle")
