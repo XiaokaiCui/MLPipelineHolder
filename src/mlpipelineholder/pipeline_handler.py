@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pickle
+import warnings
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -10,6 +12,7 @@ from uuid import uuid4
 from .artifact_store import ArtifactStore
 from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
 from .function_registry import default_map
+from .logger import PipelineLogger
 from .models import ArtifactRecord, FunctionRegistration, RunRecord
 
 
@@ -30,6 +33,13 @@ class PipelineHandler:
         self.artifact_store = ArtifactStore(self.project_root)
         self.metadata_root = self.project_root / "metadata"
         self.metadata_root.mkdir(parents=True, exist_ok=True)
+        self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
+
+    def __str__(self) -> str:
+        return self.describe_pipeline()
+
+    def __repr__(self) -> str:
+        return self.describe_pipeline()
 
     def add_block(self, registration_name: str, execution_priority: int):
         from .execution_block import ExecutionBlock
@@ -37,6 +47,75 @@ class PipelineHandler:
         block = ExecutionBlock(self, registration_name, execution_priority)
         self._register_block(block)
         return block
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        for field_name, value in overrides.items():
+            if not self._config_has_field(field_name):
+                raise ResolutionError(f"Unknown config field: {field_name}")
+            self._set_config_value(field_name, value)
+
+    def get_value(self, variable_name: str) -> Any:
+        if variable_name not in self.para_value_dict:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        value = self.para_value_dict[variable_name]
+        if isinstance(value, ArtifactRecord):
+            return self.artifact_store.load(value)
+        return value
+
+    def describe_pipeline(self) -> str:
+        lines = [
+            f"{self._color('PipelineHandler', 'green')}({self._color(self.registration_name, 'blue')})"
+        ]
+        sorted_blocks = self._sorted_blocks()
+        last_index = len(sorted_blocks) - 1
+        for index, block in enumerate(sorted_blocks):
+            block_prefix = "└──" if index == last_index else "├──"
+            lines.append(
+                f"{block_prefix} {self._color(f'[{block.execution_priority}]', 'cyan')} {self._color(block.registration_name, 'blue')}"
+            )
+            child_indent = "    " if index == last_index else "│   "
+            for function_index, registration in enumerate(block.functions):
+                function_prefix = "└──" if function_index == len(block.functions) - 1 else "├──"
+                output_names = []
+                for output_name in registration.output_names:
+                    output_names.append(
+                        self._color(f"{output_name}*", "red")
+                        if output_name in registration.save_to_disk
+                        else self._color(output_name, "green")
+                    )
+                arguments = self._color(", ".join(registration.input_names), "yellow")
+                lines.append(
+                    f"{child_indent}{function_prefix} {self._color(registration.function_name, 'green')}"
+                    f"({arguments}) -> {', '.join(output_names)}"
+                )
+        return "\n".join(lines)
+
+    def get_result_history(self) -> list[str]:
+        return self.logger.get_result_history()
+
+    def print_result_history(self) -> None:
+        self.logger.print_result_history()
+
+    def clear_result_history(self) -> None:
+        self.logger.clear_result_history()
+
+    def remove_block(self, block_name: str) -> None:
+        if block_name not in self.blocks_by_name:
+            raise RegistrationError(f"Block not registered: {block_name}")
+        block = self.blocks_by_name.pop(block_name)
+        affected_blocks = [
+            candidate
+            for candidate in self.blocks
+            if candidate.execution_priority >= block.execution_priority
+        ]
+        self.blocks = [candidate for candidate in self.blocks if candidate is not block]
+        output_names = {
+            output_name
+            for candidate in affected_blocks
+            for registration in candidate.functions
+            for output_name in registration.output_names
+        }
+        self._invalidate_outputs(output_names)
 
     def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
         return self._execute_blocks(self._sorted_blocks(), mode="run_all", overrides=overrides)
@@ -65,8 +144,12 @@ class PipelineHandler:
         self._invalidate_from_priority(block.execution_priority, include_target=False)
         return self._execute_blocks([block], mode=f"run_block:{block_name}", overrides=overrides)
 
-    def save_project(self, path: str | Path) -> Path:
-        target = Path(path)
+    def save_project(self, path: str | Path | None = None) -> Path:
+        warnings.warn(
+            "Saved pipelines preserve import paths, not historical function behavior; later source changes may affect reloaded pipelines.",
+            stacklevel=2,
+        )
+        target = self.project_root if path is None else Path(path)
         target.mkdir(parents=True, exist_ok=True)
         self._persist_config_snapshot(target / "config.pkl")
 
@@ -101,6 +184,7 @@ class PipelineHandler:
                 "artifact_registry": self.artifact_registry,
                 "produced_by_variable": self.produced_by_variable,
                 "run_history": self.run_history,
+                "log_file_path": str(self.logger.log_file_path),
             }
             with (target / "pipeline_state.pkl").open("wb") as handle:
                 pickle.dump(state_payload, handle)
@@ -112,6 +196,10 @@ class PipelineHandler:
 
     @classmethod
     def load_project(cls, path: str | Path) -> "PipelineHandler":
+        warnings.warn(
+            "Loaded pipelines restore current importable functions, not historical function snapshots; changed source code may alter behavior.",
+            stacklevel=2,
+        )
         target = Path(path)
         try:
             with (target / "config.pkl").open("rb") as handle:
@@ -140,6 +228,9 @@ class PipelineHandler:
         pipeline.artifact_registry = state_payload["artifact_registry"]
         pipeline.produced_by_variable = state_payload["produced_by_variable"]
         pipeline.run_history = state_payload["run_history"]
+        pipeline.logger = PipelineLogger(
+            state_payload.get("log_file_path", pipeline.metadata_root / "pipeline.log")
+        )
         return pipeline
 
     def _execute_blocks(
@@ -159,6 +250,7 @@ class PipelineHandler:
         run_record.config_snapshot_path = str(config_snapshot_path)
         self._persist_config_snapshot(config_snapshot_path)
         self.run_history.append(run_record)
+        self.logger.info(f"Starting {mode} with run_id={run_id}")
 
         try:
             for block in blocks:
@@ -166,9 +258,11 @@ class PipelineHandler:
                 run_record.executed_blocks.append(block.registration_name)
                 run_record.produced_outputs.extend(produced_outputs)
             run_record.status = "success"
+            self.logger.info(f"Completed {mode} with run_id={run_id}")
         except Exception as exc:
             run_record.status = "failed"
             run_record.error_message = str(exc)
+            self.logger.error(f"Failed {mode} with run_id={run_id}: {exc}")
             if isinstance(exc, (ExecutionError, ResolutionError)):
                 raise
             raise ExecutionError("Pipeline execution failed") from exc
@@ -191,8 +285,23 @@ class PipelineHandler:
             if existing is not block:
                 raise RegistrationError(f"Block already registered: {block.registration_name}")
             return
+        for existing_block in self.blocks:
+            if existing_block.execution_priority == block.execution_priority:
+                raise RegistrationError(
+                    f"Execution priority already registered: {block.execution_priority}"
+                )
         self.blocks.append(block)
         self.blocks_by_name[block.registration_name] = block
+
+    def _invalidate_outputs(self, output_names: set[str]) -> None:
+        for output_name in output_names:
+            existing_value = self.para_value_dict.pop(output_name, None)
+            artifact = self.artifact_registry.pop(output_name, None)
+            self.produced_by_variable.pop(output_name, None)
+            if isinstance(existing_value, ArtifactRecord):
+                artifact = existing_value
+            if artifact is not None:
+                self.artifact_store.delete(artifact)
 
     def _validate_new_outputs(self, block: Any, registration: FunctionRegistration) -> None:
         existing_outputs = {
@@ -218,7 +327,9 @@ class PipelineHandler:
         loaded_artifacts: list[str] = []
 
         for input_name in registration.input_names:
-            if input_name in overrides:
+            if input_name == "logger":
+                value = self.logger
+            elif input_name in overrides:
                 value = overrides[input_name]
             elif input_name in self.para_value_dict:
                 value = self.para_value_dict[input_name]
@@ -254,21 +365,28 @@ class PipelineHandler:
             return self.config[field_name]
         return getattr(self.config, field_name)
 
+    def _set_config_value(self, field_name: str, value: Any) -> None:
+        if is_dataclass(self.config) and not isinstance(self.config, type):
+            setattr(self.config, field_name, value)
+            return
+        if isinstance(self.config, dict):
+            self.config[field_name] = value
+            return
+        setattr(self.config, field_name, value)
+
     def _invalidate_from_priority(self, priority: int, include_target: bool = True) -> None:
-        for block in self._sorted_blocks():
-            if block.execution_priority < priority:
-                continue
-            if block.execution_priority == priority and not include_target:
-                continue
-            for registration in block.functions:
-                for output_name in registration.output_names:
-                    existing_value = self.para_value_dict.pop(output_name, None)
-                    artifact = self.artifact_registry.pop(output_name, None)
-                    self.produced_by_variable.pop(output_name, None)
-                    if isinstance(existing_value, ArtifactRecord):
-                        artifact = existing_value
-                    if artifact is not None:
-                        self.artifact_store.delete(artifact)
+        output_names = {
+            output_name
+            for block in self._sorted_blocks()
+            if block.execution_priority >= priority
+            and (include_target or block.execution_priority != priority)
+            for registration in block.functions
+            for output_name in registration.output_names
+        }
+        self._invalidate_outputs(output_names)
+
+    def _color(self, text: str, color: str) -> str:
+        return import_module("termcolor").colored(text, color, force_color=True)
 
     def config_as_dict(self) -> dict[str, Any]:
         if is_dataclass(self.config) and not isinstance(self.config, type):

@@ -1,12 +1,17 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
-[project]
+[tool.poetry]
 name = "mlpipelineholder"
 version = "0.1.0"
 description = "Lightweight machine learning pipeline handler"
-requires-python = ">=3.11"
+authors = []
+packages = [{ include = "mlpipelineholder", from = "src" }]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+termcolor = "*"
+numpy = "*"
+
+[tool.poetry.group.dev.dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

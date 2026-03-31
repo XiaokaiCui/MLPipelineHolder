@@ -64,6 +64,27 @@ class ExecutionBlock:
         self.parent._register_block(self)
         return registration
 
+    def remove_function(self, function_name: str) -> None:
+        matches = [registration for registration in self.functions if registration.function_name == function_name]
+        if not matches:
+            raise RegistrationError(f"Function not registered in block '{self.registration_name}': {function_name}")
+        if len(matches) > 1:
+            raise RegistrationError(
+                f"Multiple functions named '{function_name}' exist in block '{self.registration_name}'"
+            )
+
+        target = matches[0]
+        affected_output_names = set(target.output_names)
+        downstream_output_names = {
+            output_name
+            for block in self.parent._sorted_blocks()
+            if block.execution_priority > self.execution_priority
+            for registration in block.functions
+            for output_name in registration.output_names
+        }
+        self.functions.remove(target)
+        self.parent._invalidate_outputs(affected_output_names.union(downstream_output_names))
+
     def execute(self, run_id: str, overrides: dict[str, Any] | None = None) -> list[str]:
         if not self.functions:
             return []

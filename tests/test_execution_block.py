@@ -57,3 +57,32 @@ class ExecutionBlockTests(unittest.TestCase):
 
             with self.assertRaises(RegistrationError):
                 block.register_function(passthrough, ["result"], save_to_disk=["not_result"])
+
+    def test_remove_function_invalidates_its_outputs_and_downstream_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("remove-function", BlockConfig(value=2), tmp_path)
+            first = pipeline.add_block("first", 1)
+            first.register_function(source, ["seed"])
+            second = pipeline.add_block("second", 2)
+            second.register_function(passthrough, ["middle"])
+            third = pipeline.add_block("third", 3)
+            third.register_function(passthrough, ["final"])
+            pipeline.run_all()
+
+            second.remove_function("passthrough")
+
+            self.assertEqual(len(second.functions), 0)
+            self.assertNotIn("middle", pipeline.para_value_dict)
+            self.assertNotIn("final", pipeline.para_value_dict)
+            self.assertIn("seed", pipeline.para_value_dict)
+
+    def test_remove_function_rejects_missing_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("remove-function", BlockConfig(value=2), tmp_path)
+            block = pipeline.add_block("block", 1)
+            block.register_function(source, ["seed"])
+
+            with self.assertRaises(RegistrationError):
+                block.remove_function("missing")

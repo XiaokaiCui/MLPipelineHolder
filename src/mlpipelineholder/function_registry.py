@@ -28,10 +28,16 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
     qualname = getattr(
         function_or_path, "__qualname__", getattr(function_or_path, "__name__", "callable")
     )
+    function_name = getattr(function_or_path, "__name__", qualname)
     import_path = None
-    if module_name and "<locals>" not in qualname:
+    if (
+        module_name
+        and inspect.isfunction(function_or_path)
+        and "<locals>" not in qualname
+        and function_name != "<lambda>"
+    ):
         import_path = f"{module_name}.{qualname}"
-    return function_or_path, import_path, getattr(function_or_path, "__name__", qualname)
+    return function_or_path, import_path, function_name
 
 
 def inspect_input_names(callable_obj: Any) -> list[str]:

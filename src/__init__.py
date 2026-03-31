@@ -4,3 +4,4 @@ from .mlpipelineholder import ExecutionError as ExecutionError
 from .mlpipelineholder import PersistenceError as PersistenceError
 from .mlpipelineholder import PipelineError as PipelineError
 from .mlpipelineholder import RegistrationError as RegistrationError
+from .mlpipelineholder import PipelineLogger as PipelineLogger

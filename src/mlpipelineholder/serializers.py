@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pickle
 from importlib.util import find_spec
 from pathlib import Path
@@ -7,6 +8,17 @@ from typing import Any
 
 
 def choose_serializer(value: Any) -> str:
+    if _is_json_serializable(value):
+        return "json"
+
+    try:
+        import numpy as np  # type: ignore
+
+        if isinstance(value, np.ndarray):
+            return "numpy"
+    except Exception:
+        pass
+
     try:
         import torch  # type: ignore
 
@@ -28,8 +40,18 @@ def choose_serializer(value: Any) -> str:
     return "pickle"
 
 
+def _is_json_serializable(value: Any) -> bool:
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def extension_for(serializer: str) -> str:
     return {
+        "json": ".json",
+        "numpy": ".npy",
         "pickle": ".pkl",
         "torch": ".pt",
         "feather": ".feather",
@@ -38,6 +60,15 @@ def extension_for(serializer: str) -> str:
 
 def dump_value(value: Any, serializer: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if serializer == "json":
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle)
+        return
+    if serializer == "numpy":
+        import numpy as np  # type: ignore
+
+        np.save(path, value, allow_pickle=False)
+        return
     if serializer == "pickle":
         with path.open("wb") as handle:
             pickle.dump(value, handle)
@@ -54,6 +85,13 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
 
 
 def load_value(serializer: str, path: Path) -> Any:
+    if serializer == "json":
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    if serializer == "numpy":
+        import numpy as np  # type: ignore
+
+        return np.load(path, allow_pickle=False)
     if serializer == "pickle":
         with path.open("rb") as handle:
             return pickle.load(handle)
