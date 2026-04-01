@@ -91,7 +91,11 @@ class PipelineHandler:
     def update_config(self, overrides: dict[str, Any]) -> None:
         for field_name, value in overrides.items():
             if not self._config_has_field(self.config, field_name):
-                raise ResolutionError(f"Unknown config field: {field_name}")
+                if field_name in self.list_declared_outputs():
+                    raise ExecutionError(f"Found an output object has the same name with the config: {field_name}")
+                self.logger.warning(f"To add new config field: {field_name}")
+            else:
+                self.logger.warning(f"To update existing config field: {field_name}")
             self._set_config_value(field_name, value)
 
     def get_value(self, variable_name: str) -> Any:
