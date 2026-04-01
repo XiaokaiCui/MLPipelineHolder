@@ -9,6 +9,8 @@ from .serializers import choose_serializer, dump_value, extension_for, load_valu
 
 
 class ArtifactStore:
+    """Stores disk-backed pipeline outputs under the project artifact tree."""
+
     def __init__(self, project_root: str | Path) -> None:
         self.project_root = Path(project_root)
         self.artifact_root = self.project_root / "artifacts"

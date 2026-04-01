@@ -8,6 +8,8 @@ from typing import Any
 
 
 def choose_serializer(value: Any) -> str:
+    """Pick the lightest supported serializer for a runtime value."""
+
     if _is_json_serializable(value):
         return "json"
 
@@ -59,6 +61,8 @@ def extension_for(serializer: str) -> str:
 
 
 def dump_value(value: Any, serializer: str, path: Path) -> None:
+    """Write a value to disk using the selected serializer."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     if serializer == "json":
         with path.open("w", encoding="utf-8") as handle:
@@ -85,6 +89,8 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
 
 
 def load_value(serializer: str, path: Path) -> Any:
+    """Load a value from disk using the recorded serializer."""
+
     if serializer == "json":
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)

@@ -17,6 +17,10 @@ def importable(value: int) -> int:
     return value + 1
 
 
+def mapped_variadic(obj: int, *more_values: int, scale: int = 1, **extra_values: int) -> int:
+    return (obj + sum(more_values) + sum(extra_values.values())) * scale
+
+
 class SaveLoadTests(unittest.TestCase):
     def local_callable(self, value):
         return value + 1
@@ -45,3 +49,33 @@ class SaveLoadTests(unittest.TestCase):
             loaded = PipelineHandler.load_project(save_dir)
 
             self.assertEqual(loaded.para_value_dict["result"], 3)
+
+    def test_mapping_metadata_round_trips_for_variadic_function(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "persist-mapped",
+                {
+                    "payload": 2,
+                    "scale_value": 3,
+                    "extra_args": [4, 5],
+                    "extra_kwargs": {"bonus": 6},
+                },
+                tmp_path / "project",
+            )
+            block = pipeline.add_block("block", 1)
+            block.register_function(
+                mapped_variadic,
+                ["result"],
+                kw_mapping={"obj": "payload", "scale": "scale_value"},
+                var_pos_name="extra_args",
+                var_kw_name="extra_kwargs",
+            )
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir)
+            loaded.run_all()
+
+            self.assertEqual(loaded.get_value("result"), 51)

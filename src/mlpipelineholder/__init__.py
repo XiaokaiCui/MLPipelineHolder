@@ -6,6 +6,7 @@ from .exceptions import (
     RegistrationError,
     ResolutionError,
 )
+from .function_registry import rename_args
 from .gate_block import GateBlock
 from .logger import PipelineLogger
 from .pipeline_handler import PipelineHandler
@@ -20,4 +21,5 @@ __all__ = [
     "PipelineHandler",
     "RegistrationError",
     "ResolutionError",
+    "rename_args",
 ]

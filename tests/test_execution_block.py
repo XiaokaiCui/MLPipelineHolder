@@ -25,6 +25,10 @@ def passthrough(value: int) -> int:
     return value
 
 
+def variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_items: int) -> int:
+    return (base + sum(extra_values) + sum(extra_items.values())) * factor
+
+
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -37,17 +41,40 @@ class ExecutionBlockTests(unittest.TestCase):
             with self.assertRaises(ExecutionError):
                 pipeline.run_all()
 
-    def test_variadic_functions_are_not_supported(self) -> None:
+    def test_variadic_functions_work_with_renamed_inputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "variadic",
+                {
+                    "base_value": 1,
+                    "factor_value": 2,
+                    "function_args": [3, 4],
+                    "function_kwargs": {"bonus": 5},
+                },
+                tmp_path,
+            )
+            block = pipeline.add_block("block", 1)
+            block.register_function(
+                variadic_sum,
+                ["result"],
+                kw_mapping={"base": "base_value", "factor": "factor_value"},
+                var_pos_name="function_args",
+                var_kw_name="function_kwargs",
+            )
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("result"), 26)
+
+    def test_pos_mapping_is_rejected(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("variadic", BlockConfig(value=1), tmp_path)
             block = pipeline.add_block("block", 1)
 
-            def bad(*args: int) -> int:
-                return sum(args)
-
             with self.assertRaises(RegistrationError):
-                block.register_function(bad, ["result"])
+                block.register_function(passthrough, ["result"], pos_mapping={0: 1})
 
     def test_save_to_disk_must_be_subset_of_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:

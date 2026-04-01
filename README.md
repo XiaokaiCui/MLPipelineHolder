@@ -26,6 +26,7 @@ Current verified behavior includes:
 - resolved value access for disk-backed artifacts
 - colorful pipeline chart output
 - colorful UTC logger output with custom `result` level
+- optional capture of `print(...)` output into the pipeline log with default tee behavior
 - result-history cleanup without deleting persisted logs
 - safe block removal with state cleanup
 - safe function removal inside a block with state cleanup
@@ -33,6 +34,7 @@ Current verified behavior includes:
 - nested child pipelines with shared upstream/downstream outputs
 - optional gate block for conditional pipeline skipping
 - parent-level output override reporting
+- renamed keyword and variadic function inputs for safer registration
 
 ## Installation and environment
 
@@ -86,6 +88,7 @@ Exports from `src.mlpipelineholder`:
 - `ExecutionBlock`
 - `GateBlock`
 - `PipelineLogger`
+- `rename_args`
 - `PipelineError`
 - `RegistrationError`
 - `ResolutionError`
@@ -164,7 +167,7 @@ Example:
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.mlpipelineholder import PipelineHandler
+from mlpipelineholder import PipelineHandler
 
 
 @dataclass
@@ -189,6 +192,38 @@ setup.register_function(create_seed, ["seed"])
 features = pipeline.add_block("features", 2)
 features.register_function(create_features, ["feature_a", "feature_b"])
 ```
+
+### Rename function inputs and use variadics safely
+
+When a function uses generic names like `obj`, or uses `*args` / `**kwargs`, you can expose safer pipeline-facing names during registration.
+
+```python
+def mapped_variadic(obj: int, *more_values: int, scale: int = 1, **extra_values: int) -> int:
+    return (obj + sum(more_values) + sum(extra_values.values())) * scale
+
+
+block.register_function(
+    mapped_variadic,
+    ["result"],
+    kw_mapping={"obj": "payload", "scale": "scale_value"},
+    var_pos_name="extra_args",
+    var_kw_name="extra_kwargs",
+)
+```
+
+This lets the pipeline resolve:
+
+- `payload` → original `obj`
+- `scale_value` → original `scale`
+- `extra_args` → original `*more_values`
+- `extra_kwargs` → original `**extra_values`
+
+Rules:
+
+- `pos_mapping` is intentionally not supported
+- renamed variadic positional values must resolve to a `list` or `tuple`
+- renamed variadic keyword values must resolve to a `dict`
+- mapping metadata is preserved on save/load
 
 ### Run modes
 
@@ -243,7 +278,7 @@ Full example:
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.mlpipelineholder import PipelineHandler
+from mlpipelineholder import PipelineHandler
 
 
 @dataclass
@@ -377,12 +412,14 @@ Supported methods:
 - `error(...)`
 - `critical(...)`
 - `result(...)`
+- `print(...)`
 
 Behavior:
 
 - every log line includes a UTC timestamp
 - all log lines are appended to `metadata/pipeline.log`
 - `result(...)` messages are kept in a separate in-memory history list
+- `print(...)` inside registered functions can also be captured into the logger
 
 Logger helpers:
 
@@ -390,9 +427,16 @@ Logger helpers:
 history = pipeline.get_result_history()
 pipeline.print_result_history()
 pipeline.clear_result_history()
+pipeline.set_print_capture_mode("tee")
 ```
 
 `clear_result_history()` only clears in-memory result history. It does not modify `metadata/pipeline.log`.
+
+Print capture modes:
+
+- `tee` (default): send `print(...)` output to both normal stdout and the pipeline log
+- `logger_only`: capture `print(...)` output only into the pipeline log
+- `off`: leave normal `print(...)` behavior unchanged
 
 ## Example script
 
@@ -411,7 +455,6 @@ The example demonstrates:
 - chart rendering
 - injected logger usage
 - result history collection
-- later-output override behavior
 
 The nested example demonstrates:
 
@@ -420,7 +463,6 @@ The nested example demonstrates:
 - child config overriding parent config inside the child only
 - parent consumption of child outputs
 - hierarchical chart output
-- parent-level conflict reporting
 
 ## Persistence model
 
@@ -438,7 +480,9 @@ Projects are saved as:
 - child pipeline priorities must also be unique at the parent level
 - duplicate outputs inside the same parallel block are rejected
 - duplicate outputs across different parent-level nodes are allowed and resolved by execution order
-- `*args` and `**kwargs` are not supported for registered functions
+- renamed keyword arguments are supported during registration
+- renamed `*args` / `**kwargs` are supported during registration
+- `pos_mapping` is not supported
 - functions inside one block cannot depend on outputs from the same block
 - non-importable callables cannot be saved for load/replay
 
@@ -504,12 +548,65 @@ python -m unittest discover -s tests -v
 - no distributed execution
 - no separate per-run log file yet
 - colors are optimized for notebook/CLI readability, but exact rendering still depends on the terminal frontend
+- save bundles currently preserve metadata/state references for disk-backed artifacts rather than creating a fully self-contained artifact snapshot
+- print capture uses process-level stdout redirection, so heavily parallel print-heavy functions may still interleave output
 
 Nested pipeline notes:
 
 - nested pipelines are persisted recursively
 - child runtime files are moved under the parent project path on registration
 - child result-history display continues to read from the child’s historical result log file after registration
+
+## Caveats
+
+### 1. Save/load is not a full artifact snapshot
+
+`save_project()` saves the pipeline definition, config, runtime metadata, and artifact references, but it does **not** package every disk-backed file into a fully portable bundle.
+
+What this means in practice:
+
+- disk-backed outputs are restored through saved `ArtifactRecord` file paths
+- metadata such as historical log paths and config snapshot paths also remain path-based
+- the normal workflow is safe when the pipeline continues to live under the same `project_root`
+- portability is weaker when saving to a different folder as an export bundle, or when old project files are moved/deleted later
+
+In other words, the current save/load behavior is best treated as:
+
+- good for restoring pipeline state in the same project tree
+- not yet a guaranteed self-contained archive format
+
+### 2. Print capture under parallel threaded execution is not fully robust
+
+The pipeline can capture `print(...)` output from registered functions and send it into the logger.
+
+Current implementation details:
+
+- print capture uses `redirect_stdout(...)`
+- blocks can still run multiple functions in parallel using threads
+
+This is usually fine for normal usage, but it has an important caveat:
+
+- `stdout` is still process-level state
+- print-heavy concurrent functions may interleave output or attribute lines less cleanly than explicit logger calls
+
+Recommendation:
+
+- use the logger directly for important structured messages
+- treat captured `print(...)` as a convenience feature, not the strongest concurrency-safe logging path
+
+### 3. Child result history after attachment is intentionally asymmetric
+
+When a child pipeline is attached to a parent pipeline:
+
+- future execution uses the **parent logger**
+- the child pipeline’s historical result-history reader still points at the child’s historical result log path
+
+This preserves access to pre-attachment child history, but it also means there are two concepts in play:
+
+- current runtime logging ownership: parent logger
+- historical child result display: child historical log source
+
+So the behavior is workable, but conceptually brittle. It is best understood as a compatibility-oriented compromise rather than a fully unified nested logging model.
 
 ## Recommended next steps
 

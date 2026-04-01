@@ -8,6 +8,8 @@ from typing import Any
 
 @dataclass(slots=True)
 class ArtifactRecord:
+    """Metadata for one disk-backed pipeline value."""
+
     variable_name: str
     serializer: str
     file_path: str
@@ -22,16 +24,23 @@ class ArtifactRecord:
 
 @dataclass(slots=True)
 class FunctionRegistration:
+    """Captured registration metadata used for execution, charting, and persistence."""
+
     function_name: str
     import_path: str | None
     callable_obj: Any
     input_names: list[str]
     output_names: list[str]
     save_to_disk: set[str]
+    kw_mapping: dict[str, str] = field(default_factory=dict)
+    var_pos_name: str | None = None
+    var_kw_name: str | None = None
 
 
 @dataclass(slots=True)
 class FunctionExecutionResult:
+    """Normalized result of one registered function invocation."""
+
     function_name: str
     outputs: dict[str, Any]
     loaded_artifact_inputs: list[str]
@@ -39,6 +48,8 @@ class FunctionExecutionResult:
 
 @dataclass(slots=True)
 class RunRecord:
+    """Execution summary for one pipeline or sub-pipeline run."""
+
     run_id: str
     mode: str
     executed_blocks: list[str]

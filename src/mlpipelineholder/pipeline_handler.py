@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import pickle
 import shutil
+import sys
 import warnings
+from contextlib import redirect_stdout
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from importlib import import_module
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -35,6 +39,7 @@ class PipelineHandler:
         self.metadata_root = self.project_root / "metadata"
         self.metadata_root.mkdir(parents=True, exist_ok=True)
         self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
+        self.print_capture_mode = "tee"
         self.historical_result_log_path: str | None = None
         self._attached_result_history_override: list[str] | None = None
 
@@ -73,6 +78,7 @@ class PipelineHandler:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
         if registration_name is not None:
             child_pipeline.registration_name = registration_name
+        self._validate_node_registration(child_pipeline, execution_priority)
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
         return child_pipeline
@@ -97,6 +103,10 @@ class PipelineHandler:
         return value
 
     def get_result_history(self) -> list[str]:
+        # Attached child pipelines intentionally keep reading historical RESULT lines from
+        # their own pre-attachment log path, while new runtime logging flows through the
+        # parent logger. This preserves old child history but means nested logging is not
+        # fully unified after attachment.
         if self.parent_pipeline is not None and self.historical_result_log_path is not None:
             if self._attached_result_history_override is not None:
                 return list(self._attached_result_history_override)
@@ -112,6 +122,11 @@ class PipelineHandler:
             self._attached_result_history_override = []
             return
         self.logger.clear_result_history()
+
+    def set_print_capture_mode(self, mode: str) -> None:
+        if mode not in {"tee", "logger_only", "off"}:
+            raise RegistrationError("print capture mode must be one of: tee, logger_only, off")
+        self.print_capture_mode = mode
 
     def list_declared_outputs(self) -> set[str]:
         outputs: set[str] = set()
@@ -166,7 +181,11 @@ class PipelineHandler:
         self._invalidate_from_priority(block.execution_priority)
 
     def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
-        self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority) if self.nodes else None
+        (
+            self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
+            if self.nodes
+            else None
+        )
         return self._execute_nodes(
             self._sorted_nodes(),
             mode="run_all",
@@ -176,9 +195,17 @@ class PipelineHandler:
         )[0]
 
     def run_until(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self.nodes_by_name[block_name]
-        self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority) if self.nodes else None
-        selected = [candidate for candidate in self._sorted_nodes() if candidate.execution_priority <= node.execution_priority]
+        node = self._get_node_or_raise(block_name)
+        (
+            self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
+            if self.nodes
+            else None
+        )
+        selected = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority <= node.execution_priority
+        ]
         return self._execute_nodes(
             selected,
             mode=f"run_until:{block_name}",
@@ -188,10 +215,14 @@ class PipelineHandler:
         )[0]
 
     def run_from(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self.nodes_by_name[block_name]
+        node = self._get_node_or_raise(block_name)
         self._invalidate_from_priority(node.execution_priority)
         return self._execute_nodes(
-            [candidate for candidate in self._sorted_nodes() if candidate.execution_priority >= node.execution_priority],
+            [
+                candidate
+                for candidate in self._sorted_nodes()
+                if candidate.execution_priority >= node.execution_priority
+            ],
             mode=f"run_from:{block_name}",
             overrides=overrides,
             upstream_outputs=self._visible_outputs_before_priority(node.execution_priority),
@@ -199,7 +230,7 @@ class PipelineHandler:
         )[0]
 
     def run_block(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self.nodes_by_name[block_name]
+        node = self._get_node_or_raise(block_name)
         self._invalidate_from_priority(node.execution_priority)
         return self._execute_nodes(
             [node],
@@ -264,6 +295,9 @@ class PipelineHandler:
                         function_payload["import_path"],
                         function_payload["output_names"],
                         function_payload["save_to_disk"],
+                        kw_mapping=function_payload.get("kw_mapping"),
+                        var_pos_name=function_payload.get("var_pos_name"),
+                        var_kw_name=function_payload.get("var_kw_name"),
                     )
             else:
                 child = cls._from_payload(node_payload["payload"], project_root, parent=pipeline)
@@ -313,6 +347,9 @@ class PipelineHandler:
                     "import_path": registration.import_path,
                     "output_names": registration.output_names,
                     "save_to_disk": sorted(registration.save_to_disk),
+                    "kw_mapping": registration.kw_mapping,
+                    "var_pos_name": registration.var_pos_name,
+                    "var_kw_name": registration.var_kw_name,
                 }
             )
         return {
@@ -356,7 +393,11 @@ class PipelineHandler:
                     if output_name not in base_visible
                 }
                 for node in nodes:
-                    self.producer_outputs.pop(node.registration_name, None)
+                    self._delete_artifacts_from_outputs(
+                        self.producer_outputs.pop(node.registration_name, {})
+                    )
+                    if isinstance(node, PipelineHandler):
+                        node._invalidate_all_outputs()
                 self.para_value_dict = skipped_outputs
                 self.artifact_registry = {}
                 run_record.status = "skipped"
@@ -403,24 +444,37 @@ class PipelineHandler:
             run_record.finished_at = datetime.now(UTC).isoformat()
 
     def _register_node(self, node: Any) -> None:
-        existing = self.nodes_by_name.get(node.registration_name)
-        if existing is not None and existing is not node:
-            raise RegistrationError(f"Node already registered: {node.registration_name}")
-        for existing_node in self.nodes:
-            if existing_node is node:
-                return
-            if existing_node.execution_priority == node.execution_priority:
-                raise RegistrationError(
-                    f"Execution priority already registered: {node.execution_priority}"
-                )
+        if self.nodes_by_name.get(node.registration_name) is node:
+            return
+        self._validate_node_registration(node, node.execution_priority)
         self.nodes.append(node)
         self.nodes_by_name[node.registration_name] = node
         if not isinstance(node, PipelineHandler):
             self.blocks.append(node)
             self.blocks_by_name[node.registration_name] = node
 
+    def _validate_node_registration(self, node: Any, execution_priority: int | None) -> None:
+        existing = self.nodes_by_name.get(node.registration_name)
+        if existing is not None and existing is not node:
+            raise RegistrationError(f"Node already registered: {node.registration_name}")
+        for existing_node in self.nodes:
+            if existing_node is node:
+                return
+            if existing_node.execution_priority == execution_priority:
+                raise RegistrationError(
+                    f"Execution priority already registered: {execution_priority}"
+                )
+
+    def _get_node_or_raise(self, block_name: str) -> Any:
+        node = self.nodes_by_name.get(block_name)
+        if node is None:
+            raise RegistrationError(f"Node not registered: {block_name}")
+        return node
+
     def _sorted_nodes(self) -> list[Any]:
-        return sorted(self.nodes, key=lambda node: (node.execution_priority, node.registration_name))
+        return sorted(
+            self.nodes, key=lambda node: (node.execution_priority, node.registration_name)
+        )
 
     def _node_declared_outputs(self, node: Any) -> set[str]:
         if isinstance(node, PipelineHandler):
@@ -428,9 +482,14 @@ class PipelineHandler:
         return node.declared_outputs()
 
     def _rebuild_visible_state(self, upstream_outputs: dict[str, Any] | None = None) -> None:
+        all_artifacts: list[ArtifactRecord] = []
         visible = dict(upstream_outputs or {})
         for node in self._sorted_nodes():
-            visible.update(self.producer_outputs.get(node.registration_name, {}))
+            produced_outputs = self.producer_outputs.get(node.registration_name, {})
+            for value in produced_outputs.values():
+                if isinstance(value, ArtifactRecord):
+                    all_artifacts.append(value)
+            visible.update(produced_outputs)
         declared_outputs = self.list_declared_outputs()
         self.para_value_dict = {
             output_name: visible[output_name]
@@ -442,6 +501,15 @@ class PipelineHandler:
             for output_name, value in self.para_value_dict.items()
             if isinstance(value, ArtifactRecord)
         }
+        active_artifacts = {
+            id(value)
+            for value in self.para_value_dict.values()
+            if isinstance(value, ArtifactRecord)
+        }
+        for artifact in all_artifacts:
+            if id(artifact) in active_artifacts:
+                continue
+            self.artifact_store.delete(artifact)
 
     def _visible_outputs_before_priority(
         self,
@@ -473,40 +541,131 @@ class PipelineHandler:
             config.update(pipeline.config_as_dict())
         return config
 
-    def _resolve_arguments(
+    def _prepare_call_arguments(
         self,
         registration: FunctionRegistration,
         overrides: dict[str, Any],
         visible_outputs: dict[str, Any],
         parent_config: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], list[str]]:
+    ) -> tuple[list[Any], dict[str, Any], list[str]]:
         defaults = default_map(registration.callable_obj)
-        resolved: dict[str, Any] = {}
+        signature = inspect.signature(registration.callable_obj)
+        parameters = list(signature.parameters.values())
+        var_pos_index = next(
+            (
+                index
+                for index, parameter in enumerate(parameters)
+                if parameter.kind == inspect.Parameter.VAR_POSITIONAL
+            ),
+            None,
+        )
+        positional_args: list[Any] = []
+        keyword_args: dict[str, Any] = {}
         loaded_artifacts: list[str] = []
 
-        for input_name in registration.input_names:
-            if input_name == "logger":
-                value = self.logger
-            elif input_name in overrides:
-                value = overrides[input_name]
-            elif input_name in visible_outputs:
-                value = visible_outputs[input_name]
-            elif self._config_has_field(self.config, input_name):
-                value = self._config_value(self.config, input_name)
-            elif parent_config and input_name in parent_config:
-                value = parent_config[input_name]
-            elif input_name in defaults:
-                value = defaults[input_name]
-            else:
-                raise ResolutionError(
-                    f"Cannot resolve argument '{input_name}' for function '{registration.function_name}'"
+        for index, parameter in enumerate(parameters):
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                input_name = parameter.name
+                value = self._resolve_named_input(
+                    input_name,
+                    registration.function_name,
+                    overrides,
+                    visible_outputs,
+                    parent_config,
+                    defaults,
+                    loaded_artifacts,
+                    allow_missing=True,
+                    missing_value=[],
                 )
+                if not isinstance(value, (list, tuple)):
+                    raise ResolutionError(
+                        f"Variadic positional argument '{input_name}' for function '{registration.function_name}' must resolve to a list or tuple"
+                    )
+                positional_args.extend(value)
+                continue
 
-            if isinstance(value, ArtifactRecord):
-                value = self.artifact_store.load(value)
-                loaded_artifacts.append(input_name)
-            resolved[input_name] = value
-        return resolved, loaded_artifacts
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                input_name = parameter.name
+                value = self._resolve_named_input(
+                    input_name,
+                    registration.function_name,
+                    overrides,
+                    visible_outputs,
+                    parent_config,
+                    defaults,
+                    loaded_artifacts,
+                    allow_missing=True,
+                    missing_value={},
+                )
+                if not isinstance(value, dict):
+                    raise ResolutionError(
+                        f"Variadic keyword argument '{input_name}' for function '{registration.function_name}' must resolve to a dict"
+                    )
+                overlap = set(value).intersection(keyword_args)
+                if overlap:
+                    raise ResolutionError(
+                        f"Variadic keyword argument '{input_name}' conflicts with explicit arguments: {sorted(overlap)}"
+                    )
+                keyword_args.update(value)
+                continue
+
+            input_name = parameter.name
+            value = self._resolve_named_input(
+                input_name,
+                registration.function_name,
+                overrides,
+                visible_outputs,
+                parent_config,
+                defaults,
+                loaded_artifacts,
+            )
+
+            if parameter.kind == inspect.Parameter.POSITIONAL_ONLY or (
+                parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and var_pos_index is not None
+                and index < var_pos_index
+            ):
+                positional_args.append(value)
+            else:
+                keyword_args[input_name] = value
+        return positional_args, keyword_args, loaded_artifacts
+
+    def _resolve_named_input(
+        self,
+        input_name: str,
+        function_name: str,
+        overrides: dict[str, Any],
+        visible_outputs: dict[str, Any],
+        parent_config: dict[str, Any] | None,
+        defaults: dict[str, Any],
+        loaded_artifacts: list[str],
+        *,
+        allow_missing: bool = False,
+        missing_value: Any = None,
+    ) -> Any:
+        if input_name == "logger":
+            value = self.logger
+        elif input_name in overrides:
+            value = overrides[input_name]
+        elif input_name in visible_outputs:
+            value = visible_outputs[input_name]
+        elif self._config_has_field(self.config, input_name):
+            value = self._config_value(self.config, input_name)
+        elif parent_config and input_name in parent_config:
+            value = parent_config[input_name]
+        elif input_name in defaults:
+            value = defaults[input_name]
+        elif allow_missing:
+            value = missing_value
+        else:
+            raise ResolutionError(
+                f"Cannot resolve argument '{input_name}' for function '{function_name}'"
+            )
+
+        if isinstance(value, ArtifactRecord):
+            value = self.artifact_store.load(value)
+            loaded_artifacts.append(input_name)
+        return value
 
     def _config_has_field(self, config_obj: Any, field_name: str) -> bool:
         if is_dataclass(config_obj) and not isinstance(config_obj, type):
@@ -541,12 +700,16 @@ class PipelineHandler:
                 continue
             if node.execution_priority == priority and not include_target:
                 continue
-            self.producer_outputs.pop(node.registration_name, None)
+            self._delete_artifacts_from_outputs(
+                self.producer_outputs.pop(node.registration_name, {})
+            )
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
         self._rebuild_visible_state(self._incoming_parent_outputs())
 
     def _invalidate_all_outputs(self) -> None:
+        for outputs in self.producer_outputs.values():
+            self._delete_artifacts_from_outputs(outputs)
         self.producer_outputs.clear()
         self.para_value_dict.clear()
         self.artifact_registry.clear()
@@ -554,11 +717,19 @@ class PipelineHandler:
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
 
+    def _delete_artifacts_from_outputs(self, outputs: dict[str, Any]) -> None:
+        for value in outputs.values():
+            if isinstance(value, ArtifactRecord):
+                self.artifact_store.delete(value)
+
     def _persist_config_snapshot(self, path: Path) -> None:
         with path.open("wb") as handle:
             pickle.dump(self.config, handle)
 
     def _attach_to_parent(self, parent: "PipelineHandler", execution_priority: int) -> None:
+        # Registration moves the child's working tree underneath the parent project root.
+        # Future execution uses the parent logger, but historical child RESULT display still
+        # reads from the child-side historical log path captured here.
         if self.parent_pipeline is not None and self.parent_pipeline is not parent:
             raise RegistrationError(
                 f"Pipeline '{self.registration_name}' is already attached to another parent"
@@ -602,7 +773,9 @@ class PipelineHandler:
             self.para_value_dict[key] = rewrite_value(value)
         for key, value in list(self.artifact_registry.items()):
             self.artifact_registry[key] = rewrite_value(value)
-        if self.historical_result_log_path and self.historical_result_log_path.startswith(old_prefix):
+        if self.historical_result_log_path and self.historical_result_log_path.startswith(
+            old_prefix
+        ):
             self.historical_result_log_path = self.historical_result_log_path.replace(
                 old_prefix,
                 new_prefix,
@@ -652,9 +825,11 @@ class PipelineHandler:
             for function_index, registration in enumerate(node.functions):
                 function_prefix = "└──" if function_index == len(node.functions) - 1 else "├──"
                 outputs = [
-                    self._color(f"{output_name}*", "red")
-                    if output_name in registration.save_to_disk
-                    else self._color(output_name, "green")
+                    (
+                        self._color(f"{output_name}*", "red")
+                        if output_name in registration.save_to_disk
+                        else self._color(output_name, "green")
+                    )
                     for output_name in registration.output_names
                 ]
                 args = self._color(", ".join(registration.input_names), "yellow")
@@ -676,6 +851,30 @@ class PipelineHandler:
     def _color(self, text: str, color: str) -> str:
         return import_module("termcolor").colored(text, color, force_color=True)
 
+    def _capture_prints(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        if self.print_capture_mode == "off":
+            return func(*args, **kwargs)
+
+        # Convenience feature only: redirect_stdout is process-level state, so heavily
+        # parallel print-heavy functions can still interleave output. Explicit logger usage
+        # remains the safer option for important structured messages.
+        buffer = StringIO()
+        stdout_target: Any = (
+            _TeeStdout(sys.stdout, buffer) if self.print_capture_mode == "tee" else buffer
+        )
+        with redirect_stdout(stdout_target):
+            result = func(*args, **kwargs)
+        self._flush_captured_prints(buffer)
+        return result
+
+    def _flush_captured_prints(self, buffer: StringIO) -> None:
+        captured = buffer.getvalue()
+        if not captured:
+            return
+        for line in captured.splitlines():
+            if line:
+                self.logger._write("PRINT", line, emit_console=False)
+
     def config_as_dict(self) -> dict[str, Any]:
         if is_dataclass(self.config) and not isinstance(self.config, type):
             return asdict(self.config)
@@ -684,3 +883,19 @@ class PipelineHandler:
         if hasattr(self.config, "__dict__"):
             return dict(vars(self.config))
         raise PersistenceError("Configuration object is not serializable to dict")
+
+
+class _TeeStdout:
+    def __init__(self, *streams: Any) -> None:
+        self.streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            flush = getattr(stream, "flush", None)
+            if callable(flush):
+                flush()

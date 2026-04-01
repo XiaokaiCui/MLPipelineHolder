@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import patch
 import warnings
 
-from src.mlpipelineholder import PipelineHandler, RegistrationError, ResolutionError
+from src import GateBlock as TopLevelGateBlock
+from src.mlpipelineholder import GateBlock, PipelineHandler, RegistrationError, ResolutionError
 from src.mlpipelineholder.models import ArtifactRecord
 
 
@@ -43,6 +44,10 @@ def save_text(seed: int) -> str:
     return f"value={seed}"
 
 
+def memory_text(seed: int) -> str:
+    return f"memory={seed}"
+
+
 def save_json(seed: int) -> dict[str, int]:
     return {"seed": seed, "double": seed * 2}
 
@@ -72,6 +77,11 @@ def needs_missing(missing: int) -> int:
 def logger_step(seed: int, logger) -> int:
     logger.info(f"seed={seed}")
     logger.result(f"final-seed={seed}")
+    return seed
+
+
+def print_step(seed: int) -> int:
+    print(f"printed-seed={seed}")
     return seed
 
 
@@ -176,6 +186,24 @@ class PipelineHandlerTests(unittest.TestCase):
             conflicts = pipeline.get_output_conflicts()
             self.assertEqual(conflicts["seed"]["created_by"], "dup/first")
             self.assertEqual(conflicts["seed"]["overridden_by"], ["dup/second"])
+
+    def test_overridden_disk_artifact_is_cleaned_when_later_value_is_in_memory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("cleanup", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            first = pipeline.add_block("first", 2)
+            first.register_function(save_text, ["shared"], save_to_disk=["shared"])
+            second = pipeline.add_block("second", 3)
+            second.register_function(memory_text, ["shared"])
+
+            pipeline.run_all()
+
+            artifact_dir = tmp_path / "artifacts"
+            artifact_files = list(artifact_dir.rglob("*")) if artifact_dir.exists() else []
+            self.assertEqual(pipeline.get_value("shared"), "memory=3")
+            self.assertFalse(any(path.is_file() for path in artifact_files))
 
     def test_earlier_block_individual_run_does_not_see_later_override(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -359,6 +387,41 @@ class PipelineHandlerTests(unittest.TestCase):
             log_text_after = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertEqual(log_text_before, log_text_after)
 
+    def test_print_output_is_tee_logged_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("print", DemoConfig(base=4), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            printer = pipeline.add_block("printer", 2)
+            printer.register_function(print_step, ["printed_seed"])
+
+            output = StringIO()
+            with patch("sys.stdout", output):
+                pipeline.run_all()
+
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("printed-seed=5", output.getvalue())
+            self.assertIn("[PRINT] printed-seed=5", log_text)
+
+    def test_print_output_can_be_logger_only(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("print", DemoConfig(base=4), tmp_path)
+            pipeline.set_print_capture_mode("logger_only")
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            printer = pipeline.add_block("printer", 2)
+            printer.register_function(print_step, ["printed_seed"])
+
+            output = StringIO()
+            with patch("sys.stdout", output):
+                pipeline.run_all()
+
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertNotIn("printed-seed=5", output.getvalue())
+            self.assertIn("[PRINT] printed-seed=5", log_text)
+
     def test_save_project_defaults_to_project_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -456,7 +519,9 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(parent.get_value("child_result"), 104)
             self.assertEqual(child.get_value("child_result"), 104)
 
-    def test_gate_block_skip_keeps_existing_parent_value_and_sets_unique_child_output_none(self) -> None:
+    def test_gate_block_skip_keeps_existing_parent_value_and_sets_unique_child_output_none(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
@@ -486,3 +551,34 @@ class PipelineHandlerTests(unittest.TestCase):
 
             with self.assertRaises(RegistrationError):
                 parent.add_child_pipeline(child, 1)
+
+            self.assertIsNone(child.parent_pipeline)
+            self.assertEqual(child.project_root, tmp_path / "child")
+
+    def test_top_level_gate_block_export_is_correct(self) -> None:
+        self.assertIs(TopLevelGateBlock, GateBlock)
+
+    def test_unknown_node_raises_registration_error(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("missing-node", DemoConfig(base=1), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.run_block("missing")
+
+    def test_gate_skip_cleans_previous_disk_artifacts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate-clean", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("save", 2)
+            block.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            pipeline.run_all()
+            pipeline.set_gate_block(always_skip)
+
+            pipeline.run_all()
+
+            artifact_dir = tmp_path / "artifacts"
+            artifact_files = list(artifact_dir.rglob("*")) if artifact_dir.exists() else []
+            self.assertFalse(any(path.is_file() for path in artifact_files))

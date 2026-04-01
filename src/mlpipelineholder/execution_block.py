@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import inspect
 from typing import TYPE_CHECKING, Any
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
-from .function_registry import inspect_input_names, resolve_callable
+from .function_registry import inspect_input_names, rename_args, resolve_callable
 from .models import FunctionExecutionResult, FunctionRegistration
 
 if TYPE_CHECKING:
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
 
 
 class ExecutionBlock:
+    """Represents one priority level whose registered functions run in parallel."""
+
     def __init__(
         self, parent: PipelineHandler, registration_name: str, execution_priority: int
     ) -> None:
@@ -25,7 +28,13 @@ class ExecutionBlock:
         function_or_path: Any,
         output_variable_names: str | list[str] | tuple[str, ...],
         save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
+        kw_mapping: dict[str, str] | None = None,
+        pos_mapping: dict[int, int] | None = None,
+        var_pos_name: str | None = None,
+        var_kw_name: str | None = None,
     ) -> FunctionRegistration:
+        if pos_mapping:
+            raise RegistrationError("pos_mapping is not supported")
         output_names = (
             [output_variable_names]
             if isinstance(output_variable_names, str)
@@ -54,6 +63,22 @@ class ExecutionBlock:
             )
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
+        signature = inspect.signature(callable_obj)
+        if (
+            any(
+                parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                for parameter in signature.parameters.values()
+            )
+            or kw_mapping
+            or var_pos_name
+            or var_kw_name
+        ):
+            callable_obj = rename_args(
+                callable_obj,
+                kw_mapping=kw_mapping,
+                var_pos_name=var_pos_name,
+                var_kw_name=var_kw_name,
+            )
         input_names = inspect_input_names(callable_obj)
         conflicting_inputs = disk_names.intersection(set(input_names))
         if conflicting_inputs:
@@ -68,13 +93,20 @@ class ExecutionBlock:
             input_names=input_names,
             output_names=output_names,
             save_to_disk=disk_names,
+            kw_mapping=dict(kw_mapping or {}),
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
         )
         self.functions.append(registration)
         self.parent._register_node(self)
         return registration
 
     def remove_function(self, function_name: str) -> None:
-        matches = [registration for registration in self.functions if registration.function_name == function_name]
+        matches = [
+            registration
+            for registration in self.functions
+            if registration.function_name == function_name
+        ]
         if not matches:
             raise RegistrationError(
                 f"Function not registered in block '{self.registration_name}': {function_name}"
@@ -106,10 +138,9 @@ class ExecutionBlock:
 
         block_output_names = self.declared_outputs()
         for registration in self.functions:
-            same_block_dependencies = (
-                block_output_names.difference(registration.output_names)
-                .intersection(registration.input_names)
-            )
+            same_block_dependencies = block_output_names.difference(
+                registration.output_names
+            ).intersection(registration.input_names)
             if same_block_dependencies:
                 raise ExecutionError(
                     f"Function '{registration.function_name}' depends on outputs from the same block, "
@@ -164,14 +195,18 @@ class ExecutionBlock:
         parent_config: dict[str, Any],
     ) -> FunctionExecutionResult:
         del run_id
-        resolved_args, loaded_artifacts = self.parent._resolve_arguments(
+        positional_args, keyword_args, loaded_artifacts = self.parent._prepare_call_arguments(
             registration,
             overrides,
             visible_outputs,
             parent_config,
         )
         try:
-            result = registration.callable_obj(**resolved_args)
+            result = self.parent._capture_prints(
+                registration.callable_obj,
+                *positional_args,
+                **keyword_args,
+            )
         except ResolutionError:
             raise
         except Exception as exc:
