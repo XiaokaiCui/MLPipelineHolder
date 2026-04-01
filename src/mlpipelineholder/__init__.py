@@ -6,12 +6,14 @@ from .exceptions import (
     RegistrationError,
     ResolutionError,
 )
+from .gate_block import GateBlock
 from .logger import PipelineLogger
 from .pipeline_handler import PipelineHandler
 
 __all__ = [
     "ExecutionBlock",
     "ExecutionError",
+    "GateBlock",
     "PipelineLogger",
     "PersistenceError",
     "PipelineError",

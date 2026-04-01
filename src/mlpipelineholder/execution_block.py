@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
 from .function_registry import inspect_input_names, resolve_callable
@@ -36,6 +36,17 @@ class ExecutionBlock:
         if len(set(output_names)) != len(output_names):
             raise RegistrationError("Duplicate output variable names are not allowed")
 
+        existing_local_outputs = {
+            output_name
+            for registration in self.functions
+            for output_name in registration.output_names
+        }
+        overlap = existing_local_outputs.intersection(output_names)
+        if overlap:
+            raise RegistrationError(
+                f"Duplicate output names inside block '{self.registration_name}': {sorted(overlap)}"
+            )
+
         disk_names = set(save_to_disk or [])
         if not disk_names.issubset(set(output_names)):
             raise RegistrationError(
@@ -44,7 +55,6 @@ class ExecutionBlock:
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         input_names = inspect_input_names(callable_obj)
-
         conflicting_inputs = disk_names.intersection(set(input_names))
         if conflicting_inputs:
             raise RegistrationError(
@@ -59,41 +69,47 @@ class ExecutionBlock:
             output_names=output_names,
             save_to_disk=disk_names,
         )
-        self.parent._validate_new_outputs(self, registration)
         self.functions.append(registration)
-        self.parent._register_block(self)
+        self.parent._register_node(self)
         return registration
 
     def remove_function(self, function_name: str) -> None:
         matches = [registration for registration in self.functions if registration.function_name == function_name]
         if not matches:
-            raise RegistrationError(f"Function not registered in block '{self.registration_name}': {function_name}")
+            raise RegistrationError(
+                f"Function not registered in block '{self.registration_name}': {function_name}"
+            )
         if len(matches) > 1:
             raise RegistrationError(
                 f"Multiple functions named '{function_name}' exist in block '{self.registration_name}'"
             )
 
-        target = matches[0]
-        affected_output_names = set(target.output_names)
-        downstream_output_names = {
+        self.functions.remove(matches[0])
+        self.parent._invalidate_from_priority(self.execution_priority)
+
+    def declared_outputs(self) -> set[str]:
+        return {
             output_name
-            for block in self.parent._sorted_blocks()
-            if block.execution_priority > self.execution_priority
-            for registration in block.functions
+            for registration in self.functions
             for output_name in registration.output_names
         }
-        self.functions.remove(target)
-        self.parent._invalidate_outputs(affected_output_names.union(downstream_output_names))
 
-    def execute(self, run_id: str, overrides: dict[str, Any] | None = None) -> list[str]:
+    def execute(
+        self,
+        run_id: str,
+        visible_outputs: dict[str, Any],
+        overrides: dict[str, Any] | None = None,
+        parent_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.functions:
-            return []
+            return {}
 
-        block_output_names = {
-            name for registration in self.functions for name in registration.output_names
-        }
+        block_output_names = self.declared_outputs()
         for registration in self.functions:
-            same_block_dependencies = block_output_names.intersection(registration.input_names)
+            same_block_dependencies = (
+                block_output_names.difference(registration.output_names)
+                .intersection(registration.input_names)
+            )
             if same_block_dependencies:
                 raise ExecutionError(
                     f"Function '{registration.function_name}' depends on outputs from the same block, "
@@ -104,34 +120,33 @@ class ExecutionBlock:
         with ThreadPoolExecutor(max_workers=len(self.functions)) as executor:
             for registration in self.functions:
                 futures.append(
-                    executor.submit(self._execute_function, registration, run_id, overrides or {})
+                    executor.submit(
+                        self._execute_function,
+                        registration,
+                        run_id,
+                        dict(visible_outputs),
+                        overrides or {},
+                        parent_config or {},
+                    )
                 )
 
-        produced_outputs: list[str] = []
+        produced_outputs: dict[str, Any] = {}
         for future in futures:
             result = future.result()
             for output_name, output_value in result.outputs.items():
-                if output_name in self.parent.produced_by_variable:
-                    old_block = self.parent.produced_by_variable[output_name]
-                    if old_block != self.registration_name:
-                        raise ExecutionError(
-                            f"Output '{output_name}' already produced by block '{old_block}'"
-                        )
+                if output_name in result.outputs and output_name in produced_outputs:
+                    raise ExecutionError(
+                        f"Duplicate output '{output_name}' produced inside block '{self.registration_name}'"
+                    )
                 if output_name in self.functions_output_disk_names():
-                    artifact = self.parent.artifact_store.save(
+                    output_value = self.parent.artifact_store.save(
                         variable_name=output_name,
                         value=output_value,
-                        block_name=self.registration_name,
+                        block_name=self.parent.qualified_node_name(self.registration_name),
                         function_name=result.function_name,
                         run_id=run_id,
                     )
-                    self.parent.para_value_dict[output_name] = artifact
-                    self.parent.artifact_registry[output_name] = artifact
-                else:
-                    self.parent.para_value_dict[output_name] = output_value
-                    self.parent.artifact_registry.pop(output_name, None)
-                self.parent.produced_by_variable[output_name] = self.registration_name
-                produced_outputs.append(output_name)
+                produced_outputs[output_name] = output_value
         return produced_outputs
 
     def functions_output_disk_names(self) -> set[str]:
@@ -144,10 +159,17 @@ class ExecutionBlock:
         self,
         registration: FunctionRegistration,
         run_id: str,
+        visible_outputs: dict[str, Any],
         overrides: dict[str, Any],
+        parent_config: dict[str, Any],
     ) -> FunctionExecutionResult:
         del run_id
-        resolved_args, loaded_artifacts = self.parent._resolve_arguments(registration, overrides)
+        resolved_args, loaded_artifacts = self.parent._resolve_arguments(
+            registration,
+            overrides,
+            visible_outputs,
+            parent_config,
+        )
         try:
             result = registration.callable_obj(**resolved_args)
         except ResolutionError:

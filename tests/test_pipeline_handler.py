@@ -57,6 +57,10 @@ def read_text(saved_blob: str) -> str:
     return saved_blob.upper()
 
 
+def late_seed(seed: int) -> int:
+    return seed + 100
+
+
 def pair(seed: int) -> tuple[int, int]:
     return seed, seed + 1
 
@@ -69,6 +73,18 @@ def logger_step(seed: int, logger) -> int:
     logger.info(f"seed={seed}")
     logger.result(f"final-seed={seed}")
     return seed
+
+
+def always_skip() -> bool:
+    return False
+
+
+def child_value(seed: int, base: int) -> int:
+    return seed + base
+
+
+def unique_child_output(seed: int) -> int:
+    return seed * 10
 
 
 def strip_ansi(text: str) -> str:
@@ -145,7 +161,7 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded.para_value_dict["seed"], 6)
             self.assertEqual(list(loaded.blocks_by_name), ["setup"])
 
-    def test_duplicate_outputs_are_rejected_across_blocks(self) -> None:
+    def test_duplicate_outputs_override_later_and_are_reported(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("dup", DemoConfig(base=1), tmp_path)
@@ -153,8 +169,27 @@ class PipelineHandlerTests(unittest.TestCase):
             second = pipeline.add_block("second", 2)
 
             first.register_function(produce_seed, ["seed"])
-            with self.assertRaises(RegistrationError):
-                second.register_function(produce_seed, ["seed"])
+            second.register_function(late_seed, ["seed"])
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("seed"), 102)
+            conflicts = pipeline.get_output_conflicts()
+            self.assertEqual(conflicts["seed"]["created_by"], "dup/first")
+            self.assertEqual(conflicts["seed"]["overridden_by"], ["dup/second"])
+
+    def test_earlier_block_individual_run_does_not_see_later_override(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("stale", DemoConfig(base=1, factor=1), tmp_path)
+            first = pipeline.add_block("first", 1)
+            second = pipeline.add_block("second", 2)
+            first.register_function(produce_seed, ["seed"])
+            second.register_function(late_seed, ["seed"])
+            pipeline.run_all()
+
+            pipeline.run_block("first", overrides={"base": 10})
+
+            self.assertEqual(pipeline.get_value("seed"), 11)
 
     def test_multiple_outputs_require_matching_return_arity(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -363,6 +398,28 @@ class PipelineHandlerTests(unittest.TestCase):
                 any("historical function snapshots" in str(item.message) for item in caught)
             )
 
+    def test_nested_pipeline_with_gate_round_trips_through_save_load(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            setup = parent.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("child", DemoConfig(base=50, factor=1), tmp_path / "child")
+            child.set_gate_block(always_skip)
+            child_block = child.add_block("child_unique", 1)
+            child_block.register_function(unique_child_output, ["child_only"])
+            parent.add_child_pipeline(child, 2)
+            parent.run_all()
+
+            save_dir = tmp_path / "bundle"
+            parent.save_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir)
+            loaded.run_all()
+
+            self.assertEqual(loaded.get_value("seed"), 4)
+            self.assertIsNone(loaded.get_value("child_only"))
+
     def test_remove_block_invalidates_removed_and_downstream_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -381,3 +438,51 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertNotIn("left", pipeline.para_value_dict)
             self.assertNotIn("scaled_total", pipeline.para_value_dict)
             self.assertIn("seed", pipeline.para_value_dict)
+
+    def test_child_pipeline_can_use_parent_outputs_and_own_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            parent_setup = parent.add_block("setup", 1)
+            parent_setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("child", DemoConfig(base=100, factor=1), tmp_path / "child")
+            child_block = child.add_block("child_block", 1)
+            child_block.register_function(child_value, ["child_result"])
+
+            parent.add_child_pipeline(child, 2)
+            parent.run_all()
+
+            self.assertEqual(parent.get_value("child_result"), 104)
+            self.assertEqual(child.get_value("child_result"), 104)
+
+    def test_gate_block_skip_keeps_existing_parent_value_and_sets_unique_child_output_none(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            parent_setup = parent.add_block("setup", 1)
+            parent_setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("child", DemoConfig(base=50, factor=1), tmp_path / "child")
+            child.set_gate_block(always_skip)
+            child_block = child.add_block("child_block", 1)
+            child_block.register_function(child_value, ["seed"])
+            child_unique = child.add_block("child_unique", 2)
+            child_unique.register_function(unique_child_output, ["child_only"])
+
+            parent.add_child_pipeline(child, 2)
+            parent.run_all()
+
+            self.assertEqual(parent.get_value("seed"), 4)
+            self.assertIsNone(parent.get_value("child_only"))
+
+    def test_child_pipeline_priority_conflict_is_rejected_only_at_parent_level(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            parent.add_block("setup", 1)
+            child = PipelineHandler("child", DemoConfig(base=10, factor=1), tmp_path / "child")
+            child.add_block("internal", 1)
+
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 1)

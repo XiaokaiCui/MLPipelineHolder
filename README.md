@@ -7,6 +7,8 @@ The project is centered on two concepts:
 - `PipelineHandler`: owns config, block registration, execution state, artifacts, run history, persistence, and logging
 - `ExecutionBlock`: owns a priority and one or more registered functions that run in parallel inside that block
 
+Pipelines can also be nested, so a `PipelineHandler` may be registered inside another `PipelineHandler` as a child execution node.
+
 ## Current status
 
 This project is implemented and tested.
@@ -28,6 +30,9 @@ Current verified behavior includes:
 - safe block removal with state cleanup
 - safe function removal inside a block with state cleanup
 - json and numpy artifact serializers
+- nested child pipelines with shared upstream/downstream outputs
+- optional gate block for conditional pipeline skipping
+- parent-level output override reporting
 
 ## Installation and environment
 
@@ -35,7 +40,7 @@ This project uses **Poetry**.
 
 The current project metadata is in `pyproject.toml`.
 
-### Use the experiment environment Poetry
+### Install dependencies with Poetry
 
 ```bash
 pip install poetry
@@ -79,6 +84,7 @@ Exports from `src.mlpipelineholder`:
 
 - `PipelineHandler`
 - `ExecutionBlock`
+- `GateBlock`
 - `PipelineLogger`
 - `PipelineError`
 - `RegistrationError`
@@ -127,6 +133,9 @@ When executing a registered function, inputs are resolved in this order:
 Special case:
 
 - if a function declares an argument named `logger`, the pipeline logger is injected automatically
+- child pipelines can use upstream parent outputs from earlier parent-level nodes
+- child config values override same-named parent config values
+- child config values are not exposed to parent blocks
 
 ### 4. Outputs
 
@@ -222,6 +231,98 @@ block.remove_function("feature_step")
 
 This removes the named function from the block and invalidates outputs from that function and all downstream block outputs.
 
+### Register a child pipeline
+
+```python
+parent.add_child_pipeline(child_pipeline, 3)
+```
+
+Full example:
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+
+from src.mlpipelineholder import PipelineHandler
+
+
+@dataclass
+class ParentConfig:
+    raw_value: int = 5
+    multiplier: int = 3
+
+
+@dataclass
+class ChildConfig:
+    raw_value: int = 99
+    bias: int = 7
+
+
+def create_seed(raw_value: int) -> int:
+    return raw_value + 1
+
+
+def allow_child(seed: int) -> bool:
+    return seed > 0
+
+
+def child_feature(seed: int, raw_value: int, bias: int) -> int:
+    return seed + raw_value + bias
+
+
+def final_metric(child_score: int, multiplier: int) -> int:
+    return child_score * multiplier
+
+
+parent = PipelineHandler("parent", ParentConfig(), Path("nested_run"))
+setup = parent.add_block("setup", 1)
+setup.register_function(create_seed, ["seed"])
+
+child = PipelineHandler("child", ChildConfig(), Path("child_original"))
+child.set_gate_block(allow_child)
+child_block = child.add_block("feature", 1)
+child_block.register_function(child_feature, ["child_score"])
+
+parent.add_child_pipeline(child, 2)
+
+final = parent.add_block("final", 3)
+final.register_function(final_metric, ["final_metric"])
+
+parent.run_all()
+```
+
+Behavior:
+
+- the child pipeline participates in the parent priority order as one parent-level execution node
+- parent upstream outputs are visible inside the child pipeline
+- child outputs are visible to later parent nodes
+- later parent-level nodes override earlier outputs with the same name
+- the parent logger is used for future child execution
+
+### Add a gate block
+
+```python
+pipeline.set_gate_block(should_run)
+```
+
+Minimal example:
+
+```python
+def should_run(seed: int) -> bool:
+    return seed > 0
+
+
+pipeline.set_gate_block(should_run)
+```
+
+Rules:
+
+- one gate block per pipeline
+- the gate block runs before every other node
+- it must return `True` or `False`
+- when `False`, the whole pipeline is skipped
+- skipping does not overwrite an existing upstream value with `None`; it only exposes `None` for unique outputs introduced by that skipped pipeline
+
 ### Save and load a project
 
 ```python
@@ -243,10 +344,26 @@ Current chart format includes:
 
 - block name
 - priority
+- child pipeline hierarchy
+- gate block
 - function name
 - argument names
 - output names
 - `*` marker for disk-backed outputs
+
+### Output conflicts and overrides
+
+Duplicate output names across different parent-level blocks or child pipelines are allowed.
+
+- later parent-level nodes override earlier parent-level nodes
+- child internal override chains are not expanded in the parent conflict report
+
+Helpers:
+
+```python
+conflicts = pipeline.get_output_conflicts()
+print(pipeline.describe_output_conflicts())
+```
 
 ### Logging
 
@@ -283,6 +400,7 @@ Run:
 
 ```bash
 poetry run python examples/simple_pipeline.py
+poetry run python examples/nested_pipeline.py
 ```
 
 The example demonstrates:
@@ -293,6 +411,16 @@ The example demonstrates:
 - chart rendering
 - injected logger usage
 - result history collection
+- later-output override behavior
+
+The nested example demonstrates:
+
+- parent/child pipeline registration
+- child gate block behavior
+- child config overriding parent config inside the child only
+- parent consumption of child outputs
+- hierarchical chart output
+- parent-level conflict reporting
 
 ## Persistence model
 
@@ -307,7 +435,9 @@ Projects are saved as:
 ## Rules and safeguards
 
 - block priorities must be unique
-- duplicate output names across blocks are rejected
+- child pipeline priorities must also be unique at the parent level
+- duplicate outputs inside the same parallel block are rejected
+- duplicate outputs across different parent-level nodes are allowed and resolved by execution order
 - `*args` and `**kwargs` are not supported for registered functions
 - functions inside one block cannot depend on outputs from the same block
 - non-importable callables cannot be saved for load/replay
@@ -332,7 +462,7 @@ Current test coverage verifies:
 - full pipeline execution
 - partial reruns
 - disk artifact save/load behavior
-- duplicate output rejection
+- duplicate output override behavior
 - duplicate priority rejection
 - config override behavior
 - resolved artifact loading via `get_value`
@@ -346,6 +476,10 @@ Current test coverage verifies:
 - json artifact serialization
 - numpy ndarray serialization
 - result-history cleanup
+- child pipeline registration and visibility rules
+- gate-block skip behavior
+- parent-level output conflict reporting
+- stale-output protection for individual reruns of earlier nodes
 - importable vs non-importable save behavior
 
 ## Run tests
@@ -370,6 +504,12 @@ python -m unittest discover -s tests -v
 - no distributed execution
 - no separate per-run log file yet
 - colors are optimized for notebook/CLI readability, but exact rendering still depends on the terminal frontend
+
+Nested pipeline notes:
+
+- nested pipelines are persisted recursively
+- child runtime files are moved under the parent project path on registration
+- child result-history display continues to read from the child’s historical result log file after registration
 
 ## Recommended next steps
 
