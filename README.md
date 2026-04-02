@@ -198,6 +198,8 @@ Registration UX notes:
 - invalid `add_block(...)` requests are skipped with a warning log instead of raising
 - invalid `register_function(...)` requests are skipped with a warning log instead of raising
 - `output_variable_names=None` is allowed when a function should run only for side effects
+- `forced=True` can be used to replace an existing block, child pipeline, gate block, or function registration
+- `forced=True` only replaces an existing block/child pipeline with the same name; a different name using an existing priority still raises an error
 
 ### Rename function inputs and use variadics safely
 
@@ -230,6 +232,7 @@ Rules:
 - renamed variadic positional values must resolve to a `list` or `tuple`
 - renamed variadic keyword values must resolve to a `dict`
 - mapping metadata is preserved on save/load
+- if the same function is already registered in a block, use `forced=True` to replace it
 
 ### Run modes
 
@@ -248,6 +251,7 @@ pipeline.update_config({"multiplier": 10})
 
 Rules:
 
+- the pipeline may be created with `configuration=None`, which is treated as an empty config
 - non-conflicting new fields may be added
 - updates that would conflict with declared output names are skipped with a warning
 
@@ -360,6 +364,13 @@ def should_run(seed: int) -> bool:
 pipeline.set_gate_block(should_run)
 ```
 
+You can also use a boolean config field directly:
+
+```python
+pipeline = PipelineHandler("demo", {"run_enabled": False}, Path("demo_run"))
+pipeline.add_gate_block("run_enabled")
+```
+
 Rules:
 
 - one gate block per pipeline
@@ -371,11 +382,13 @@ Rules:
 ### Save and load a project
 
 ```python
-pipeline.save_project()
-loaded = PipelineHandler.load_project("demo_run")
+pipeline.save_pipeline()
+loaded = PipelineHandler.load_pipeline("demo_run")
 ```
 
-`save_project()` defaults to `local_folder_path` when no path is given.
+`save_pipeline()` defaults to `local_folder_path` when no path is given.
+
+Compatibility aliases `save_project()` and `load_project()` still exist.
 
 ### Print the pipeline chart
 
@@ -395,6 +408,8 @@ Current chart format includes:
 - only argument names that are actually supplied by visible configs or earlier outputs
 - output names
 - `*` marker for disk-backed outputs
+
+Gate lines do not show `-> bool`, and chart symbols such as `()` and `->` use the same color family as priority markers for readability.
 
 ### Output conflicts and overrides
 
@@ -507,6 +522,8 @@ That means:
 
 Because of that, `save_project()` and `load_project()` emit warnings explaining this limitation.
 
+The preferred public API names are `save_pipeline()` and `load_pipeline()`.
+
 This is intentionally deferred because reliable historical behavior preservation would require a much heavier code and environment snapshot system.
 
 ## Tested behavior
@@ -571,7 +588,7 @@ Nested pipeline notes:
 
 ### 1. Save/load is not a full artifact snapshot
 
-`save_project()` saves the pipeline definition, config, runtime metadata, and artifact references, but it does **not** package every disk-backed file into a fully portable bundle.
+`save_pipeline()` saves the pipeline definition, config, runtime metadata, and artifact references, but it does **not** package every disk-backed file into a fully portable bundle.
 
 What this means in practice:
 

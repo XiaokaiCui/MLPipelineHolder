@@ -104,6 +104,31 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(registration.output_names, [])
             self.assertEqual(pipeline.para_value_dict, {})
 
+    def test_duplicate_function_registration_raises_without_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dup-func", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+            block.register_function(passthrough, ["result"])
+
+            with self.assertRaises(RegistrationError):
+                block.register_function(passthrough, ["result_two"])
+
+    def test_duplicate_function_registration_is_replaced_with_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dup-func", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+            block.register_function(passthrough, ["result"])
+
+            registration = block.register_function(passthrough, ["new_result"], forced=True)
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(len(block.functions), 1)
+            self.assertIn("new_result", pipeline.para_value_dict)
+            self.assertNotIn("result", pipeline.para_value_dict)
+
     def test_remove_function_invalidates_its_outputs_and_downstream_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

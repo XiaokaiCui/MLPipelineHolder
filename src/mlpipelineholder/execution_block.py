@@ -32,7 +32,23 @@ class ExecutionBlock:
         pos_mapping: dict[int, int] | None = None,
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
+        forced: bool = False,
     ) -> Any:
+        _, _, function_name = resolve_callable(function_or_path)
+        existing_registration = next(
+            (
+                registration
+                for registration in self.functions
+                if registration.function_name == function_name
+            ),
+            None,
+        )
+        if existing_registration is not None and not forced:
+            raise RegistrationError(
+                f"Function '{function_name}' is already registered in block '{self.registration_name}'"
+            )
+        if existing_registration is not None and forced:
+            self.remove_function(function_name)
         try:
             registration = self._register_function_strict(
                 function_or_path,
@@ -42,6 +58,7 @@ class ExecutionBlock:
                 pos_mapping=pos_mapping,
                 var_pos_name=var_pos_name,
                 var_kw_name=var_kw_name,
+                forced=forced,
             )
         except RegistrationError as exc:
             self.parent.logger.warning(
@@ -59,7 +76,9 @@ class ExecutionBlock:
         pos_mapping: dict[int, int] | None = None,
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
+        forced: bool = False,
     ) -> FunctionRegistration:
+        del forced
         if pos_mapping:
             raise RegistrationError("pos_mapping is not supported")
         if output_variable_names is None:

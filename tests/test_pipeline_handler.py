@@ -101,6 +101,10 @@ def unique_child_output(seed: int) -> int:
     return seed * 10
 
 
+def always_true() -> bool:
+    return True
+
+
 def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
@@ -251,11 +255,79 @@ class PipelineHandlerTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("priority", DemoConfig(base=1), tmp_path)
             first = pipeline.add_block("first", 1)
-            second = pipeline.add_block("second", 1)
+            with self.assertRaises(RegistrationError):
+                pipeline.add_block("second", 1)
+
+            self.assertIsNotNone(first)
+            self.assertEqual(list(pipeline.nodes_by_name), ["first"])
+
+    def test_duplicate_block_can_be_replaced_with_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("priority", DemoConfig(base=1), tmp_path)
+            first = pipeline.add_block("first", 1)
+            first.register_function(produce_seed, ["seed"])
+
+            replacement = pipeline.add_block("first", 1, forced=True)
+            replacement.register_function(branch_left, ["left"])
+
+            self.assertEqual(list(pipeline.nodes_by_name), ["first"])
+            self.assertIs(pipeline.nodes_by_name["first"], replacement)
+
+    def test_different_block_name_same_priority_raises_even_with_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("priority", DemoConfig(base=1), tmp_path)
+            pipeline.add_block("first", 1)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.add_block("second", 1, forced=True)
+
+    def test_gate_block_can_be_replaced_with_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", DemoConfig(base=1), tmp_path)
+            first = pipeline.add_gate_block(always_true)
+            second = pipeline.add_gate_block(always_skip)
+            replacement = pipeline.add_gate_block(always_skip, forced=True)
 
             self.assertIsNotNone(first)
             self.assertIsNone(second)
-            self.assertEqual(list(pipeline.nodes_by_name), ["first"])
+            self.assertIsNotNone(replacement)
+            gate_block = pipeline.gate_block
+            self.assertIsNotNone(gate_block)
+            if gate_block is None:
+                self.fail("gate block should exist")
+            self.assertEqual(gate_block.registration.function_name, "always_skip")
+
+    def test_boolean_config_field_can_define_gate_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", {"run_enabled": False}, tmp_path)
+            pipeline.add_gate_block("run_enabled")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            run = pipeline.run_all()
+
+            self.assertEqual(run.status, "skipped")
+            self.assertIsNone(pipeline.get_value("seed"))
+
+    def test_boolean_config_gate_round_trips_with_new_api(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", {"run_enabled": False}, tmp_path / "project")
+            pipeline.add_gate_block("run_enabled")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            run = loaded.run_all()
+
+            self.assertEqual(run.status, "skipped")
+            self.assertIsNone(loaded.get_value("seed"))
 
     def test_update_config_overrides_known_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -263,7 +335,29 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
             pipeline.update_config({"factor": 9})
 
-            self.assertEqual(pipeline.config.factor, 9)
+            self.assertEqual(getattr(pipeline.config, "factor"), 9)
+
+    def test_none_configuration_is_treated_as_empty(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("config", None, tmp_path)
+
+            pipeline.update_config({"new_value": 9})
+
+            self.assertEqual(pipeline.config, {"new_value": 9})
+
+    def test_save_pipeline_defaults_to_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("save-default", DemoConfig(base=4), tmp_path)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            saved_path = pipeline.save_pipeline()
+
+            self.assertEqual(saved_path, tmp_path)
+            self.assertTrue((tmp_path / "pipeline_state.pkl").exists())
 
     def test_update_config_skips_names_conflicting_with_declared_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -348,6 +442,7 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("save_text(seed) -> saved_blob*", chart)
             self.assertIn("verbose_step(seed)", chart)
             self.assertNotIn("verbose_step(seed, verbose)", chart)
+            self.assertNotIn("-> bool", chart)
 
     def test_str_and_repr_show_pipeline_chart(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -461,6 +556,24 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertTrue(
                 any("historical function behavior" in str(item.message) for item in caught)
             )
+
+    def test_grandchild_project_root_rebases_under_grandparent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            grandparent = PipelineHandler("grandparent", DemoConfig(base=1), tmp_path / "grandparent")
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            grandchild = PipelineHandler("grandchild", DemoConfig(base=3), tmp_path / "grandchild")
+
+            child_block = grandchild.add_block("work", 1)
+            child_block.register_function(produce_seed, ["seed"])
+            parent.add_child_pipeline(grandchild, 1)
+            grandparent.add_child_pipeline(parent, 1, forced=True)
+
+            expected_root = (
+                grandparent.project_root / "children" / "parent" / "children" / "grandchild"
+            )
+            self.assertEqual(grandchild.project_root, expected_root)
+            self.assertEqual(grandchild.metadata_root, expected_root / "metadata")
 
     def test_load_project_emits_function_preservation_warning(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -577,6 +690,23 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIsNone(child.parent_pipeline)
             self.assertEqual(child.project_root, tmp_path / "child")
 
+    def test_child_pipeline_can_be_replaced_with_force(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            first_child = PipelineHandler("child", DemoConfig(base=10, factor=1), tmp_path / "child-a")
+            first_block = first_child.add_block("first", 1)
+            first_block.register_function(child_value, ["child_result"])
+            parent.add_child_pipeline(first_child, 2)
+
+            second_child = PipelineHandler("child", DemoConfig(base=20, factor=1), tmp_path / "child-b")
+            second_block = second_child.add_block("second", 1)
+            second_block.register_function(unique_child_output, ["child_only"])
+            replacement = parent.add_child_pipeline(second_child, 2, forced=True)
+
+            self.assertIsNotNone(replacement)
+            self.assertIs(parent.nodes_by_name["child"], second_child)
+
     def test_child_standalone_run_updates_parent_visible_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -607,6 +737,22 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIsNone(registration)
             self.assertEqual(len(block.functions), 0)
+
+    def test_existing_state_is_restored_after_execution_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("restore", DemoConfig(base=2, factor=4), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            failing = pipeline.add_block("failing", 2)
+            failing.register_function(needs_missing, ["x"])
+
+            with self.assertRaises(ResolutionError):
+                pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("seed"), 3)
 
     def test_top_level_gate_block_export_is_correct(self) -> None:
         self.assertIs(TopLevelGateBlock, GateBlock)

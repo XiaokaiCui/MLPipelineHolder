@@ -14,9 +14,20 @@ class GateBlock:
     """Runs a single boolean function before the rest of a pipeline."""
 
     def __init__(self, parent: PipelineHandler, function_or_path: Any) -> None:
-        callable_obj, import_path, function_name = resolve_callable(function_or_path)
-        input_names = inspect_input_names(callable_obj)
         self.parent = parent
+        self.config_field_name: str | None = None
+
+        if isinstance(function_or_path, str) and "." not in function_or_path and parent._config_has_field(
+            parent.config, function_or_path
+        ):
+            self.config_field_name = function_or_path
+            callable_obj = None
+            import_path = None
+            function_name = function_or_path
+            input_names: list[str] = []
+        else:
+            callable_obj, import_path, function_name = resolve_callable(function_or_path)
+            input_names = inspect_input_names(callable_obj)
         self.registration = FunctionRegistration(
             function_name=function_name,
             import_path=import_path,
@@ -32,6 +43,20 @@ class GateBlock:
         visible_outputs: dict[str, Any],
         parent_config: Any | None = None,
     ) -> bool:
+        if self.config_field_name is not None:
+            value = self.parent._resolve_named_input(
+                self.config_field_name,
+                self.registration.function_name,
+                overrides,
+                visible_outputs,
+                parent_config,
+                {},
+                [],
+            )
+            if not isinstance(value, bool):
+                raise ExecutionError("Gate config field must resolve to a boolean value")
+            return value
+
         positional_args, keyword_args, _ = self.parent._prepare_call_arguments(
             self.registration,
             overrides,
@@ -44,8 +69,10 @@ class GateBlock:
         return result
 
     def serialize(self) -> dict[str, str]:
+        if self.config_field_name is not None:
+            return {"kind": "config_field", "field_name": self.config_field_name}
         if self.registration.import_path is None:
             raise RegistrationError(
                 f"Gate function '{self.registration.function_name}' is not importable"
             )
-        return {"import_path": self.registration.import_path}
+        return {"kind": "callable", "import_path": self.registration.import_path}
