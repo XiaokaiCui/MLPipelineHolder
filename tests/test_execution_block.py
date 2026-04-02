@@ -73,8 +73,10 @@ class ExecutionBlockTests(unittest.TestCase):
             pipeline = PipelineHandler("variadic", BlockConfig(value=1), tmp_path)
             block = pipeline.add_block("block", 1)
 
-            with self.assertRaises(RegistrationError):
-                block.register_function(passthrough, ["result"], pos_mapping={0: 1})
+            registration = block.register_function(passthrough, ["result"], pos_mapping={0: 1})
+
+            self.assertIsNone(registration)
+            self.assertEqual(len(block.functions), 0)
 
     def test_save_to_disk_must_be_subset_of_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -82,8 +84,25 @@ class ExecutionBlockTests(unittest.TestCase):
             pipeline = PipelineHandler("subset", BlockConfig(value=1), tmp_path)
             block = pipeline.add_block("block", 1)
 
-            with self.assertRaises(RegistrationError):
-                block.register_function(passthrough, ["result"], save_to_disk=["not_result"])
+            registration = block.register_function(
+                passthrough, ["result"], save_to_disk=["not_result"]
+            )
+
+            self.assertIsNone(registration)
+            self.assertEqual(len(block.functions), 0)
+
+    def test_no_output_function_registration_is_allowed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("no-output", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(passthrough, None)
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.output_names, [])
+            self.assertEqual(pipeline.para_value_dict, {})
 
     def test_remove_function_invalidates_its_outputs_and_downstream_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:

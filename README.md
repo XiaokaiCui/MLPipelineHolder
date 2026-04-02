@@ -193,6 +193,12 @@ features = pipeline.add_block("features", 2)
 features.register_function(create_features, ["feature_a", "feature_b"])
 ```
 
+Registration UX notes:
+
+- invalid `add_block(...)` requests are skipped with a warning log instead of raising
+- invalid `register_function(...)` requests are skipped with a warning log instead of raising
+- `output_variable_names=None` is allowed when a function should run only for side effects
+
 ### Rename function inputs and use variadics safely
 
 When a function uses generic names like `obj`, or uses `*args` / `**kwargs`, you can expose safer pipeline-facing names during registration.
@@ -240,7 +246,10 @@ Available execution methods:
 pipeline.update_config({"multiplier": 10})
 ```
 
-Unknown fields raise `ResolutionError`.
+Rules:
+
+- non-conflicting new fields may be added
+- updates that would conflict with declared output names are skipped with a warning
 
 ### Access values safely
 
@@ -333,6 +342,7 @@ Behavior:
 - child outputs are visible to later parent nodes
 - later parent-level nodes override earlier outputs with the same name
 - the parent logger is used for future child execution
+- if an attached child pipeline is run directly, its current outputs are synced back into the parent visible state and downstream parent outputs are invalidated
 
 ### Add a gate block
 
@@ -382,7 +392,7 @@ Current chart format includes:
 - child pipeline hierarchy
 - gate block
 - function name
-- argument names
+- only argument names that are actually supplied by visible configs or earlier outputs
 - output names
 - `*` marker for disk-backed outputs
 

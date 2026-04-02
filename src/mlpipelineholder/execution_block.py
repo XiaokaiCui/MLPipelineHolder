@@ -26,7 +26,34 @@ class ExecutionBlock:
     def register_function(
         self,
         function_or_path: Any,
-        output_variable_names: str | list[str] | tuple[str, ...],
+        output_variable_names: str | list[str] | tuple[str, ...] | None,
+        save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
+        kw_mapping: dict[str, str] | None = None,
+        pos_mapping: dict[int, int] | None = None,
+        var_pos_name: str | None = None,
+        var_kw_name: str | None = None,
+    ) -> Any:
+        try:
+            registration = self._register_function_strict(
+                function_or_path,
+                output_variable_names,
+                save_to_disk=save_to_disk,
+                kw_mapping=kw_mapping,
+                pos_mapping=pos_mapping,
+                var_pos_name=var_pos_name,
+                var_kw_name=var_kw_name,
+            )
+        except RegistrationError as exc:
+            self.parent.logger.warning(
+                f"Skipped function registration in block '{self.registration_name}': {exc}"
+            )
+            return None
+        return registration
+
+    def _register_function_strict(
+        self,
+        function_or_path: Any,
+        output_variable_names: str | list[str] | tuple[str, ...] | None,
         save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
         kw_mapping: dict[str, str] | None = None,
         pos_mapping: dict[int, int] | None = None,
@@ -35,13 +62,12 @@ class ExecutionBlock:
     ) -> FunctionRegistration:
         if pos_mapping:
             raise RegistrationError("pos_mapping is not supported")
-        output_names = (
-            [output_variable_names]
-            if isinstance(output_variable_names, str)
-            else list(output_variable_names)
-        )
-        if not output_names:
-            raise RegistrationError("At least one output variable name is required")
+        if output_variable_names is None:
+            output_names: list[str] = []
+        elif isinstance(output_variable_names, str):
+            output_names = [output_variable_names]
+        else:
+            output_names = list(output_variable_names)
         if len(set(output_names)) != len(output_names):
             raise RegistrationError("Duplicate output variable names are not allowed")
 
@@ -61,6 +87,7 @@ class ExecutionBlock:
             raise RegistrationError(
                 "Disk-saved output names must be a subset of output variable names"
             )
+        self.parent._validate_output_names_against_config(output_names)
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         signature = inspect.signature(callable_obj)
@@ -223,6 +250,8 @@ class ExecutionBlock:
 
     @staticmethod
     def _normalize_outputs(registration: FunctionRegistration, result: Any) -> dict[str, Any]:
+        if len(registration.output_names) == 0:
+            return {}
         if len(registration.output_names) == 1:
             return {registration.output_names[0]: result}
 

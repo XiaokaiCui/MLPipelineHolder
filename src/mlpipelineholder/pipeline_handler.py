@@ -61,7 +61,20 @@ class PipelineHandler:
     def __repr__(self) -> str:
         return self.describe_pipeline()
 
-    def add_block(self, registration_name: str, execution_priority: int):
+    def add_block(self, registration_name: str, execution_priority: int) -> Any:
+        from .execution_block import ExecutionBlock
+
+        block = ExecutionBlock(self, registration_name, execution_priority)
+        try:
+            self._register_node(block)
+        except RegistrationError as exc:
+            self.logger.warning(
+                f"Skipped block registration '{registration_name}' at priority {execution_priority}: {exc}"
+            )
+            return None
+        return block
+
+    def _add_block_strict(self, registration_name: str, execution_priority: int):
         from .execution_block import ExecutionBlock
 
         block = ExecutionBlock(self, registration_name, execution_priority)
@@ -79,6 +92,7 @@ class PipelineHandler:
         if registration_name is not None:
             child_pipeline.registration_name = registration_name
         self._validate_node_registration(child_pipeline, execution_priority)
+        self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
         return child_pipeline
@@ -89,13 +103,13 @@ class PipelineHandler:
         self.gate_block = GateBlock(self, function_or_path)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
+        declared_outputs = self.list_declared_outputs()
         for field_name, value in overrides.items():
-            if not self._config_has_field(self.config, field_name):
-                if field_name in self.list_declared_outputs():
-                    raise ExecutionError(f"Found an output object has the same name with the config: {field_name}")
-                self.logger.warning(f"To add new config field: {field_name}")
-            else:
-                self.logger.warning(f"To update existing config field: {field_name}")
+            if field_name in declared_outputs:
+                self.logger.warning(
+                    f"Skipped config update for '{field_name}' because it conflicts with a declared output"
+                )
+                continue
             self._set_config_value(field_name, value)
 
     def get_value(self, variable_name: str) -> Any:
@@ -294,8 +308,13 @@ class PipelineHandler:
                     node_payload["registration_name"],
                     node_payload["execution_priority"],
                 )
+                if block is None:
+                    block = pipeline._add_block_strict(
+                        node_payload["registration_name"],
+                        node_payload["execution_priority"],
+                    )
                 for function_payload in node_payload["functions"]:
-                    block.register_function(
+                    registration = block._register_function_strict(
                         function_payload["import_path"],
                         function_payload["output_names"],
                         function_payload["save_to_disk"],
@@ -303,6 +322,10 @@ class PipelineHandler:
                         var_pos_name=function_payload.get("var_pos_name"),
                         var_kw_name=function_payload.get("var_kw_name"),
                     )
+                    if registration is None:
+                        raise PersistenceError(
+                            f"Failed to restore function in block '{block.registration_name}'"
+                        )
             else:
                 child = cls._from_payload(node_payload["payload"], project_root, parent=pipeline)
                 child.execution_priority = node_payload["execution_priority"]
@@ -370,6 +393,7 @@ class PipelineHandler:
         overrides: dict[str, Any] | None = None,
         upstream_outputs: dict[str, Any] | None = None,
         parent_config: dict[str, Any] | None = None,
+        sync_parent_on_completion: bool = True,
     ) -> tuple[RunRecord, dict[str, Any]]:
         run_id = uuid4().hex
         run_record = RunRecord(
@@ -406,6 +430,8 @@ class PipelineHandler:
                 self.artifact_registry = {}
                 run_record.status = "skipped"
                 run_record.produced_outputs.extend(sorted(skipped_outputs))
+                if sync_parent_on_completion:
+                    self._sync_attached_outputs_to_parent()
                 self.logger.warning(f"Skipped {mode} with run_id={run_id}")
                 return run_record, skipped_outputs
 
@@ -421,6 +447,7 @@ class PipelineHandler:
                         overrides=overrides,
                         upstream_outputs=visible_outputs,
                         parent_config=self.config_as_dict(),
+                        sync_parent_on_completion=False,
                     )
                 else:
                     produced_outputs = node.execute(
@@ -435,6 +462,8 @@ class PipelineHandler:
 
             run_record.status = "success"
             self._rebuild_visible_state(upstream_outputs)
+            if sync_parent_on_completion:
+                self._sync_attached_outputs_to_parent()
             self.logger.info(f"Completed {mode} with run_id={run_id}")
             return run_record, dict(self.para_value_dict)
         except Exception as exc:
@@ -456,6 +485,15 @@ class PipelineHandler:
         if not isinstance(node, PipelineHandler):
             self.blocks.append(node)
             self.blocks_by_name[node.registration_name] = node
+
+    def _validate_output_names_against_config(self, output_names: list[str]) -> None:
+        if not output_names:
+            return
+        conflicts = set(output_names).intersection(self._visible_config_names())
+        if conflicts:
+            raise RegistrationError(
+                f"Output names conflict with visible configuration fields: {sorted(conflicts)}"
+            )
 
     def _validate_node_registration(self, node: Any, execution_priority: int | None) -> None:
         existing = self.nodes_by_name.get(node.registration_name)
@@ -529,6 +567,21 @@ class PipelineHandler:
             visible.update(self.producer_outputs.get(node.registration_name, {}))
         return visible
 
+    def _incoming_parent_output_names(self) -> set[str]:
+        if self.parent_pipeline is None or self.execution_priority is None:
+            return set()
+        return self.parent_pipeline._declared_output_names_before_priority(self.execution_priority)
+
+    def _declared_output_names_before_priority(self, priority: int | None) -> set[str]:
+        output_names = set(self._incoming_parent_output_names())
+        if priority is None:
+            return output_names
+        for node in self._sorted_nodes():
+            if node.execution_priority >= priority:
+                break
+            output_names.update(self._node_declared_outputs(node))
+        return output_names
+
     def _incoming_parent_outputs(self) -> dict[str, Any]:
         if self.parent_pipeline is None or self.execution_priority is None:
             return {}
@@ -544,6 +597,9 @@ class PipelineHandler:
         for pipeline in reversed(chain):
             config.update(pipeline.config_as_dict())
         return config
+
+    def _visible_config_names(self) -> set[str]:
+        return set(self.config_as_dict()).union(self._ancestor_config_values())
 
     def _prepare_call_arguments(
         self,
@@ -761,6 +817,12 @@ class PipelineHandler:
         self.logger = parent.logger
         self._rewrite_artifact_paths(original_root, target_root)
 
+    def _sync_attached_outputs_to_parent(self) -> None:
+        if self.parent_pipeline is None or self.execution_priority is None:
+            return
+        self.parent_pipeline.producer_outputs[self.registration_name] = dict(self.para_value_dict)
+        self.parent_pipeline._invalidate_from_priority(self.execution_priority, include_target=False)
+
     def _rewrite_artifact_paths(self, old_root: Path, new_root: Path) -> None:
         old_prefix = str(old_root)
         new_prefix = str(new_root)
@@ -808,7 +870,10 @@ class PipelineHandler:
                 f"{indent}{self._color('PipelineHandler', 'green')}({self._color(self.registration_name, 'blue')})"
             )
         if self.gate_block is not None:
-            gate_args = self._color(", ".join(self.gate_block.registration.input_names), "yellow")
+            gate_args = self._color(
+                ", ".join(self._displayed_argument_names(self.gate_block.registration, None)),
+                "yellow",
+            )
             lines.append(
                 f"{indent}├── {self._color('[gate]', 'magenta')} {self._color(self.gate_block.registration.function_name, 'green')}({gate_args}) -> bool"
             )
@@ -836,11 +901,33 @@ class PipelineHandler:
                     )
                     for output_name in registration.output_names
                 ]
-                args = self._color(", ".join(registration.input_names), "yellow")
+                args = self._color(
+                    ", ".join(
+                        self._displayed_argument_names(
+                            registration,
+                            node.execution_priority,
+                        )
+                    ),
+                    "yellow",
+                )
                 lines.append(
-                    f"{child_indent}{function_prefix} {self._color(registration.function_name, 'green')}({args}) -> {', '.join(outputs)}"
+                    f"{child_indent}{function_prefix} {self._color(registration.function_name, 'green')}({args})"
+                    + (f" -> {', '.join(outputs)}" if outputs else "")
                 )
         return lines
+
+    def _displayed_argument_names(
+        self,
+        registration: FunctionRegistration,
+        priority: int | None,
+    ) -> list[str]:
+        visible_output_names = self._declared_output_names_before_priority(priority)
+        visible_config_names = self._visible_config_names()
+        return [
+            name
+            for name in registration.input_names
+            if name in visible_output_names or name in visible_config_names
+        ]
 
     def _read_result_history_from_file(self, file_path: str) -> list[str]:
         path = Path(file_path)

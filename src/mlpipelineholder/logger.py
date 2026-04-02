@@ -63,7 +63,7 @@ class PipelineLogger:
         color_map = {
             "DEBUG": "cyan",
             "INFO": "blue",
-            "WARNING": "yellow",
+            "WARNING": "magenta",
             "ERROR": "red",
             "CRITICAL": "red",
             "RESULT": "green",

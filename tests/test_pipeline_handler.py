@@ -85,6 +85,10 @@ def print_step(seed: int) -> int:
     return seed
 
 
+def verbose_step(seed: int, verbose: bool = True) -> int:
+    return seed
+
+
 def always_skip() -> bool:
     return False
 
@@ -246,10 +250,12 @@ class PipelineHandlerTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("priority", DemoConfig(base=1), tmp_path)
-            pipeline.add_block("first", 1)
+            first = pipeline.add_block("first", 1)
+            second = pipeline.add_block("second", 1)
 
-            with self.assertRaises(RegistrationError):
-                pipeline.add_block("second", 1)
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+            self.assertEqual(list(pipeline.nodes_by_name), ["first"])
 
     def test_update_config_overrides_known_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -259,13 +265,25 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(pipeline.config.factor, 9)
 
-    def test_update_config_rejects_unknown_fields(self) -> None:
+    def test_update_config_skips_names_conflicting_with_declared_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            pipeline.update_config({"seed": 99})
+
+            self.assertFalse(hasattr(pipeline.config, "seed"))
+
+    def test_update_config_allows_new_non_conflicting_fields(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
 
-            with self.assertRaises(ResolutionError):
-                pipeline.update_config({"missing": 9})
+            pipeline.update_config({"missing": 9})
+
+            self.assertEqual(getattr(pipeline.config, "missing"), 9)
 
     def test_get_value_loads_disk_backed_artifact(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -318,6 +336,8 @@ class PipelineHandlerTests(unittest.TestCase):
             setup.register_function(produce_seed, ["seed"])
             disk_block = pipeline.add_block("disk_write", 2)
             disk_block.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            third = pipeline.add_block("third", 3)
+            third.register_function(verbose_step, ["kept_seed"])
 
             chart = strip_ansi(pipeline.describe_pipeline())
 
@@ -326,6 +346,8 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("produce_seed(base) -> seed", chart)
             self.assertIn("[2] disk_write", chart)
             self.assertIn("save_text(seed) -> saved_blob*", chart)
+            self.assertIn("verbose_step(seed)", chart)
+            self.assertNotIn("verbose_step(seed, verbose)", chart)
 
     def test_str_and_repr_show_pipeline_chart(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -554,6 +576,37 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIsNone(child.parent_pipeline)
             self.assertEqual(child.project_root, tmp_path / "child")
+
+    def test_child_standalone_run_updates_parent_visible_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=3, factor=4), tmp_path / "parent")
+            setup = parent.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            final = parent.add_block("final", 3)
+            final.register_function(multiply, ["scaled_total"])
+
+            child = PipelineHandler("child", DemoConfig(base=100, factor=1), tmp_path / "child")
+            child_block = child.add_block("child_block", 1)
+            child_block.register_function(child_value, ["seed"])
+            parent.add_child_pipeline(child, 2)
+
+            parent.run_until("setup")
+            child.run_all()
+
+            self.assertEqual(parent.get_value("seed"), 104)
+            self.assertNotIn("scaled_total", parent.para_value_dict)
+
+    def test_output_name_conflicting_with_config_is_skipped(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("conflict", DemoConfig(base=2), tmp_path)
+            block = pipeline.add_block("setup", 1)
+
+            registration = block.register_function(produce_seed, ["base"])
+
+            self.assertIsNone(registration)
+            self.assertEqual(len(block.functions), 0)
 
     def test_top_level_gate_block_export_is_correct(self) -> None:
         self.assertIs(TopLevelGateBlock, GateBlock)
