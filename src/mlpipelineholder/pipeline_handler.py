@@ -155,6 +155,37 @@ class PipelineHandler:
             return self.artifact_store.load(value)
         return value
 
+    def get_full_config(self) -> dict[str, Any]:
+        return dict(self._ancestor_config_values(), **self.config_as_dict())
+
+    def get_config_value(self, field_name: str) -> Any:
+        config = self.get_full_config()
+        if field_name not in config:
+            raise ResolutionError(f"Unknown config field: {field_name}")
+        return config[field_name]
+
+    def get_block(self, block_name: str) -> Any:
+        node = self.nodes_by_name.get(block_name)
+        if node is None:
+            raise RegistrationError(f"Block not registered: {block_name}")
+        if isinstance(node, PipelineHandler):
+            raise RegistrationError(f"Registered node '{block_name}' is a child pipeline, not a block")
+        return node
+
+    def get_child_pipeline(self, pipeline_name: str) -> "PipelineHandler":
+        node = self.nodes_by_name.get(pipeline_name)
+        if node is None:
+            raise RegistrationError(f"Child pipeline not registered: {pipeline_name}")
+        if not isinstance(node, PipelineHandler):
+            raise RegistrationError(f"Registered node '{pipeline_name}' is a block, not a child pipeline")
+        return node
+
+    def reset_gate_block(self) -> None:
+        if self.gate_block is None:
+            return
+        self.gate_block = None
+        self._invalidate_all_outputs()
+
     def get_result_history(self) -> list[str]:
         # Attached child pipelines intentionally keep reading historical RESULT lines from
         # their own pre-attachment log path, while new runtime logging flows through the

@@ -17,9 +17,7 @@ class GateBlock:
         self.parent = parent
         self.config_field_name: str | None = None
 
-        if isinstance(function_or_path, str) and "." not in function_or_path and parent._config_has_field(
-            parent.config, function_or_path
-        ):
+        if isinstance(function_or_path, str) and "." not in function_or_path:
             self.config_field_name = function_or_path
             callable_obj = None
             import_path = None

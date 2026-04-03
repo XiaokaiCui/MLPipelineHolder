@@ -126,12 +126,6 @@ class ExecutionBlock:
                 var_kw_name=var_kw_name,
             )
         input_names = inspect_input_names(callable_obj)
-        conflicting_inputs = disk_names.intersection(set(input_names))
-        if conflicting_inputs:
-            raise RegistrationError(
-                f"Output names cannot overlap input names within the same function: {sorted(conflicting_inputs)}"
-            )
-
         registration = FunctionRegistration(
             function_name=function_name,
             import_path=import_path,

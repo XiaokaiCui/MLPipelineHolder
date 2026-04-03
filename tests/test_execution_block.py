@@ -29,6 +29,18 @@ def variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_items: 
     return (base + sum(extra_values) + sum(extra_items.values())) * factor
 
 
+def increment(value: int) -> int:
+    return value + 1
+
+
+def source_data(data: int) -> int:
+    return data
+
+
+def increment_data(data: int) -> int:
+    return data + 1
+
+
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -103,6 +115,19 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertIsNotNone(registration)
             self.assertEqual(registration.output_names, [])
             self.assertEqual(pipeline.para_value_dict, {})
+
+    def test_same_name_input_and_output_update_is_allowed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("update", {"source_value": 1}, tmp_path)
+            first = pipeline.add_block("first", 1)
+            first.register_function(source_data, ["data"], kw_mapping={"data": "source_value"})
+            second = pipeline.add_block("second", 2)
+            second.register_function(increment_data, ["data"])
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("data"), 2)
 
     def test_duplicate_function_registration_raises_without_force(self) -> None:
         with TemporaryDirectory() as temp_dir:

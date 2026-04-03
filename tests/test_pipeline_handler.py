@@ -346,6 +346,47 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(pipeline.config, {"new_value": 9})
 
+    def test_get_full_config_includes_nested_parent_chain(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            grandparent = PipelineHandler(
+                "grandparent", {"shared": "grand", "grand": 1}, tmp_path / "grandparent"
+            )
+            parent = PipelineHandler("parent", {"shared": "parent", "parent": 2}, tmp_path / "parent")
+            child = PipelineHandler("child", {"shared": "child", "child": 3}, tmp_path / "child")
+
+            grandparent.add_child_pipeline(parent, 1)
+            parent.add_child_pipeline(child, 1)
+
+            self.assertEqual(
+                child.get_full_config(),
+                {"shared": "child", "grand": 1, "parent": 2, "child": 3},
+            )
+
+    def test_get_config_value_prefers_child_over_parents(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            grandparent = PipelineHandler(
+                "grandparent", {"shared": "grand", "grand": 1}, tmp_path / "grandparent"
+            )
+            parent = PipelineHandler("parent", {"shared": "parent", "parent": 2}, tmp_path / "parent")
+            child = PipelineHandler("child", {"shared": "child", "child": 3}, tmp_path / "child")
+
+            grandparent.add_child_pipeline(parent, 1)
+            parent.add_child_pipeline(child, 1)
+
+            self.assertEqual(child.get_config_value("shared"), "child")
+            self.assertEqual(child.get_config_value("parent"), 2)
+            self.assertEqual(child.get_config_value("grand"), 1)
+
+    def test_get_config_value_raises_for_missing_key(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("config", {"present": 1}, tmp_path)
+
+            with self.assertRaises(ResolutionError):
+                pipeline.get_config_value("missing")
+
     def test_save_pipeline_defaults_to_project_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -390,6 +431,56 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.run_all()
 
             self.assertEqual(pipeline.get_value("saved_blob"), "value=3")
+
+    def test_get_block_returns_registered_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("lookup", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+
+            self.assertIs(pipeline.get_block("setup"), setup)
+
+    def test_get_child_pipeline_returns_registered_child(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=3), tmp_path / "child")
+            parent.add_child_pipeline(child, 1)
+
+            self.assertIs(parent.get_child_pipeline("child"), child)
+
+    def test_get_block_rejects_child_pipeline_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=3), tmp_path / "child")
+            parent.add_child_pipeline(child, 1)
+
+            with self.assertRaises(RegistrationError):
+                parent.get_block("child")
+
+    def test_get_child_pipeline_rejects_block_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("lookup", DemoConfig(base=2), tmp_path)
+            pipeline.add_block("setup", 1)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.get_child_pipeline("setup")
+
+    def test_reset_gate_block_clears_existing_gate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", {"run_enabled": False, "base": 1}, tmp_path)
+            pipeline.add_gate_block("run_enabled")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            pipeline.reset_gate_block()
+            run = pipeline.run_all()
+
+            self.assertEqual(run.status, "success")
+            self.assertEqual(pipeline.get_value("seed"), 2)
 
     def test_json_artifact_uses_json_serializer(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -653,6 +744,23 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(parent.get_value("child_result"), 104)
             self.assertEqual(child.get_value("child_result"), 104)
+
+    def test_child_gate_can_resolve_parent_config_field(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"run_child": False, "base": 3, "factor": 4}, tmp_path / "parent")
+            parent_setup = parent.add_block("setup", 1)
+            parent_setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("child", DemoConfig(base=100, factor=1), tmp_path / "child")
+            child.set_gate_block("run_child")
+            child_block = child.add_block("child_unique", 1)
+            child_block.register_function(unique_child_output, ["child_only"])
+
+            parent.add_child_pipeline(child, 2)
+            parent.run_all()
+
+            self.assertIsNone(parent.get_value("child_only"))
 
     def test_gate_block_skip_keeps_existing_parent_value_and_sets_unique_child_output_none(
         self,
