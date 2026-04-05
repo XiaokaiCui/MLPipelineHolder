@@ -67,7 +67,7 @@ class SaveLoadTests(unittest.TestCase):
             block.register_function(
                 mapped_variadic,
                 ["result"],
-                kw_mapping={"obj": "payload", "scale": "scale_value"},
+                param_mapping={"obj": "payload", "scale": "scale_value"},
                 var_pos_name="extra_args",
                 var_kw_name="extra_kwargs",
             )

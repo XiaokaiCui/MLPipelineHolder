@@ -85,6 +85,12 @@ def print_step(seed: int) -> int:
     return seed
 
 
+def debug_and_info_step(seed: int, logger) -> int:
+    logger.debug(f"debug-seed={seed}")
+    logger.info(f"info-seed={seed}")
+    return seed
+
+
 def verbose_step(seed: int, verbose: bool = True) -> int:
     return seed
 
@@ -103,6 +109,14 @@ def unique_child_output(seed: int) -> int:
 
 def always_true() -> bool:
     return True
+
+
+def needs_seed_gate(seed: int) -> bool:
+    return seed > 0
+
+
+def local_variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_items: int) -> int:
+    return (base + sum(extra_values) + sum(extra_items.values())) * factor
 
 
 def strip_ansi(text: str) -> str:
@@ -179,6 +193,67 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded.para_value_dict["seed"], 6)
             self.assertEqual(list(loaded.blocks_by_name), ["setup"])
 
+    def test_pipeline_logger_starts_with_blank_file_on_create(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            metadata_root = tmp_path / "metadata"
+            metadata_root.mkdir(parents=True, exist_ok=True)
+            log_path = metadata_root / "pipeline.log"
+            log_path.write_text("old log\n", encoding="utf-8")
+
+            pipeline = PipelineHandler("blank-log", DemoConfig(base=1), tmp_path)
+
+            self.assertEqual(pipeline.logger.log_file_path.read_text(encoding="utf-8"), "")
+
+    def test_load_pipeline_recreates_blank_runtime_log(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persisted", DemoConfig(base=5), project_dir)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            log_path = save_dir / "metadata" / "pipeline.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("stale log\n", encoding="utf-8")
+
+            loaded = PipelineHandler.load_pipeline(save_dir)
+
+            self.assertEqual(loaded.logger.log_file_path.read_text(encoding="utf-8"), "")
+
+    def test_save_pipeline_does_not_export_log_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persisted", DemoConfig(base=5), project_dir)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            self.assertFalse((save_dir / "exported.log").exists())
+
+    def test_save_pipeline_can_export_log_when_requested(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persisted", DemoConfig(base=5), project_dir)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            export_log = tmp_path / "exported.log"
+            pipeline.save_pipeline(save_dir, save_log_to_file=export_log)
+
+            self.assertTrue(export_log.exists())
+            self.assertIn("[INFO]", export_log.read_text(encoding="utf-8"))
+
     def test_duplicate_outputs_override_later_and_are_reported(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -194,6 +269,113 @@ class PipelineHandlerTests(unittest.TestCase):
             conflicts = pipeline.get_output_conflicts()
             self.assertEqual(conflicts["seed"]["created_by"], "dup/first")
             self.assertEqual(conflicts["seed"]["overridden_by"], ["dup/second"])
+
+    def test_float_priority_branch_group_executes_first_matching_node_only(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("branching", {"pick_first": True, "base": 1, "factor": 2}, tmp_path)
+            first = pipeline.add_block("first", 5.1)
+            first.register_function(produce_seed, ["seed"])
+
+            second_child = PipelineHandler("second_child", {"pick_first": False, "base": 100}, tmp_path / "child")
+            second_child.set_gate_block("pick_first")
+            child_block = second_child.add_block("child_block", 1.0)
+            child_block.register_function(child_value, ["seed"])
+            pipeline.add_child_pipeline(second_child, 5.3)
+
+            final = pipeline.add_block("final", 6.0)
+            final.register_function(multiply, ["scaled_total"])
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("seed"), 2)
+            self.assertEqual(pipeline.get_value("scaled_total"), 4)
+
+    def test_get_priority_group_returns_group_names_and_active_node(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("branching", {"run_child": True, "base": 1}, tmp_path)
+            first_child = PipelineHandler("child_a", {"base": 2}, tmp_path / "a")
+            first_child.set_gate_block("run_child")
+            first_child.add_block("child_block", 1.0)
+            pipeline.add_child_pipeline(first_child, 5.1)
+
+            second = pipeline.add_block("second", 5.2)
+            second.register_function(produce_seed, ["seed"])
+
+            names, active = pipeline.get_priority_group(5)
+
+            self.assertEqual(names, ["child_a", "second"])
+            self.assertEqual(active, "child_a")
+
+    def test_get_priority_group_assumes_true_when_callable_gate_inputs_are_not_ready(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("branching", {"base": 1}, tmp_path)
+            child = PipelineHandler("child_a", {"base": 2}, tmp_path / "a")
+            child.set_gate_block(needs_seed_gate)
+            child_block = child.add_block("child_block", 1.0)
+            child_block.register_function(child_value, ["child_result"])
+            pipeline.add_child_pipeline(child, 5.1)
+
+            second = pipeline.add_block("second", 5.2)
+            second.register_function(produce_seed, ["seed"])
+
+            names, active = pipeline.get_priority_group(5)
+
+            self.assertEqual(names, ["child_a", "second"])
+            self.assertEqual(active, "child_a")
+
+    def test_same_integer_priority_uses_next_node_when_first_child_gate_is_false(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("branching", {"run_child": False, "base": 1, "factor": 3}, tmp_path)
+            first_child = PipelineHandler("child_a", {"base": 2}, tmp_path / "a")
+            first_child.set_gate_block("run_child")
+            child_block = first_child.add_block("child_block", 1.0)
+            child_block.register_function(child_value, ["seed"])
+            pipeline.add_child_pipeline(first_child, 5.1)
+
+            second = pipeline.add_block("second", 5.2)
+            second.register_function(produce_seed, ["seed"])
+            final = pipeline.add_block("final", 6.0)
+            final.register_function(multiply, ["scaled_total"])
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("seed"), 2)
+            self.assertEqual(pipeline.get_value("scaled_total"), 6)
+
+    def test_chart_greys_child_pipeline_with_false_config_gate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"run_child": False, "base": 1}, tmp_path / "parent")
+            child = PipelineHandler("child", {"base": 2}, tmp_path / "child")
+            child.set_gate_block("run_child")
+            child_block = child.add_block("child_block", 1.0)
+            child_block.register_function(child_value, ["child_result"])
+            parent.add_child_pipeline(child, 5.1)
+
+            chart = parent.describe_pipeline()
+
+            self.assertRegex(chart, r"\x1b\[(3[1-6])m")
+
+    def test_chart_greys_child_pipeline_when_config_misses_expected_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler(
+                "parent", {"model_cls": "cls_b", "base": 1}, tmp_path / "parent"
+            )
+            child = PipelineHandler("child", {"base": 2}, tmp_path / "child")
+            child.set_gate_block("model_cls", "cls_a")
+            child_block = child.add_block("child_block", 1.0)
+            child_block.register_function(child_value, ["child_result"])
+            parent.add_child_pipeline(child, 5.1)
+
+            chart = parent.describe_pipeline()
+
+            self.assertRegex(chart, r"\x1b\[(3[1-6])m")
+            self.assertRegex(chart, r"\x1b\[(37|97)m[├└│─ ]+")
 
     def test_overridden_disk_artifact_is_cleaned_when_later_value_is_in_memory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -313,11 +495,57 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(run.status, "skipped")
             self.assertIsNone(pipeline.get_value("seed"))
 
+    def test_config_gate_can_use_custom_expected_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", {"model_cls": "cls_b", "base": 1}, tmp_path)
+            pipeline.add_gate_block("model_cls", "cls_a")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            run = pipeline.run_all()
+
+            self.assertEqual(run.status, "skipped")
+            self.assertIsNone(pipeline.get_value("seed"))
+
+    def test_config_gate_custom_expected_value_runs_when_matched(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", {"model_cls": "cls_a", "base": 1}, tmp_path)
+            pipeline.add_gate_block("model_cls", "cls_a")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            run = pipeline.run_all()
+
+            self.assertEqual(run.status, "success")
+            self.assertEqual(pipeline.get_value("seed"), 2)
+
     def test_boolean_config_gate_round_trips_with_new_api(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("gate", {"run_enabled": False}, tmp_path / "project")
             pipeline.add_gate_block("run_enabled")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            run = loaded.run_all()
+
+            self.assertEqual(run.status, "skipped")
+            self.assertIsNone(loaded.get_value("seed"))
+
+    def test_custom_expected_value_gate_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "gate",
+                {"model_cls": "cls_b", "base": 1},
+                tmp_path / "project",
+            )
+            pipeline.add_gate_block("model_cls", "cls_a")
             block = pipeline.add_block("setup", 1)
             block.register_function(produce_seed, ["seed"])
 
@@ -535,6 +763,37 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertNotIn("verbose_step(seed, verbose)", chart)
             self.assertNotIn("-> bool", chart)
 
+    def test_chart_shows_block_scoped_args_and_kwargs_only_when_referenced(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "describe-helpers",
+                {
+                    "base_value": 1,
+                    "factor_value": 2,
+                    "arg_one": 3,
+                    "arg_two": 4,
+                    "kw_bonus": 5,
+                },
+                tmp_path,
+            )
+            block = pipeline.add_block("block", 1)
+            block.register_args("args_a", ("arg_one", "arg_two"))
+            block.register_kwargs("kwargs_a", {"bonus": "kw_bonus"})
+            block.register_args("unused_args", ("arg_one",))
+            block.register_function(
+                local_variadic_sum,
+                ["result"],
+                param_mapping={"base": "base_value", "factor": "factor_value"},
+                var_pos_name="args_a",
+                var_kw_name="kwargs_a",
+            )
+
+            chart = strip_ansi(pipeline.describe_pipeline())
+
+            self.assertIn("local_variadic_sum(base_value, factor_value, args_a, kwargs_a)", chart)
+            self.assertNotIn("unused_args", chart)
+
     def test_str_and_repr_show_pipeline_chart(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -557,10 +816,10 @@ class PipelineHandlerTests(unittest.TestCase):
 
             history = pipeline.get_result_history()
             self.assertEqual(len(history), 1)
-            self.assertIn("[RESULT] final-seed=5", history[0])
+            self.assertIn(" RESULT final-seed=5", history[0])
             log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
-            self.assertIn("[INFO] seed=5", log_text)
-            self.assertIn("[RESULT] final-seed=5", log_text)
+            self.assertIn(" INFO seed=5", log_text)
+            self.assertIn(" RESULT final-seed=5", log_text)
 
     def test_print_result_history_writes_result_entries(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -576,7 +835,7 @@ class PipelineHandlerTests(unittest.TestCase):
             with patch("sys.stdout", output):
                 pipeline.print_result_history()
 
-            self.assertIn("[RESULT] final-seed=5", output.getvalue())
+            self.assertIn(" RESULT final-seed=5", output.getvalue())
 
     def test_clear_result_history_keeps_disk_log(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -610,7 +869,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertIn("printed-seed=5", output.getvalue())
-            self.assertIn("[PRINT] printed-seed=5", log_text)
+            self.assertIn(" PRINT printed-seed=5", log_text)
 
     def test_print_output_can_be_logger_only(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -628,7 +887,31 @@ class PipelineHandlerTests(unittest.TestCase):
 
             log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertNotIn("printed-seed=5", output.getvalue())
-            self.assertIn("[PRINT] printed-seed=5", log_text)
+            self.assertIn(" PRINT printed-seed=5", log_text)
+
+    def test_set_log_level_filters_debug_but_keeps_info(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("logging", DemoConfig(base=4), tmp_path)
+            pipeline.set_log_level("info")
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            logging_block = pipeline.add_block("logging", 2)
+            logging_block.register_function(debug_and_info_step, ["logged_seed"])
+
+            pipeline.run_all()
+
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn(" DEBUG debug-seed=5", log_text)
+            self.assertIn(" INFO info-seed=5", log_text)
+
+    def test_set_log_level_rejects_unknown_level(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("logging", DemoConfig(base=4), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.set_log_level("nope")
 
     def test_save_project_defaults_to_project_root(self) -> None:
         with TemporaryDirectory() as temp_dir:

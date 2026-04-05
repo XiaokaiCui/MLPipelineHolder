@@ -13,9 +13,10 @@ if TYPE_CHECKING:
 class GateBlock:
     """Runs a single boolean function before the rest of a pipeline."""
 
-    def __init__(self, parent: PipelineHandler, function_or_path: Any) -> None:
+    def __init__(self, parent: PipelineHandler, function_or_path: Any, expected_value: Any = True) -> None:
         self.parent = parent
         self.config_field_name: str | None = None
+        self.expected_value = expected_value
 
         if isinstance(function_or_path, str) and "." not in function_or_path:
             self.config_field_name = function_or_path
@@ -50,10 +51,9 @@ class GateBlock:
                 parent_config,
                 {},
                 [],
+                set(visible_outputs).union(self.parent.list_declared_outputs()),
             )
-            if not isinstance(value, bool):
-                raise ExecutionError("Gate config field must resolve to a boolean value")
-            return value
+            return value == self.expected_value
 
         positional_args, keyword_args, _ = self.parent._prepare_call_arguments(
             self.registration,
@@ -68,7 +68,11 @@ class GateBlock:
 
     def serialize(self) -> dict[str, str]:
         if self.config_field_name is not None:
-            return {"kind": "config_field", "field_name": self.config_field_name}
+            return {
+                "kind": "config_field",
+                "field_name": self.config_field_name,
+                "expected_value": self.expected_value,
+            }
         if self.registration.import_path is None:
             raise RegistrationError(
                 f"Gate function '{self.registration.function_name}' is not importable"

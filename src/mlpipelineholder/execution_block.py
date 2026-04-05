@@ -6,7 +6,13 @@ from typing import TYPE_CHECKING, Any
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
 from .function_registry import inspect_input_names, rename_args, resolve_callable
-from .models import FunctionExecutionResult, FunctionRegistration
+from .function_registry import inspect_exposed_input_names
+from .models import (
+    BlockArgsRegistration,
+    BlockKwargsRegistration,
+    FunctionExecutionResult,
+    FunctionRegistration,
+)
 
 if TYPE_CHECKING:
     from .pipeline_handler import PipelineHandler
@@ -16,20 +22,55 @@ class ExecutionBlock:
     """Represents one priority level whose registered functions run in parallel."""
 
     def __init__(
-        self, parent: PipelineHandler, registration_name: str, execution_priority: int
+        self, parent: PipelineHandler, registration_name: str, execution_priority: float
     ) -> None:
         self.parent = parent
         self.registration_name = registration_name
         self.execution_priority = execution_priority
         self.functions: list[FunctionRegistration] = []
+        self.registered_args: dict[str, BlockArgsRegistration] = {}
+        self.registered_kwargs: dict[str, BlockKwargsRegistration] = {}
+
+    def register_args(
+        self, name: str, ordered_items: tuple[str, ...] | list[str], forced: bool = False
+    ) -> BlockArgsRegistration | None:
+        try:
+            if name in self.registered_args and not forced:
+                raise RegistrationError(
+                    f"Args helper '{name}' is already registered in block '{self.registration_name}'"
+                )
+            registration = BlockArgsRegistration(name=name, ordered_items=list(ordered_items))
+            self.registered_args[name] = registration
+            return registration
+        except RegistrationError as exc:
+            self.parent.logger.warning(
+                f"Skipped args helper registration in block '{self.registration_name}': {exc}"
+            )
+            return None
+
+    def register_kwargs(
+        self, name: str, mapping_dct: dict[str, str], forced: bool = False
+    ) -> BlockKwargsRegistration | None:
+        try:
+            if name in self.registered_kwargs and not forced:
+                raise RegistrationError(
+                    f"Kwargs helper '{name}' is already registered in block '{self.registration_name}'"
+                )
+            registration = BlockKwargsRegistration(name=name, mapping_dct=dict(mapping_dct))
+            self.registered_kwargs[name] = registration
+            return registration
+        except RegistrationError as exc:
+            self.parent.logger.warning(
+                f"Skipped kwargs helper registration in block '{self.registration_name}': {exc}"
+            )
+            return None
 
     def register_function(
         self,
         function_or_path: Any,
         output_variable_names: str | list[str] | tuple[str, ...] | None,
         save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
-        kw_mapping: dict[str, str] | None = None,
-        pos_mapping: dict[int, int] | None = None,
+        param_mapping: dict[str, str] | None = None,
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
         forced: bool = False,
@@ -54,8 +95,7 @@ class ExecutionBlock:
                 function_or_path,
                 output_variable_names,
                 save_to_disk=save_to_disk,
-                kw_mapping=kw_mapping,
-                pos_mapping=pos_mapping,
+                param_mapping=param_mapping,
                 var_pos_name=var_pos_name,
                 var_kw_name=var_kw_name,
                 forced=forced,
@@ -72,15 +112,12 @@ class ExecutionBlock:
         function_or_path: Any,
         output_variable_names: str | list[str] | tuple[str, ...] | None,
         save_to_disk: list[str] | tuple[str, ...] | set[str] | None = None,
-        kw_mapping: dict[str, str] | None = None,
-        pos_mapping: dict[int, int] | None = None,
+        param_mapping: dict[str, str] | None = None,
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
         forced: bool = False,
     ) -> FunctionRegistration:
         del forced
-        if pos_mapping:
-            raise RegistrationError("pos_mapping is not supported")
         if output_variable_names is None:
             output_names: list[str] = []
         elif isinstance(output_variable_names, str):
@@ -109,23 +146,12 @@ class ExecutionBlock:
         self.parent._validate_output_names_against_config(output_names)
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
-        signature = inspect.signature(callable_obj)
-        if (
-            any(
-                parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-                for parameter in signature.parameters.values()
-            )
-            or kw_mapping
-            or var_pos_name
-            or var_kw_name
-        ):
-            callable_obj = rename_args(
-                callable_obj,
-                kw_mapping=kw_mapping,
-                var_pos_name=var_pos_name,
-                var_kw_name=var_kw_name,
-            )
-        input_names = inspect_input_names(callable_obj)
+        input_names = inspect_exposed_input_names(
+            callable_obj,
+            param_mapping=param_mapping,
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
+        )
         registration = FunctionRegistration(
             function_name=function_name,
             import_path=import_path,
@@ -133,7 +159,7 @@ class ExecutionBlock:
             input_names=input_names,
             output_names=output_names,
             save_to_disk=disk_names,
-            kw_mapping=dict(kw_mapping or {}),
+            param_mapping=dict(param_mapping or {}),
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
         )
@@ -240,6 +266,7 @@ class ExecutionBlock:
             overrides,
             visible_outputs,
             parent_config,
+            block=self,
         )
         try:
             result = self.parent._capture_prints(

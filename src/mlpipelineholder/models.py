@@ -32,9 +32,25 @@ class FunctionRegistration:
     input_names: list[str]
     output_names: list[str]
     save_to_disk: set[str]
-    kw_mapping: dict[str, str] = field(default_factory=dict)
+    param_mapping: dict[str, str] = field(default_factory=dict)
     var_pos_name: str | None = None
     var_kw_name: str | None = None
+
+
+@dataclass(slots=True)
+class BlockArgsRegistration:
+    """Block-scoped ordered items used to build *args for specific functions."""
+
+    name: str
+    ordered_items: list[str]
+
+
+@dataclass(slots=True)
+class BlockKwargsRegistration:
+    """Block-scoped name mapping used to build **kwargs for specific functions."""
+
+    name: str
+    mapping_dct: dict[str, str]
 
 
 @dataclass(slots=True)

@@ -41,6 +41,24 @@ def increment_data(data: int) -> int:
     return data + 1
 
 
+def recorder_step(model: int, recorder: list[int] | None = None) -> tuple[int, list[int]]:
+    next_recorder = [] if recorder is None else list(recorder)
+    next_recorder.append(model)
+    return model + 1, next_recorder
+
+
+def duplicate_mapping_use(training_metric_divider: int, eval_metric_divider: int) -> tuple[int, int]:
+    return training_metric_divider, eval_metric_divider
+
+
+def optional_recorders(train_recorder: list[int] | None, eval_recorder: list[int] | None) -> tuple[list[int], list[int]]:
+    next_train = [] if train_recorder is None else list(train_recorder)
+    next_eval = [] if eval_recorder is None else list(eval_recorder)
+    next_train.append(1)
+    next_eval.append(2)
+    return next_train, next_eval
+
+
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -70,7 +88,7 @@ class ExecutionBlockTests(unittest.TestCase):
             block.register_function(
                 variadic_sum,
                 ["result"],
-                kw_mapping={"base": "base_value", "factor": "factor_value"},
+                param_mapping={"base": "base_value", "factor": "factor_value"},
                 var_pos_name="function_args",
                 var_kw_name="function_kwargs",
             )
@@ -79,16 +97,34 @@ class ExecutionBlockTests(unittest.TestCase):
 
             self.assertEqual(pipeline.get_value("result"), 26)
 
-    def test_pos_mapping_is_rejected(self) -> None:
+    def test_block_scoped_args_and_kwargs_helpers_are_used(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
-            pipeline = PipelineHandler("variadic", BlockConfig(value=1), tmp_path)
+            pipeline = PipelineHandler(
+                "helpers",
+                {
+                    "base_value": 1,
+                    "factor_value": 2,
+                    "arg_one": 3,
+                    "arg_two": 4,
+                    "kw_bonus": 5,
+                },
+                tmp_path,
+            )
             block = pipeline.add_block("block", 1)
+            block.register_args("args_a", ("arg_one", "arg_two"))
+            block.register_kwargs("kwargs_a", {"bonus": "kw_bonus"})
+            block.register_function(
+                variadic_sum,
+                ["result"],
+                param_mapping={"base": "base_value", "factor": "factor_value"},
+                var_pos_name="args_a",
+                var_kw_name="kwargs_a",
+            )
 
-            registration = block.register_function(passthrough, ["result"], pos_mapping={0: 1})
+            pipeline.run_all()
 
-            self.assertIsNone(registration)
-            self.assertEqual(len(block.functions), 0)
+            self.assertEqual(pipeline.get_value("result"), 26)
 
     def test_save_to_disk_must_be_subset_of_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -121,13 +157,68 @@ class ExecutionBlockTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("update", {"source_value": 1}, tmp_path)
             first = pipeline.add_block("first", 1)
-            first.register_function(source_data, ["data"], kw_mapping={"data": "source_value"})
+            first.register_function(source_data, ["data"], param_mapping={"data": "source_value"})
             second = pipeline.add_block("second", 2)
             second.register_function(increment_data, ["data"])
 
             pipeline.run_all()
 
             self.assertEqual(pipeline.get_value("data"), 2)
+
+    def test_run_block_reuses_prior_same_block_outputs_when_inputs_share_output_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("rerun", {"source_model": 1}, tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(source_data, ["model"], param_mapping={"data": "source_model"})
+            block = pipeline.add_block("block", 2)
+            block.register_function(
+                recorder_step,
+                ["model", "recorder"],
+            )
+
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("model"), 2)
+            self.assertEqual(pipeline.get_value("recorder"), [1])
+
+            pipeline.run_block("block")
+
+            self.assertEqual(pipeline.get_value("model"), 3)
+            self.assertEqual(pipeline.get_value("recorder"), [1, 2])
+
+    def test_multiple_params_can_map_to_same_pipeline_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dup-map", {"me_sample_size": 7}, tmp_path)
+            block = pipeline.add_block("block", 1)
+            block.register_function(
+                duplicate_mapping_use,
+                ["train_divider", "eval_divider"],
+                param_mapping={
+                    "training_metric_divider": "me_sample_size",
+                    "eval_metric_divider": "me_sample_size",
+                },
+            )
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("train_divider"), 7)
+            self.assertEqual(pipeline.get_value("eval_divider"), 7)
+
+    def test_first_run_uses_none_for_unassigned_declared_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("optional-recorders", {}, tmp_path)
+            block = pipeline.add_block("block", 1)
+            block.register_function(
+                optional_recorders,
+                ["train_recorder", "eval_recorder"],
+            )
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("train_recorder"), [1])
+            self.assertEqual(pipeline.get_value("eval_recorder"), [2])
 
     def test_duplicate_function_registration_raises_without_force(self) -> None:
         with TemporaryDirectory() as temp_dir:

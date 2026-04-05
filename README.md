@@ -2,6 +2,41 @@
 
 Lightweight Python library for building, running, recording, and modifying small machine-learning pipelines.
 
+## At a glance
+
+### What is this project?
+
+MLPipelineHolder is a lightweight pipeline orchestration library for experiment-driven machine-learning workflows. It focuses on building pipelines out of explicit execution blocks and nested child pipelines while keeping the runtime model easy to inspect and modify.
+
+### What does this project do?
+
+It helps you:
+
+- define a pipeline from reusable execution blocks
+- run full pipelines, individual blocks, or partial downstream segments
+- store large intermediate artifacts on disk automatically
+- track logs, results, and saved pipeline state
+- branch execution cleanly with gates, float-priority groups, and child pipelines
+
+### What makes it different?
+
+Compared with heavier workflow/orchestration tools, this project is optimized for local Python-first experimentation and explicit control.
+
+Its main advantages are:
+
+- very small mental model: blocks, pipelines, gates, artifacts
+- easy partial reruns and direct manipulation of registered blocks/pipelines
+- nested pipelines with parent/child config and output visibility rules
+- built-in experiment-friendly logging, charting, and save/load support without needing a full platform
+
+### Two best use cases
+
+1. **Iterative ML experimentation on one codebase**
+   - when you want to rerun only certain stages, swap model branches, and keep artifacts/results organized without adopting a heavyweight workflow system
+
+2. **Modular training/evaluation pipelines with reusable branches**
+   - when you want parent pipelines to orchestrate multiple child pipelines such as different model families, preprocessing branches, or conditional training flows
+
 The project is centered on two concepts:
 
 - `PipelineHandler`: owns config, block registration, execution state, artifacts, run history, persistence, and logging
@@ -15,7 +50,8 @@ This project is implemented and tested.
 
 Current verified behavior includes:
 
-- ordered block execution by unique priority
+- ordered node execution by numeric priority, including float priorities
+- branch-style execution groups based on the integer part of float priorities
 - parallel function execution inside a block
 - automatic argument binding from runtime overrides, pipeline values, config fields, and function defaults
 - in-memory outputs plus disk-backed artifacts for selected outputs
@@ -59,7 +95,8 @@ poetry install --no-interaction
 ```text
 MLPipelineHolder/
 ├── examples/
-│   └── simple_pipeline.py
+│   ├── comprehensive_pipeline.py
+│   └── example_run/
 ├── src/
 │   ├── __init__.py
 │   ├── main.py
@@ -119,10 +156,12 @@ It manages:
 Each block has:
 
 - a block name
-- a unique execution priority
+- a numeric execution priority
 - one or more registered functions
 
 All functions inside the same block run in parallel.
+
+Parent-level execution can also use float priorities for branch groups. For example, `5.1`, `5.3`, and `5.9` all belong to group `5`. Once one node in that integer-priority group actually executes, later nodes in the same group are skipped automatically.
 
 ### 3. Argument resolution
 
@@ -213,7 +252,7 @@ def mapped_variadic(obj: int, *more_values: int, scale: int = 1, **extra_values:
 block.register_function(
     mapped_variadic,
     ["result"],
-    kw_mapping={"obj": "payload", "scale": "scale_value"},
+    param_mapping={"obj": "payload", "scale": "scale_value"},
     var_pos_name="extra_args",
     var_kw_name="extra_kwargs",
 )
@@ -228,7 +267,6 @@ This lets the pipeline resolve:
 
 Rules:
 
-- `pos_mapping` is intentionally not supported
 - renamed variadic positional values must resolve to a `list` or `tuple`
 - renamed variadic keyword values must resolve to a `dict`
 - mapping metadata is preserved on save/load
@@ -254,6 +292,20 @@ Rules:
 - the pipeline may be created with `configuration=None`, which is treated as an empty config
 - non-conflicting new fields may be added
 - updates that would conflict with declared output names are skipped with a warning
+
+### Inspect config
+
+```python
+full_config = pipeline.get_full_config()
+model_cls = pipeline.get_config_value("model_cls")
+```
+
+Behavior:
+
+- `get_full_config()` returns the visible merged config for the pipeline
+- parent configs are included recursively for nested child pipelines
+- current pipeline config overrides same-named parent values
+- `get_config_value(name)` raises if the key does not exist
 
 ### Access values safely
 
@@ -348,6 +400,14 @@ Behavior:
 - the parent logger is used for future child execution
 - if an attached child pipeline is run directly, its current outputs are synced back into the parent visible state and downstream parent outputs are invalidated
 
+Helper accessors:
+
+```python
+block = pipeline.get_block("setup")
+child = pipeline.get_child_pipeline("child_pipeline")
+pipeline.reset_gate_block()
+```
+
 ### Add a gate block
 
 ```python
@@ -371,11 +431,20 @@ pipeline = PipelineHandler("demo", {"run_enabled": False}, Path("demo_run"))
 pipeline.add_gate_block("run_enabled")
 ```
 
+Or compare against any expected basic value:
+
+```python
+pipeline.add_gate_block("model_cls", "cls_a")
+pipeline.add_gate_block("enabled", False)
+pipeline.add_gate_block("score_mode", 3.333)
+```
+
 Rules:
 
 - one gate block per pipeline
 - the gate block runs before every other node
-- it must return `True` or `False`
+- it may be defined by a callable that returns `True`/`False`
+- it may be defined by a config field plus an expected value
 - when `False`, the whole pipeline is skipped
 - skipping does not overwrite an existing upstream value with `None`; it only exposes `None` for unique outputs introduced by that skipped pipeline
 
@@ -409,7 +478,25 @@ Current chart format includes:
 - output names
 - `*` marker for disk-backed outputs
 
+Additional chart behavior:
+
+- child pipelines gated off by config are greyed out when the current config value does not match the gate’s expected value
+- the root pipeline is never greyed out this way
+
 Gate lines do not show `-> bool`, and chart symbols such as `()` and `->` use the same color family as priority markers for readability.
+
+### Priority group helper
+
+```python
+names, active = pipeline.get_priority_group(5)
+```
+
+Returns:
+
+- all node names whose priority has integer part `5`
+- the node name most likely to execute under the current state, or `None`
+
+For callable-gated child pipelines, if the gate cannot yet be evaluated because required inputs are not available, the helper assumes that child has the best chance to run.
 
 ### Output conflicts and overrides
 
@@ -468,26 +555,28 @@ Print capture modes:
 Run:
 
 ```bash
-poetry run python examples/simple_pipeline.py
-poetry run python examples/nested_pipeline.py
+poetry run python examples/comprehensive_pipeline.py
 ```
 
-The example demonstrates:
+The comprehensive example demonstrates:
 
 - config-backed execution
 - multiple blocks
+- parent/child pipeline registration
+- config-based child gates with expected values
+- float priority branch groups
+- block-scoped args/kwargs helpers
 - disk artifact storage
 - chart rendering
 - injected logger usage
 - result history collection
+- config inspection helpers
+- priority-group inspection helper
+- save/load round-trip
 
-The nested example demonstrates:
+It writes its runtime data under:
 
-- parent/child pipeline registration
-- child gate block behavior
-- child config overriding parent config inside the child only
-- parent consumption of child outputs
-- hierarchical chart output
+- `examples/example_run/`
 
 ## Persistence model
 
@@ -501,8 +590,8 @@ Projects are saved as:
 
 ## Rules and safeguards
 
-- block priorities must be unique
-- child pipeline priorities must also be unique at the parent level
+- exact parent-level priorities must be unique
+- multiple nodes may share the same integer priority group by using float priorities such as `5.1`, `5.2`, `5.9`
 - duplicate outputs inside the same parallel block are rejected
 - duplicate outputs across different parent-level nodes are allowed and resolved by execution order
 - renamed keyword arguments are supported during registration
