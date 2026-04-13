@@ -277,8 +277,9 @@ class ExecutionBlock:
         except ResolutionError:
             raise
         except Exception as exc:
+            callable_label = registration.import_path or registration.function_name
             raise ExecutionError(
-                f"Function '{registration.function_name}' in block '{self.registration_name}' failed"
+                f"Function '{registration.function_name}' ({callable_label}) in block '{self.registration_name}' failed: {type(exc).__name__}: {exc}"
             ) from exc
 
         outputs = self._normalize_outputs(registration, result)
@@ -295,13 +296,22 @@ class ExecutionBlock:
         if len(registration.output_names) == 1:
             return {registration.output_names[0]: result}
 
+        callable_label = registration.import_path or registration.function_name
         if not isinstance(result, (tuple, list)):
             raise ExecutionError(
-                f"Function '{registration.function_name}' must return tuple/list matching declared outputs"
+                f"Function '{registration.function_name}' ({callable_label}) declared multiple outputs {registration.output_names} "
+                f"but returned {type(result).__name__}: {ExecutionBlock._preview_value(result)}"
             )
         if len(result) != len(registration.output_names):
             raise ExecutionError(
-                f"Function '{registration.function_name}' returned {len(result)} values but "
-                f"{len(registration.output_names)} outputs were declared"
+                f"Function '{registration.function_name}' ({callable_label}) returned {len(result)} values but "
+                f"{len(registration.output_names)} outputs were declared: {registration.output_names}"
             )
         return dict(zip(registration.output_names, result, strict=True))
+
+    @staticmethod
+    def _preview_value(value: Any, max_length: int = 200) -> str:
+        preview = repr(value)
+        if len(preview) > max_length:
+            return preview[: max_length - 3] + "..."
+        return preview

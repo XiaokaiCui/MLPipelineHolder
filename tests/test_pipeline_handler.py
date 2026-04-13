@@ -11,7 +11,7 @@ from unittest.mock import patch
 import warnings
 
 from src import GateBlock as TopLevelGateBlock
-from src.mlpipelineholder import GateBlock, PipelineHandler, RegistrationError, ResolutionError
+from src.mlpipelineholder import ExecutionError, GateBlock, PipelineHandler, RegistrationError, ResolutionError
 from src.mlpipelineholder.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
 
 
@@ -599,6 +599,23 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(pipeline.para_value_dict["first_value"], 3)
             self.assertEqual(pipeline.para_value_dict["second_value"], 4)
 
+    def test_multi_output_error_reports_returned_type_and_declared_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("shape-error", DemoConfig(base=2), tmp_path)
+            first = pipeline.add_block("first", 1)
+            first.register_function(produce_seed, ["seed"])
+            second = pipeline.add_block("second", 2)
+            second.register_function(branch_left, ["left", "right"])
+
+            with self.assertRaises(ExecutionError) as exc_info:
+                pipeline.run_all()
+
+            message = str(exc_info.exception)
+            self.assertIn("branch_left", message)
+            self.assertIn("returned int", message)
+            self.assertIn("['left', 'right']", message)
+
     def test_missing_argument_raises_resolution_error(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1141,6 +1158,20 @@ class PipelineHandlerTests(unittest.TestCase):
             )
             self.assertEqual(grandchild.project_root, expected_root)
             self.assertEqual(grandchild.metadata_root, expected_root / "metadata")
+
+    def test_child_attachment_removes_old_root_after_move(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=1), tmp_path / "parent")
+            child_root = tmp_path / "child"
+            child_root.mkdir(parents=True, exist_ok=True)
+            (child_root / "marker.txt").write_text("moved", encoding="utf-8")
+            child = PipelineHandler("child", DemoConfig(base=2), child_root)
+
+            parent.add_child_pipeline(child, 1)
+
+            self.assertFalse(child_root.exists())
+            self.assertTrue((parent.project_root / "children" / "child" / "marker.txt").exists())
 
     def test_load_project_emits_function_preservation_warning(self) -> None:
         with TemporaryDirectory() as temp_dir:

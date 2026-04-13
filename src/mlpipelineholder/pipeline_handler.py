@@ -1458,6 +1458,8 @@ class PipelineHandler:
                     else:
                         destination.unlink()
                 shutil.move(str(entry), str(destination))
+            if original_root.exists() and not any(original_root.iterdir()):
+                original_root.rmdir()
         moved_log_path = target_root / "metadata" / "pipeline.log"
         self.historical_result_log_path = str(moved_log_path)
         self.project_root = target_root
