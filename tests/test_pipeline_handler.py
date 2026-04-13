@@ -6,12 +6,13 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import MagicMock
 from unittest.mock import patch
 import warnings
 
 from src import GateBlock as TopLevelGateBlock
 from src.mlpipelineholder import GateBlock, PipelineHandler, RegistrationError, ResolutionError
-from src.mlpipelineholder.models import ArtifactRecord
+from src.mlpipelineholder.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
 
 
 @dataclass
@@ -111,12 +112,52 @@ def always_true() -> bool:
     return True
 
 
+def always_false() -> bool:
+    return False
+
+
 def needs_seed_gate(seed: int) -> bool:
     return seed > 0
 
 
 def local_variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_items: int) -> int:
     return (base + sum(extra_values) + sum(extra_items.values())) * factor
+
+
+def build_torch_model():
+    from importlib import import_module
+
+    torch = import_module("torch")
+    return torch.nn.Linear(2, 1)
+
+
+def build_torch_optimizer():
+    from importlib import import_module
+
+    torch = import_module("torch")
+    model = torch.nn.Linear(2, 1)
+    return torch.optim.SGD(model.parameters(), lr=0.1)
+
+
+def build_torch_model_optimizer_pairs():
+    from importlib import import_module
+
+    torch = import_module("torch")
+    me_model = torch.nn.Linear(2, 1)
+    me_optimizer = torch.optim.SGD(me_model.parameters(), lr=0.1)
+    predictor_model = torch.nn.Linear(3, 1)
+    predictor_optimizer = torch.optim.Adam(predictor_model.parameters(), lr=0.01)
+    return me_model, me_optimizer, predictor_model, predictor_optimizer
+
+
+def build_unserializable_object():
+    from threading import Lock
+
+    return Lock()
+
+
+def use_stock_project_root(stock_project_root: str) -> str:
+    return stock_project_root
 
 
 def strip_ansi(text: str) -> str:
@@ -252,7 +293,143 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.save_pipeline(save_dir, save_log_to_file=export_log)
 
             self.assertTrue(export_log.exists())
-            self.assertIn("[INFO]", export_log.read_text(encoding="utf-8"))
+            self.assertIn(" INFO ", export_log.read_text(encoding="utf-8"))
+
+    def test_save_pipeline_persists_live_torch_model_as_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("torch-save", {}, tmp_path / "project")
+            block = pipeline.add_block("model", 1)
+            block.register_function(build_torch_model, ["model_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded_value = loaded.get_value("model_obj")
+
+            self.assertEqual(type(loaded.para_value_dict["model_obj"]).__name__, "ArtifactRecord")
+            self.assertEqual(loaded_value.__class__.__name__, "Linear")
+
+    def test_save_pipeline_warns_and_uses_reference_for_unserializable_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ref-save", {}, tmp_path / "project")
+            block = pipeline.add_block("weird", 1)
+            block.register_function(build_unserializable_object, ["weird_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+
+            self.assertTrue(
+                any("reference placeholder" in str(item.message) for item in caught)
+            )
+            self.assertIsInstance(loaded.get_value("weird_obj"), RuntimeValueReference)
+
+    def test_save_pipeline_persists_live_torch_optimizer_as_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("torch-save", {}, tmp_path / "project")
+            block = pipeline.add_block("optimizer", 1)
+            block.register_function(build_torch_optimizer, ["optimizer_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded_value = loaded.get_value("optimizer_obj")
+
+            self.assertIsInstance(loaded.para_value_dict["optimizer_obj"], TorchStateArtifactRecord)
+            self.assertIsInstance(loaded_value, TorchStateArtifactRecord)
+
+    def test_save_pipeline_keeps_optimizer_model_pairs_separate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("torch-pairs", {}, tmp_path / "project")
+            block = pipeline.add_block("pairs", 1)
+            block.register_function(
+                build_torch_model_optimizer_pairs,
+                ["me_model", "me_optimizer", "predictor_model", "predictor_optimizer"],
+            )
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+
+            me_optimizer = loaded.get_value("me_optimizer")
+            predictor_optimizer = loaded.get_value("predictor_optimizer")
+
+            self.assertIsInstance(me_optimizer, TorchStateArtifactRecord)
+            self.assertIsInstance(predictor_optimizer, TorchStateArtifactRecord)
+            self.assertEqual(me_optimizer.metadata.get("linked_model_variable"), "me_model")
+            self.assertEqual(
+                predictor_optimizer.metadata.get("linked_model_variable"),
+                "predictor_model",
+            )
+
+    def test_save_pipeline_warns_when_optimizer_has_no_linked_model(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("torch-save", {}, tmp_path / "project")
+            block = pipeline.add_block("optimizer", 1)
+            block.register_function(build_torch_optimizer, ["me_optimizer"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                pipeline.save_pipeline(save_dir)
+
+            self.assertTrue(
+                any("without a linked model artifact" in str(item.message) for item in caught)
+            )
+
+    def test_logger_uses_persistent_file_handle(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), tmp_path)
+
+            first_handle = pipeline.logger._file_handle
+            pipeline.logger.info("first")
+            second_handle = pipeline.logger._file_handle
+            pipeline.logger.info("second")
+
+            self.assertIsNotNone(first_handle)
+            self.assertIs(first_handle, second_handle)
+
+    def test_logger_disables_file_logging_after_oserror(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), tmp_path)
+            file_handle = pipeline.logger._file_handle
+            self.assertIsNotNone(file_handle)
+            if file_handle is None:
+                self.fail("logger file handle should exist")
+            file_handle.close()
+            pipeline.logger._file_handle = MagicMock()
+            pipeline.logger._file_handle.write.side_effect = OSError(24, "Too many open files")
+            pipeline.logger._file_handle.flush.side_effect = OSError(24, "Too many open files")
+
+            pipeline.logger.info("still logs to console")
+
+            self.assertFalse(pipeline.logger._file_logging_enabled)
+
+    def test_logger_flush_keeps_log_export_working(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persisted", DemoConfig(base=5), project_dir)
+            pipeline.logger.info("before export")
+
+            export_log = tmp_path / "exported.log"
+            pipeline.save_pipeline(save_log_to_file=export_log)
+
+            self.assertIn("before export", export_log.read_text(encoding="utf-8"))
 
     def test_duplicate_outputs_override_later_and_are_reported(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -481,6 +658,22 @@ class PipelineHandlerTests(unittest.TestCase):
             if gate_block is None:
                 self.fail("gate block should exist")
             self.assertEqual(gate_block.registration.function_name, "always_skip")
+
+    def test_callable_gate_expected_value_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate", DemoConfig(base=1), tmp_path / "project")
+            pipeline.set_gate_block(always_false, expected_value=False)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            run = loaded.run_all()
+
+            self.assertEqual(run.status, "success")
+            self.assertEqual(loaded.get_value("seed"), 2)
 
     def test_boolean_config_field_can_define_gate_block(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -970,6 +1163,38 @@ class PipelineHandlerTests(unittest.TestCase):
                 any("historical function snapshots" in str(item.message) for item in caught)
             )
 
+    def test_attached_child_reads_historical_result_lines_from_current_log_format(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=4), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=4), tmp_path / "child")
+            setup = child.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            logging_block = child.add_block("logging", 2)
+            logging_block.register_function(logger_step, ["logged_seed"])
+            child.run_all()
+
+            parent.add_child_pipeline(child, 1)
+
+            history = child.get_result_history()
+            self.assertTrue(any(" RESULT final-seed=5" in line for line in history))
+
+    def test_loaded_child_pipeline_keeps_nested_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=5), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=5), tmp_path / "child")
+            block = child.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            parent.add_child_pipeline(child, 1)
+
+            save_dir = tmp_path / "bundle"
+            parent.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded_child = loaded.get_child_pipeline("child")
+
+            self.assertEqual(loaded_child.project_root, save_dir / "children" / "child")
+
     def test_nested_pipeline_with_gate_round_trips_through_save_load(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1027,6 +1252,28 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(parent.get_value("child_result"), 104)
             self.assertEqual(child.get_value("child_result"), 104)
+
+    def test_grandchild_pipeline_can_use_root_config_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler(
+                "root",
+                {"stock_project_root": "/tmp/stocks", "base": 1},
+                tmp_path / "root",
+            )
+            parent = PipelineHandler("parent", {"base": 2}, tmp_path / "parent")
+            grandchild = PipelineHandler("grandchild", {"base": 3}, tmp_path / "grandchild")
+
+            grandchild_block = grandchild.add_block("read_root_config", 1.0)
+            grandchild_block.register_function(use_stock_project_root, ["resolved_root"])
+            parent.add_child_pipeline(grandchild, 1.0)
+            root.add_child_pipeline(parent, 1.0, forced=True)
+
+            root.run_all()
+
+            self.assertEqual(root.get_value("resolved_root"), "/tmp/stocks")
+            self.assertEqual(parent.get_value("resolved_root"), "/tmp/stocks")
+            self.assertEqual(grandchild.get_value("resolved_root"), "/tmp/stocks")
 
     def test_child_gate_can_resolve_parent_config_field(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1118,6 +1365,69 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(parent.get_value("seed"), 104)
             self.assertNotIn("scaled_total", parent.para_value_dict)
 
+    def test_run_until_supports_nested_child_block_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=3, factor=4), tmp_path / "root")
+            setup = root.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("modeling_pipeline", DemoConfig(base=100, factor=1), tmp_path / "child")
+            predictor_components = child.add_block("predictor_components", 10)
+            predictor_components.register_function(branch_left, ["left"])
+            later = child.add_block("predictor_training", 20)
+            later.register_function(branch_right, ["right"])
+
+            root.add_child_pipeline(child, 70)
+            root.run_until("modeling_pipeline", "predictor_components")
+
+            self.assertEqual(root.get_value("seed"), 4)
+            self.assertEqual(root.get_value("left"), 14)
+            self.assertNotIn("right", root.para_value_dict)
+
+    def test_run_block_supports_nested_child_block_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=3, factor=4), tmp_path / "root")
+            setup = root.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("modeling_pipeline", DemoConfig(base=100, factor=1), tmp_path / "child")
+            predictor_components = child.add_block("predictor_components", 10)
+            predictor_components.register_function(branch_left, ["left"])
+            later = child.add_block("predictor_training", 20)
+            later.register_function(branch_right, ["right"])
+
+            root.add_child_pipeline(child, 70)
+            root.run_block("modeling_pipeline", "predictor_components")
+
+            self.assertEqual(root.get_value("left"), 14)
+            self.assertNotIn("right", root.para_value_dict)
+
+    def test_run_from_supports_nested_child_block_path_and_continues_root_tail(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=3, factor=4), tmp_path / "root")
+            setup = root.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            child = PipelineHandler("modeling_pipeline", DemoConfig(base=100, factor=1), tmp_path / "child")
+            predictor_components = child.add_block("predictor_components", 10)
+            predictor_components.register_function(branch_left, ["left"])
+            later = child.add_block("predictor_training", 20)
+            later.register_function(branch_right, ["right"])
+            root.add_child_pipeline(child, 70)
+
+            final = root.add_block("final", 80)
+            final.register_function(combine, ["total"])
+
+            root.run_until("setup")
+            root.run_from("modeling_pipeline", "predictor_components")
+
+            self.assertEqual(root.get_value("left"), 14)
+            self.assertEqual(root.get_value("right"), 24)
+            self.assertEqual(root.get_value("total"), 38)
+
     def test_output_name_conflicting_with_config_is_skipped(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1137,6 +1447,20 @@ class PipelineHandlerTests(unittest.TestCase):
             setup.register_function(produce_seed, ["seed"])
             pipeline.run_all()
 
+            failing = pipeline.add_block("failing", 2)
+            failing.register_function(needs_missing, ["x"])
+
+            with self.assertRaises(ResolutionError):
+                pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("seed"), 3)
+
+    def test_successful_earlier_outputs_remain_after_later_failure_in_same_run(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("partial-failure", DemoConfig(base=2, factor=4), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
             failing = pipeline.add_block("failing", 2)
             failing.register_function(needs_missing, ["x"])
 

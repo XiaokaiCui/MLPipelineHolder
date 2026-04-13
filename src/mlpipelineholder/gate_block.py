@@ -64,7 +64,7 @@ class GateBlock:
         result = self.registration.callable_obj(*positional_args, **keyword_args)
         if not isinstance(result, bool):
             raise ExecutionError("Gate block must return a boolean value")
-        return result
+        return result == self.expected_value
 
     def serialize(self) -> dict[str, str]:
         if self.config_field_name is not None:
@@ -77,4 +77,8 @@ class GateBlock:
             raise RegistrationError(
                 f"Gate function '{self.registration.function_name}' is not importable"
             )
-        return {"kind": "callable", "import_path": self.registration.import_path}
+        return {
+            "kind": "callable",
+            "import_path": self.registration.import_path,
+            "expected_value": self.expected_value,
+        }

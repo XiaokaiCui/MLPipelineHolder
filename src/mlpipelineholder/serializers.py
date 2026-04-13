@@ -24,7 +24,11 @@ def choose_serializer(value: Any) -> str:
     try:
         import torch  # type: ignore
 
-        if isinstance(value, torch.nn.Module) or isinstance(value, torch.Tensor):
+        if (
+            isinstance(value, torch.nn.Module)
+            or isinstance(value, torch.Tensor)
+            or isinstance(value, torch.optim.Optimizer)
+        ):
             return "torch"
     except Exception:
         pass
@@ -104,7 +108,7 @@ def load_value(serializer: str, path: Path) -> Any:
     if serializer == "torch":
         import torch  # type: ignore
 
-        return torch.load(path)
+        return torch.load(path, weights_only=False)
     if serializer == "feather":
         import pandas as pd  # type: ignore
 

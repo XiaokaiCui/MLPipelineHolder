@@ -75,3 +75,22 @@ class RunRecord:
     error_message: str | None = None
     config_snapshot_path: str | None = None
     produced_outputs: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeValueReference:
+    """Fallback reference used when a runtime value cannot be safely persisted."""
+
+    type_name: str
+    repr_text: str
+    reason: str
+
+
+@dataclass(slots=True)
+class TorchStateArtifactRecord:
+    """Artifact metadata for torch objects restored from state-dict style persistence."""
+
+    variable_name: str
+    file_path: str
+    object_kind: str
+    metadata: dict[str, Any] = field(default_factory=dict)

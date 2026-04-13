@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import TextIOWrapper
 from importlib import import_module
 from pathlib import Path
 from sys import stdout as sys_stdout
@@ -29,6 +30,9 @@ class PipelineLogger:
         self._lock = Lock()
         self._result_history: list[str] = []
         self._min_level = self._LEVELS["DEBUG"]
+        self._file_handle: TextIOWrapper | None = self.log_file_path.open("a", encoding="utf-8")
+        self._file_logging_enabled = True
+        self._file_logging_warning_printed = False
 
     def set_level(self, level: str) -> None:
         normalized = level.upper()
@@ -64,6 +68,21 @@ class PipelineLogger:
         with self._lock:
             self._result_history.clear()
 
+    def flush(self) -> None:
+        with self._lock:
+            if self._file_handle is not None and not self._file_handle.closed:
+                self._file_handle.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_file_handle()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def print_result_history(self) -> None:
         for entry in self._result_history:
             print(self._colorize("RESULT", entry))
@@ -72,13 +91,28 @@ class PipelineLogger:
         timestamp = datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
         entry = f"{timestamp} {level} {message}"
         with self._lock:
-            with self.log_file_path.open("a", encoding="utf-8") as handle:
-                handle.write(entry + "\n")
+            if self._file_logging_enabled and self._file_handle is not None:
+                try:
+                    self._file_handle.write(entry + "\n")
+                    self._file_handle.flush()
+                except OSError:
+                    self._file_logging_enabled = False
+                    self._close_file_handle()
+                    if not self._file_logging_warning_printed:
+                        self._file_logging_warning_printed = True
+                        print(
+                            "PipelineLogger file logging disabled after OSError while writing pipeline.log",
+                            file=sys_stdout,
+                        )
             if level == "RESULT":
                 self._result_history.append(entry)
         if emit_console and self._LEVELS[level] >= self._min_level:
             console_text = message if level == "PRINT" else self._colorize(level, entry)
             print(console_text, file=sys_stdout)
+
+    def _close_file_handle(self) -> None:
+        if self._file_handle is not None and not self._file_handle.closed:
+            self._file_handle.close()
 
     def _colorize(self, level: str, entry: str) -> str:
         color_map = {

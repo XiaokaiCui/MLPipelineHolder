@@ -19,7 +19,7 @@ from .exceptions import ExecutionError, PersistenceError, RegistrationError, Res
 from .function_registry import default_map
 from .gate_block import GateBlock
 from .logger import PipelineLogger
-from .models import ArtifactRecord, FunctionRegistration, RunRecord
+from .models import ArtifactRecord, FunctionRegistration, RunRecord, RuntimeValueReference, TorchStateArtifactRecord
 
 
 class PipelineHandler:
@@ -155,6 +155,8 @@ class PipelineHandler:
         if variable_name not in self.para_value_dict:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         value = self.para_value_dict[variable_name]
+        if isinstance(value, TorchStateArtifactRecord):
+            return value
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
         return value
@@ -283,27 +285,23 @@ class PipelineHandler:
         self._invalidate_from_priority(block.execution_priority)
 
     def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
-        snapshot = self._snapshot_runtime_state()
         (
             self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             if self.nodes
             else None
         )
-        try:
-            return self._execute_nodes(
-                self._sorted_nodes(),
-                mode="run_all",
-                overrides=overrides,
-                upstream_outputs=self._incoming_parent_outputs(),
-                parent_config=self._ancestor_config_values(),
-            )[0]
-        except Exception:
-            self._restore_runtime_state(snapshot)
-            raise
+        return self._execute_nodes(
+            self._sorted_nodes(),
+            mode="run_all",
+            overrides=overrides,
+            upstream_outputs=self._incoming_parent_outputs(),
+            parent_config=self._ancestor_config_values(),
+        )[0]
 
-    def run_until(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self._get_node_or_raise(block_name)
-        snapshot = self._snapshot_runtime_state()
+    def run_until(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        if len(path_parts) > 1:
+            return self._run_nested_until_path(path_parts, overrides=overrides)
+        pipeline, node = self._resolve_target_path(path_parts)
         (
             self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             if self.nodes
@@ -314,57 +312,49 @@ class PipelineHandler:
             for candidate in self._sorted_nodes()
             if candidate.execution_priority <= node.execution_priority
         ]
-        try:
-            return self._execute_nodes(
-                selected,
-                mode=f"run_until:{block_name}",
-                overrides=overrides,
-                upstream_outputs=self._incoming_parent_outputs(),
-                parent_config=self._ancestor_config_values(),
-            )[0]
-        except Exception:
-            self._restore_runtime_state(snapshot)
-            raise
+        return self._execute_nodes(
+            selected,
+            mode=f"run_until:{node.registration_name}",
+            overrides=overrides,
+            upstream_outputs=self._incoming_parent_outputs(),
+            parent_config=self._ancestor_config_values(),
+        )[0]
 
-    def run_from(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self._get_node_or_raise(block_name)
+    def run_from(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        if len(path_parts) > 1:
+            return self._run_nested_from_path(path_parts, overrides=overrides)
+        pipeline, node = self._resolve_target_path(path_parts)
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
         self._invalidate_from_priority(node.execution_priority)
-        try:
-            return self._execute_nodes(
-                [
-                    candidate
-                    for candidate in self._sorted_nodes()
-                    if candidate.execution_priority >= node.execution_priority
-                ],
-                mode=f"run_from:{block_name}",
-                overrides=overrides,
-                upstream_outputs=self._visible_outputs_before_priority(node.execution_priority),
-                parent_config=self._ancestor_config_values(),
-                previous_node_outputs={node.registration_name: previous_outputs},
-            )[0]
-        except Exception:
-            self._restore_runtime_state(snapshot)
-            raise
+        return self._execute_nodes(
+            [
+                candidate
+                for candidate in self._sorted_nodes()
+                if candidate.execution_priority >= node.execution_priority
+            ],
+            mode=f"run_from:{node.registration_name}",
+            overrides=overrides,
+            upstream_outputs=self._visible_outputs_before_priority(node.execution_priority),
+            parent_config=self._ancestor_config_values(),
+            previous_node_outputs={node.registration_name: previous_outputs},
+        )[0]
 
-    def run_block(self, block_name: str, overrides: dict[str, Any] | None = None) -> RunRecord:
-        node = self._get_node_or_raise(block_name)
+    def run_block(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        if len(path_parts) > 1:
+            return self._run_nested_block_path(path_parts, overrides=overrides)
+        pipeline, node = self._resolve_target_path(path_parts)
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
         self._invalidate_from_priority(node.execution_priority)
-        try:
-            return self._execute_nodes(
-                [node],
-                mode=f"run_block:{block_name}",
-                overrides=overrides,
-                upstream_outputs=self._visible_outputs_before_priority(node.execution_priority),
-                parent_config=self._ancestor_config_values(),
-                previous_node_outputs={node.registration_name: previous_outputs},
-            )[0]
-        except Exception:
-            self._restore_runtime_state(snapshot)
-            raise
+        return self._execute_nodes(
+            [node],
+            mode=f"run_block:{node.registration_name}",
+            overrides=overrides,
+            upstream_outputs=self._visible_outputs_before_priority(node.execution_priority),
+            parent_config=self._ancestor_config_values(),
+            previous_node_outputs={node.registration_name: previous_outputs},
+        )[0]
 
     def save_pipeline(
         self,
@@ -378,7 +368,7 @@ class PipelineHandler:
         target = self.project_root if path is None else Path(path)
         target.mkdir(parents=True, exist_ok=True)
         try:
-            payload = self._serialize_payload()
+            payload = self._serialize_payload_for_save(target)
         except RegistrationError as exc:
             raise PersistenceError(str(exc)) from exc
         with (target / "pipeline_state.pkl").open("wb") as handle:
@@ -386,6 +376,7 @@ class PipelineHandler:
         with (target / "config.pkl").open("wb") as handle:
             pickle.dump(self.config, handle)
         if save_log_to_file is not None:
+            self.logger.flush()
             log_target = Path(save_log_to_file)
             log_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.logger.log_file_path, log_target)
@@ -438,7 +429,10 @@ class PipelineHandler:
                     expected_value=gate_payload.get("expected_value", True),
                 )
             else:
-                pipeline.set_gate_block(gate_payload["import_path"])
+                pipeline.set_gate_block(
+                    gate_payload["import_path"],
+                    expected_value=gate_payload.get("expected_value", True),
+                )
         for node_payload in payload["nodes"]:
             if node_payload["kind"] == "block":
                 block = pipeline.add_block(
@@ -476,7 +470,8 @@ class PipelineHandler:
                         forced=True,
                     )
             else:
-                child = cls._from_payload(node_payload["payload"], project_root, parent=pipeline)
+                child_root = project_root / "children" / node_payload["registration_name"]
+                child = cls._from_payload(node_payload["payload"], child_root, parent=pipeline)
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline
                 child.logger = pipeline.logger
@@ -489,6 +484,220 @@ class PipelineHandler:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
         return pipeline
+
+    def _serialize_payload_for_save(
+        self,
+        target_root: Path,
+        cache: dict[int, Any] | None = None,
+    ) -> dict[str, Any]:
+        cache = {} if cache is None else cache
+        return {
+            "registration_name": self.registration_name,
+            "config": self.config,
+            "execution_priority": self.execution_priority,
+            "historical_result_log_path": self.historical_result_log_path,
+            "gate": None if self.gate_block is None else self.gate_block.serialize(),
+            "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
+            "producer_outputs": {
+                node_name: {
+                    output_name: self._serialize_runtime_value_for_save(
+                        value,
+                        target_root,
+                        cache,
+                        node_name,
+                        output_name,
+                        sibling_outputs=outputs,
+                    )
+                    for output_name, value in outputs.items()
+                }
+                for node_name, outputs in self.producer_outputs.items()
+            },
+            "para_value_dict": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "pipeline_state",
+                    output_name,
+                    sibling_outputs=self.para_value_dict,
+                )
+                for output_name, value in self.para_value_dict.items()
+            },
+            "artifact_registry": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "artifact_registry",
+                    output_name,
+                    sibling_outputs=self.artifact_registry,
+                )
+                for output_name, value in self.artifact_registry.items()
+            },
+            "run_history": self.run_history,
+        }
+
+    def _serialize_node_for_save(
+        self,
+        node: Any,
+        target_root: Path,
+        cache: dict[int, Any],
+    ) -> dict[str, Any]:
+        if isinstance(node, PipelineHandler):
+            return {
+                "kind": "pipeline",
+                "registration_name": node.registration_name,
+                "execution_priority": node.execution_priority,
+                "payload": node._serialize_payload_for_save(target_root, cache),
+            }
+        return self._serialize_node(node)
+
+    def _serialize_runtime_value_for_save(
+        self,
+        value: Any,
+        target_root: Path,
+        cache: dict[int, Any],
+        node_name: str,
+        output_name: str,
+        sibling_outputs: dict[str, Any] | None = None,
+    ) -> Any:
+        if isinstance(value, ArtifactRecord):
+            return value
+        value_id = id(value)
+        if value_id in cache:
+            return cache[value_id]
+        serialized = self._persist_runtime_value(
+            value,
+            target_root,
+            cache,
+            node_name,
+            output_name,
+            sibling_outputs=sibling_outputs,
+        )
+        cache[value_id] = serialized
+        return serialized
+
+    def _persist_runtime_value(
+        self,
+        value: Any,
+        target_root: Path,
+        cache: dict[int, Any],
+        node_name: str,
+        output_name: str,
+        sibling_outputs: dict[str, Any] | None = None,
+    ) -> Any:
+        try:
+            import torch  # type: ignore
+
+            if isinstance(value, torch.nn.Module) or isinstance(value, torch.Tensor):
+                save_store = ArtifactStore(target_root)
+                return save_store.save(
+                    variable_name=output_name,
+                    value=value,
+                    block_name=self.qualified_node_name(node_name),
+                    function_name="save_pipeline_runtime",
+                    run_id="save_pipeline",
+                )
+            if isinstance(value, torch.optim.Optimizer):
+                linked_model_record = self._find_linked_model_artifact(
+                    cache,
+                    output_name,
+                    sibling_outputs or {},
+                    target_root,
+                    node_name,
+                )
+                if (
+                    self._paired_model_name(output_name) is not None
+                    and linked_model_record is None
+                ):
+                    warnings.warn(
+                        f"Runtime optimizer '{node_name}.{output_name}' was saved without a linked model artifact.",
+                        stacklevel=2,
+                    )
+                optimizer_path = self._save_torch_optimizer_state(
+                    value,
+                    target_root,
+                    node_name,
+                    output_name,
+                )
+                return TorchStateArtifactRecord(
+                    variable_name=output_name,
+                    file_path=str(optimizer_path),
+                    object_kind="torch_optimizer_state",
+                    metadata={
+                        "linked_model_variable": None if linked_model_record is None else linked_model_record.variable_name,
+                    },
+                )
+        except Exception:
+            pass
+
+        try:
+            pickle.dumps(value)
+            return value
+        except Exception:
+            warnings.warn(
+                f"Runtime value '{node_name}.{output_name}' could not be serialized directly; saving a reference placeholder instead.",
+                stacklevel=2,
+            )
+            return RuntimeValueReference(
+                type_name=type(value).__name__,
+                repr_text=repr(value),
+                reason="not directly serializable during save_pipeline",
+            )
+
+    def _find_linked_model_artifact(
+        self,
+        cache: dict[int, Any],
+        optimizer_name: str,
+        sibling_outputs: dict[str, Any],
+        target_root: Path,
+        node_name: str,
+    ) -> ArtifactRecord | None:
+        model_name = self._paired_model_name(optimizer_name)
+        if model_name is None:
+            return None
+        model_value = sibling_outputs.get(model_name)
+        if model_value is None:
+            return None
+        model_id = id(model_value)
+        cached = cache.get(model_id)
+        if isinstance(cached, ArtifactRecord):
+            return cached
+        serialized = self._serialize_runtime_value_for_save(
+            model_value,
+            target_root,
+            cache,
+            node_name,
+            model_name,
+            sibling_outputs=sibling_outputs,
+        )
+        if isinstance(serialized, ArtifactRecord):
+            return serialized
+        return None
+
+    def _paired_model_name(self, optimizer_name: str) -> str | None:
+        if "optimizer" not in optimizer_name:
+            return None
+        return optimizer_name.replace("optimizer", "model")
+
+    def _save_torch_optimizer_state(
+        self,
+        optimizer: Any,
+        target_root: Path,
+        node_name: str,
+        output_name: str,
+    ) -> Path:
+        import torch  # type: ignore
+
+        save_store = ArtifactStore(target_root)
+        artifact = save_store.save(
+            variable_name=output_name,
+            value=optimizer.state_dict(),
+            block_name=self.qualified_node_name(node_name),
+            function_name="save_pipeline_runtime_optimizer_state",
+            run_id="save_pipeline",
+        )
+        return Path(artifact.file_path)
 
     def _serialize_payload(self) -> dict[str, Any]:
         return {
@@ -617,7 +826,7 @@ class PipelineHandler:
                         mode=f"run_child:{node.registration_name}",
                         overrides=overrides,
                         upstream_outputs=visible_outputs,
-                        parent_config=self.config_as_dict(),
+                        parent_config=self.get_full_config(),
                         sync_parent_on_completion=False,
                     )
                     node_executed = child_run_record.status != "skipped"
@@ -629,6 +838,7 @@ class PipelineHandler:
                         parent_config=parent_config or {},
                     )
                 self.producer_outputs[node.registration_name] = produced_outputs
+                self._rebuild_visible_state(upstream_outputs)
                 run_record.executed_blocks.append(node.registration_name)
                 run_record.produced_outputs.extend(produced_outputs.keys())
                 if node_executed:
@@ -754,6 +964,166 @@ class PipelineHandler:
         if node is None:
             raise RegistrationError(f"Node not registered: {block_name}")
         return node
+
+    def _resolve_target_path(self, path_parts: tuple[str, ...]) -> tuple["PipelineHandler", Any]:
+        if not path_parts:
+            raise RegistrationError("At least one target name must be provided")
+        current: PipelineHandler = self
+        for pipeline_name in path_parts[:-1]:
+            current = current.get_child_pipeline(pipeline_name)
+        return current, current._get_node_or_raise(path_parts[-1])
+
+    def _run_nested_until_path(
+        self,
+        path_parts: tuple[str, ...],
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_name = path_parts[0]
+        child_pipeline = self.get_child_pipeline(child_name)
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
+        (
+            self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
+            if self.nodes
+            else None
+        )
+        selected = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority < child_priority
+        ]
+        if selected:
+            self._execute_nodes(
+                selected,
+                mode=f"run_until_parent:{child_name}",
+                overrides=overrides,
+                upstream_outputs=self._incoming_parent_outputs(),
+                parent_config=self._ancestor_config_values(),
+                sync_parent_on_completion=False,
+            )
+        return child_pipeline.run_until(*path_parts[1:], overrides=overrides)
+
+    def _run_nested_from_path(
+        self,
+        path_parts: tuple[str, ...],
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_name = path_parts[0]
+        child_pipeline = self.get_child_pipeline(child_name)
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
+        snapshot = self._snapshot_runtime_state()
+        previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
+        self._invalidate_from_priority(child_priority)
+        child_run = child_pipeline.run_from(*path_parts[1:], overrides=overrides)
+        self.producer_outputs[child_pipeline.registration_name] = dict(child_pipeline.para_value_dict)
+        self._rebuild_visible_state(self._incoming_parent_outputs())
+        downstream_nodes = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority > child_priority
+        ]
+        if downstream_nodes:
+            self._execute_nodes(
+                downstream_nodes,
+                mode=f"run_from_parent_tail:{child_name}",
+                overrides=overrides,
+                upstream_outputs=self._visible_outputs_before_priority(downstream_nodes[0].execution_priority),
+                parent_config=self._ancestor_config_values(),
+            )
+        return child_run
+
+    def _run_nested_block_path(
+        self,
+        path_parts: tuple[str, ...],
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_name = path_parts[0]
+        child_pipeline = self.get_child_pipeline(child_name)
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
+        selected = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority < child_priority
+        ]
+        if selected:
+            self._execute_nodes(
+                selected,
+                mode=f"run_block_parent:{child_name}",
+                overrides=overrides,
+                upstream_outputs=self._incoming_parent_outputs(),
+                parent_config=self._ancestor_config_values(),
+                sync_parent_on_completion=False,
+            )
+        return child_pipeline.run_block(*path_parts[1:], overrides=overrides)
+
+    def _run_nested_until(
+        self,
+        child_pipeline: "PipelineHandler",
+        target_name: str,
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_pipeline.registration_name}' has no priority")
+        selected = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority < child_priority
+        ]
+        if selected:
+            self._execute_nodes(
+                selected,
+                mode=f"run_until_parent:{child_pipeline.registration_name}",
+                overrides=overrides,
+                upstream_outputs=self._incoming_parent_outputs(),
+                parent_config=self._ancestor_config_values(),
+                sync_parent_on_completion=False,
+            )
+        return child_pipeline.run_until(target_name, overrides=overrides)
+
+    def _run_nested_from(
+        self,
+        child_pipeline: "PipelineHandler",
+        target_name: str,
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_pipeline.registration_name}' has no priority")
+        snapshot = self._snapshot_runtime_state()
+        previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
+        self._invalidate_from_priority(child_priority)
+        return child_pipeline.run_from(target_name, overrides=overrides)
+
+    def _run_nested_block(
+        self,
+        child_pipeline: "PipelineHandler",
+        target_name: str,
+        overrides: dict[str, Any] | None = None,
+    ) -> RunRecord:
+        child_priority = child_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_pipeline.registration_name}' has no priority")
+        selected = [
+            candidate
+            for candidate in self._sorted_nodes()
+            if candidate.execution_priority < child_priority
+        ]
+        if selected:
+            self._execute_nodes(
+                selected,
+                mode=f"run_block_parent:{child_pipeline.registration_name}",
+                overrides=overrides,
+                upstream_outputs=self._incoming_parent_outputs(),
+                parent_config=self._ancestor_config_values(),
+                sync_parent_on_completion=False,
+            )
+        return child_pipeline.run_block(target_name, overrides=overrides)
 
     def _sorted_nodes(self) -> list[Any]:
         return sorted(
@@ -1321,7 +1691,7 @@ class PipelineHandler:
         return [
             line.strip()
             for line in path.read_text(encoding="utf-8").splitlines()
-            if "[RESULT]" in line
+            if " RESULT " in line
         ]
 
     def _color(self, text: str, color: str) -> str:

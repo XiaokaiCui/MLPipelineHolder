@@ -95,7 +95,7 @@ poetry install --no-interaction
 ```text
 MLPipelineHolder/
 ├── examples/
-│   ├── comprehensive_pipeline.py
+│   ├── comprehensive_pipeline.ipynb
 │   └── example_run/
 ├── src/
 │   ├── __init__.py
@@ -554,8 +554,10 @@ Print capture modes:
 
 Run:
 
-```bash
-poetry run python examples/comprehensive_pipeline.py
+Open and run:
+
+```text
+examples/comprehensive_pipeline.ipynb
 ```
 
 The comprehensive example demonstrates:
@@ -574,7 +576,7 @@ The comprehensive example demonstrates:
 - priority-group inspection helper
 - save/load round-trip
 
-It writes its runtime data under:
+The notebook writes its runtime data under:
 
 - `examples/example_run/`
 
@@ -609,7 +611,7 @@ That means:
 - if a source function changes later, a loaded pipeline may use the new behavior
 - if a transitive dependency of that function changes later, behavior may also change
 
-Because of that, `save_project()` and `load_project()` emit warnings explaining this limitation.
+Because of that, `save_pipeline()` and `load_pipeline()` emit warnings explaining this limitation.
 
 The preferred public API names are `save_pipeline()` and `load_pipeline()`.
 
