@@ -29,12 +29,16 @@ class PipelineHandler:
         configuration: Any | None,
         local_folder_path: str | Path,
         execution_priority: float | None = None,
+        forced: bool = False,
+        _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
         self.config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
         self.project_root = Path(local_folder_path)
+        if not _allow_existing_root:
+            self._prepare_project_root(forced)
         self.project_root.mkdir(parents=True, exist_ok=True)
         self.metadata_root = self.project_root / "metadata"
         self.metadata_root.mkdir(parents=True, exist_ok=True)
@@ -126,6 +130,74 @@ class PipelineHandler:
         self._register_node(child_pipeline)
         return child_pipeline
 
+    def create_atom_child_pipeline(
+        self,
+        child_name: str,
+        execution_priority: float,
+        target_function: Any,
+        gate_config: str | None = None,
+        expected_value: Any = True,
+        default_config_value: Any = True,
+        output_variable_names: str | list[str] | tuple[str, ...] | None = None,
+        save_to_disk_lst: list[str] | tuple[str, ...] | set[str] | None = None,
+        param_mapping_dct: dict[str, str] | None = None,
+        kwargs_dct: dict[str, str] | None = None,
+        args_lst: tuple[str, ...] | list[str] | None = None,
+        child_configuration: Any | None = None,
+        allow_existing_root: bool = True,
+        forced: bool = True,
+        block_priority: float = 10.0,
+    ) -> None:
+        child_root = self.project_root / "children" / child_name
+        temp_pipeline = PipelineHandler(
+            registration_name=child_name,
+            configuration=self.get_full_config() if child_configuration is None else child_configuration,
+            local_folder_path=child_root,
+            execution_priority=execution_priority,
+            forced=forced,
+            _allow_existing_root=allow_existing_root,
+        )
+        if gate_config is not None:
+            if gate_config not in temp_pipeline.get_full_config():
+                temp_pipeline.update_config({gate_config: default_config_value})
+            temp_pipeline.set_gate_block(
+                gate_config,
+                expected_value=expected_value,
+                forced=forced,
+            )
+        temp_block = temp_pipeline.add_block(f"{child_name}_block", block_priority, forced=forced)
+        if temp_block is None:
+            return None
+        if args_lst is not None:
+            temp_block.register_args(
+                "default_args",
+                args_lst,
+                forced=forced,
+            )
+        if kwargs_dct is not None:
+            temp_block.register_kwargs(
+                "default_kwargs",
+                kwargs_dct,
+                forced=forced,
+            )
+        temp_block.register_function(
+            target_function,
+            output_variable_names=output_variable_names,
+            save_to_disk=save_to_disk_lst,
+            var_pos_name="default_args" if args_lst is not None else None,
+            var_kw_name="default_kwargs" if kwargs_dct is not None else None,
+            param_mapping=param_mapping_dct,
+            forced=forced,
+        )
+        child_priority = temp_pipeline.execution_priority
+        if child_priority is None:
+            raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
+        self.add_child_pipeline(
+            temp_pipeline,
+            execution_priority=child_priority,
+            forced=forced,
+        )
+
     def add_gate_block(
         self, function_or_path: Any, expected_value: Any = True, forced: bool = False
     ) -> Any:
@@ -160,6 +232,27 @@ class PipelineHandler:
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
         return value
+
+    def set_value(self, variable_name: str, value: Any) -> None:
+        if variable_name not in self.para_value_dict:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+
+        previous_value = self.para_value_dict.get(variable_name)
+        if isinstance(previous_value, ArtifactRecord):
+            self.artifact_store.delete(previous_value)
+
+        self.para_value_dict[variable_name] = value
+        if isinstance(value, ArtifactRecord):
+            self.artifact_registry[variable_name] = value
+        else:
+            self.artifact_registry.pop(variable_name, None)
+
+        for node in reversed(self._sorted_nodes()):
+            outputs = self.producer_outputs.get(node.registration_name)
+            if outputs is None or variable_name not in outputs:
+                continue
+            outputs[variable_name] = value
+            break
 
     def get_full_config(self) -> dict[str, Any]:
         return dict(self._ancestor_config_values(), **self.config_as_dict())
@@ -419,6 +512,7 @@ class PipelineHandler:
             configuration=payload["config"],
             local_folder_path=project_root,
             execution_priority=payload.get("execution_priority"),
+            _allow_existing_root=True,
         )
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
         if payload.get("gate") is not None:
@@ -1698,6 +1792,28 @@ class PipelineHandler:
 
     def _color(self, text: str, color: str) -> str:
         return import_module("termcolor").colored(text, color, force_color=True)
+
+    def _prepare_project_root(self, forced: bool) -> None:
+        if not self.project_root.exists():
+            return
+        if not any(self.project_root.iterdir()):
+            return
+        if not forced:
+            raise RegistrationError(
+                f"Pipeline root folder is not empty: {self.project_root}"
+            )
+        user_input = input(
+            f"Pipeline root folder '{self.project_root}' is not empty. Type 'yes' to clear it: "
+        ).strip()
+        if user_input != "yes":
+            raise RegistrationError(
+                f"Pipeline root folder is not empty: {self.project_root}"
+            )
+        for entry in self.project_root.iterdir():
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
 
     def _capture_prints(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         if self.print_capture_mode == "off":

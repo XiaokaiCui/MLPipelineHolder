@@ -160,6 +160,11 @@ def use_stock_project_root(stock_project_root: str) -> str:
     return stock_project_root
 
 
+def join_with_variadics(prefix: str, *parts: str, **named_parts: str) -> str:
+    ordered = [prefix, *parts, *[named_parts[key] for key in sorted(named_parts)]]
+    return "|".join(ordered)
+
+
 def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
@@ -784,6 +789,25 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(pipeline.config, {"new_value": 9})
 
+    def test_pipeline_creation_rejects_non_empty_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
+
+            with self.assertRaises(RegistrationError):
+                PipelineHandler("root-check", DemoConfig(base=1), tmp_path)
+
+    def test_forced_pipeline_creation_clears_non_empty_root_after_yes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes"):
+                pipeline = PipelineHandler("root-check", DemoConfig(base=1), tmp_path, forced=True)
+
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertFalse((tmp_path / "marker.txt").exists())
+
     def test_get_full_config_includes_nested_parent_chain(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -869,6 +893,39 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.run_all()
 
             self.assertEqual(pipeline.get_value("saved_blob"), "value=3")
+
+    def test_set_value_updates_visible_pipeline_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("values", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            pipeline.set_value("seed", 99)
+
+            self.assertEqual(pipeline.get_value("seed"), 99)
+
+    def test_set_value_updates_latest_producer_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("values", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            pipeline.set_value("seed", 42)
+            pipeline._rebuild_visible_state()
+
+            self.assertEqual(pipeline.get_value("seed"), 42)
+
+    def test_set_value_rejects_unknown_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("values", DemoConfig(base=2), tmp_path)
+
+            with self.assertRaises(ResolutionError):
+                pipeline.set_value("missing", 1)
 
     def test_get_block_returns_registered_block(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1375,6 +1432,40 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIsNotNone(replacement)
             self.assertIs(parent.nodes_by_name["child"], second_child)
+
+    def test_create_atom_child_pipeline_builds_and_attaches_scoped_child(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler(
+                "parent",
+                {"prefix": "P", "part_a": "A", "part_b": "B", "flag": True},
+                tmp_path / "parent",
+            )
+
+            child = parent.create_atom_child_pipeline(
+                child_name="child_join",
+                execution_priority=10.0,
+                target_function=join_with_variadics,
+                gate_config="flag",
+                expected_value=True,
+                default_config_value=True,
+                output_variable_names=["joined"],
+                param_mapping_dct={"prefix": "prefix"},
+                kwargs_dct={"x": "part_b"},
+                args_lst=("part_a",),
+                forced=True,
+                block_priority=5.0,
+            )
+
+            child = parent.get_child_pipeline("child_join")
+            self.assertIs(parent.get_child_pipeline("child_join"), child)
+            self.assertEqual(child.get_config_value("prefix"), "P")
+            self.assertEqual(child.get_config_value("flag"), True)
+
+            run = parent.run_all()
+
+            self.assertEqual(run.status, "success")
+            self.assertEqual(parent.get_value("joined"), "P|A|B")
 
     def test_child_standalone_run_updates_parent_visible_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:

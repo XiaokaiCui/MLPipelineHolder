@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from collections.abc import Sequence
 from functools import wraps
-from typing import Any
+from typing import Any, get_type_hints
 
 from .exceptions import RegistrationError
 
@@ -49,6 +50,28 @@ def inspect_input_names(callable_obj: Any) -> list[str]:
     for parameter in signature.parameters.values():
         input_names.append(parameter.name)
     return input_names
+
+
+def infer_declared_output_count(callable_obj: Any) -> int | None:
+    signature = inspect.signature(callable_obj)
+    try:
+        hints = get_type_hints(callable_obj)
+    except Exception:
+        return None
+    annotation = hints.get("return", signature.return_annotation)
+    if annotation is inspect.Signature.empty:
+        return None
+    if annotation is None:
+        return 0
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", ())
+    if origin is tuple and args:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return None
+        return len(args)
+    if origin in (list, Sequence):
+        return None
+    return 1
 
 
 def inspect_exposed_input_names(

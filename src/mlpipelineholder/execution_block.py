@@ -5,7 +5,7 @@ import inspect
 from typing import TYPE_CHECKING, Any
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
-from .function_registry import inspect_input_names, rename_args, resolve_callable
+from .function_registry import infer_declared_output_count, inspect_input_names, rename_args, resolve_callable
 from .function_registry import inspect_exposed_input_names
 from .models import (
     BlockArgsRegistration,
@@ -146,12 +146,25 @@ class ExecutionBlock:
         self.parent._validate_output_names_against_config(output_names)
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
+        declared_output_count = infer_declared_output_count(callable_obj)
         input_names = inspect_exposed_input_names(
             callable_obj,
             param_mapping=param_mapping,
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
         )
+        if not output_names and declared_output_count is not None and declared_output_count > 0:
+            self.parent.logger.warning(
+                f"Function '{function_name}' in block '{self.registration_name}' declares {declared_output_count} output(s), but output_variable_names=None was used; any returned value will be ignored"
+            )
+        if (
+            declared_output_count is not None
+            and output_names
+            and declared_output_count != len(output_names)
+        ):
+            raise RegistrationError(
+                f"Function '{function_name}' declares {declared_output_count} output(s), but {len(output_names)} output name(s) were registered"
+            )
         registration = FunctionRegistration(
             function_name=function_name,
             import_path=import_path,

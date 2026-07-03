@@ -59,6 +59,15 @@ def optional_recorders(train_recorder: list[int] | None, eval_recorder: list[int
     return next_train, next_eval
 
 
+def annotated_single_output(value: int) -> int:
+    return value
+
+
+def annotated_two_outputs(value: int) -> tuple[int, int]:
+    return value, value + 1
+
+
+
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -151,6 +160,45 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertIsNotNone(registration)
             self.assertEqual(registration.output_names, [])
             self.assertEqual(pipeline.para_value_dict, {})
+
+    def test_no_output_registration_warns_when_return_annotation_declares_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("warn-output", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(annotated_single_output, None)
+
+            self.assertIsNotNone(registration)
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("declares 1 output(s)", log_text)
+
+    def test_registration_fails_when_declared_output_count_mismatches(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("mismatch", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            with self.assertRaises(RegistrationError):
+                block._register_function_strict(annotated_two_outputs, ["only_one"])
+
+    def test_registration_tolerates_unresolved_type_hints(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("typing", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            namespace: dict[str, object] = {}
+            exec(
+                "def unresolved_annotation_func(value: 'MissingType') -> 'OtherMissingType':\n"
+                "    return value\n",
+                namespace,
+            )
+            unresolved_annotation_func = namespace["unresolved_annotation_func"]
+
+            registration = block.register_function(unresolved_annotation_func, ["result"])
+
+            self.assertIsNotNone(registration)
 
     def test_same_name_input_and_output_update_is_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:
