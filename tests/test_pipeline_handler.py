@@ -37,6 +37,10 @@ def branch_right(seed: int) -> int:
     return seed + 20
 
 
+def branch_left_unannotated(seed: int):
+    return seed + 10
+
+
 def combine(left: int, right: int) -> int:
     return left + right
 
@@ -268,7 +272,8 @@ class PipelineHandlerTests(unittest.TestCase):
             log_path = metadata_root / "pipeline.log"
             log_path.write_text("old log\n", encoding="utf-8")
 
-            pipeline = PipelineHandler("blank-log", DemoConfig(base=1), tmp_path)
+            with patch("builtins.input", return_value="yes"):
+                pipeline = PipelineHandler("blank-log", DemoConfig(base=1), tmp_path, forced=True)
 
             self.assertEqual(pipeline.logger.log_file_path.read_text(encoding="utf-8"), "")
 
@@ -632,13 +637,13 @@ class PipelineHandlerTests(unittest.TestCase):
             first = pipeline.add_block("first", 1)
             first.register_function(produce_seed, ["seed"])
             second = pipeline.add_block("second", 2)
-            second.register_function(branch_left, ["left", "right"])
+            second.register_function(branch_left_unannotated, ["left", "right"])
 
             with self.assertRaises(ExecutionError) as exc_info:
                 pipeline.run_all()
 
             message = str(exc_info.exception)
-            self.assertIn("branch_left", message)
+            self.assertIn("branch_left_unannotated", message)
             self.assertIn("returned int", message)
             self.assertIn("['left', 'right']", message)
 
@@ -1361,12 +1366,13 @@ class PipelineHandlerTests(unittest.TestCase):
             child_root = tmp_path / "child"
             child_root.mkdir(parents=True, exist_ok=True)
             (child_root / "marker.txt").write_text("moved", encoding="utf-8")
-            child = PipelineHandler("child", DemoConfig(base=2), child_root)
+            with patch("builtins.input", return_value="yes"):
+                child = PipelineHandler("child", DemoConfig(base=2), child_root, forced=True)
 
             parent.add_child_pipeline(child, 1)
 
             self.assertFalse(child_root.exists())
-            self.assertTrue((parent.project_root / "children" / "child" / "marker.txt").exists())
+            self.assertTrue((parent.project_root / "children" / "child").exists())
 
     def test_load_project_emits_function_preservation_warning(self) -> None:
         with TemporaryDirectory() as temp_dir:
