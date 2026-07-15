@@ -32,9 +32,25 @@ class FunctionRegistration:
     input_names: list[str]
     output_names: list[str]
     save_to_disk: set[str]
-    kw_mapping: dict[str, str] = field(default_factory=dict)
+    param_mapping: dict[str, str] = field(default_factory=dict)
     var_pos_name: str | None = None
     var_kw_name: str | None = None
+
+
+@dataclass(slots=True)
+class BlockArgsRegistration:
+    """Block-scoped ordered items used to build *args for specific functions."""
+
+    name: str
+    ordered_items: list[str]
+
+
+@dataclass(slots=True)
+class BlockKwargsRegistration:
+    """Block-scoped name mapping used to build **kwargs for specific functions."""
+
+    name: str
+    mapping_dct: dict[str, str]
 
 
 @dataclass(slots=True)
@@ -59,3 +75,22 @@ class RunRecord:
     error_message: str | None = None
     config_snapshot_path: str | None = None
     produced_outputs: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RuntimeValueReference:
+    """Fallback reference used when a runtime value cannot be safely persisted."""
+
+    type_name: str
+    repr_text: str
+    reason: str
+
+
+@dataclass(slots=True)
+class TorchStateArtifactRecord:
+    """Artifact metadata for torch objects restored from state-dict style persistence."""
+
+    variable_name: str
+    file_path: str
+    object_kind: str
+    metadata: dict[str, Any] = field(default_factory=dict)

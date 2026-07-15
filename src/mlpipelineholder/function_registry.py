@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from collections.abc import Sequence
 from functools import wraps
-from typing import Any
+from typing import Any, get_type_hints
 
 from .exceptions import RegistrationError
 
@@ -51,22 +52,68 @@ def inspect_input_names(callable_obj: Any) -> list[str]:
     return input_names
 
 
+def infer_declared_output_count(callable_obj: Any) -> int | None:
+    signature = inspect.signature(callable_obj)
+    try:
+        hints = get_type_hints(callable_obj)
+    except Exception:
+        return None
+    annotation = hints.get("return", signature.return_annotation)
+    if annotation is inspect.Signature.empty:
+        return None
+    if annotation is None:
+        return 0
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", ())
+    if origin is tuple and args:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return None
+        return len(args)
+    if origin in (list, Sequence):
+        return None
+    return 1
+
+
+def inspect_exposed_input_names(
+    callable_obj: Any,
+    param_mapping: dict[str, str] | None = None,
+    var_pos_name: str | None = None,
+    var_kw_name: str | None = None,
+) -> list[str]:
+    signature = inspect.signature(callable_obj)
+    param_mapping = param_mapping or {}
+    input_names: list[str] = []
+    seen: set[str] = set()
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            exposed_name = var_pos_name or parameter.name
+        elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            exposed_name = var_kw_name or parameter.name
+        else:
+            exposed_name = param_mapping.get(parameter.name, parameter.name)
+        if exposed_name in seen:
+            continue
+        seen.add(exposed_name)
+        input_names.append(exposed_name)
+    return input_names
+
+
 def rename_args(
     func: Any,
-    kw_mapping: dict[str, str] | None = None,
+    param_mapping: dict[str, str] | None = None,
     var_pos_name: str | None = None,
     var_kw_name: str | None = None,
 ) -> Any:
     """Expose safer pipeline-facing parameter names without changing the original callable."""
 
-    kw_mapping = kw_mapping or {}
-    if len(set(kw_mapping.values())) != len(kw_mapping.values()):
-        raise RegistrationError("kw_mapping contains duplicate target names")
+    param_mapping = param_mapping or {}
+    if len(set(param_mapping.values())) != len(param_mapping.values()):
+        raise RegistrationError("param_mapping contains duplicate target names")
 
     signature = inspect.signature(func)
     renamed_parameters = []
     seen_names: set[str] = set()
-    reverse_kw_mapping = {new_name: old_name for old_name, new_name in kw_mapping.items()}
+    reverse_param_mapping = {new_name: old_name for old_name, new_name in param_mapping.items()}
 
     for parameter in signature.parameters.values():
         if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
@@ -74,7 +121,7 @@ def rename_args(
         elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
             new_name = var_kw_name or parameter.name
         else:
-            new_name = kw_mapping.get(parameter.name, parameter.name)
+            new_name = param_mapping.get(parameter.name, parameter.name)
         if new_name in seen_names:
             raise RegistrationError(f"Duplicate exposed argument name: {new_name}")
         seen_names.add(new_name)
@@ -83,13 +130,13 @@ def rename_args(
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         remapped_kwargs = {
-            reverse_kw_mapping.get(name, name): value for name, value in kwargs.items()
+            reverse_param_mapping.get(name, name): value for name, value in kwargs.items()
         }
         return func(*args, **remapped_kwargs)
 
     setattr(wrapper, "__signature__", signature.replace(parameters=renamed_parameters))
     setattr(wrapper, "__mlpipeline_original__", func)
-    setattr(wrapper, "__mlpipeline_kw_mapping__", dict(kw_mapping))
+    setattr(wrapper, "__mlpipeline_param_mapping__", dict(param_mapping))
     setattr(wrapper, "__mlpipeline_var_pos_name__", var_pos_name)
     setattr(wrapper, "__mlpipeline_var_kw_name__", var_kw_name)
     return wrapper

@@ -10,6 +10,14 @@ from typing import Any
 def choose_serializer(value: Any) -> str:
     """Pick the lightest supported serializer for a runtime value."""
 
+    try:
+        import dask.dataframe as dd  # type: ignore
+
+        if isinstance(value, dd.DataFrame):
+            return "parquet"
+    except Exception:
+        pass
+
     if _is_json_serializable(value):
         return "json"
 
@@ -24,7 +32,11 @@ def choose_serializer(value: Any) -> str:
     try:
         import torch  # type: ignore
 
-        if isinstance(value, torch.nn.Module) or isinstance(value, torch.Tensor):
+        if (
+            isinstance(value, torch.nn.Module)
+            or isinstance(value, torch.Tensor)
+            or isinstance(value, torch.optim.Optimizer)
+        ):
             return "torch"
     except Exception:
         pass
@@ -33,6 +45,8 @@ def choose_serializer(value: Any) -> str:
         import pandas as pd  # type: ignore
 
         if isinstance(value, pd.DataFrame):
+            if len(value) > 3_000_000:
+                return "parquet"
             if find_spec("pyarrow") is not None:
                 return "feather"
             return "pickle"
@@ -57,6 +71,7 @@ def extension_for(serializer: str) -> str:
         "pickle": ".pkl",
         "torch": ".pt",
         "feather": ".feather",
+        "parquet": ".parquet",
     }.get(serializer, ".bin")
 
 
@@ -85,6 +100,19 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
     if serializer == "feather":
         value.to_feather(path)
         return
+    if serializer == "parquet":
+        try:
+            import dask.dataframe as dd  # type: ignore
+
+            if isinstance(value, dd.DataFrame):
+                if value.npartitions == 1:
+                    value = value.repartition(npartitions=2)
+                value.to_parquet(path)
+                return
+        except Exception:
+            pass
+        value.to_parquet(path)
+        return
     raise ValueError(f"Unsupported serializer: {serializer}")
 
 
@@ -104,9 +132,21 @@ def load_value(serializer: str, path: Path) -> Any:
     if serializer == "torch":
         import torch  # type: ignore
 
-        return torch.load(path)
+        return torch.load(path, weights_only=False)
     if serializer == "feather":
         import pandas as pd  # type: ignore
 
         return pd.read_feather(path)
+    if serializer == "parquet":
+        try:
+            import dask.dataframe as dd  # type: ignore
+
+            parquet_path = Path(path)
+            if parquet_path.is_dir():
+                return dd.read_parquet(parquet_path)
+        except Exception:
+            pass
+        import pandas as pd  # type: ignore
+
+        return pd.read_parquet(path)
     raise ValueError(f"Unsupported serializer: {serializer}")

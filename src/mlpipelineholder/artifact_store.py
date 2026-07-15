@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -50,4 +51,7 @@ class ArtifactStore:
     def delete(self, artifact: ArtifactRecord) -> None:
         path = Path(artifact.file_path)
         if path.exists():
-            path.unlink()
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()

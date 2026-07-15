@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import TextIOWrapper
 from importlib import import_module
 from pathlib import Path
 from sys import stdout as sys_stdout
@@ -10,11 +11,34 @@ from threading import Lock
 class PipelineLogger:
     """Small UTC logger that writes to disk and keeps in-memory RESULT history."""
 
+    _LEVELS = {
+        "DEBUG": 10,
+        "INFO": 20,
+        "PRINT": 30,
+        "RESULT": 40,
+        "WARNING": 30,
+        "ERROR": 40,
+        "CRITICAL": 50,
+    }
+
     def __init__(self, log_file_path: str | Path) -> None:
         self.log_file_path = Path(log_file_path)
         self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.log_file_path.exists():
+            self.log_file_path.unlink()
+        self.log_file_path.touch()
         self._lock = Lock()
         self._result_history: list[str] = []
+        self._min_level = self._LEVELS["DEBUG"]
+        self._file_handle: TextIOWrapper | None = self.log_file_path.open("a", encoding="utf-8")
+        self._file_logging_enabled = True
+        self._file_logging_warning_printed = False
+
+    def set_level(self, level: str) -> None:
+        normalized = level.upper()
+        if normalized not in self._LEVELS:
+            raise ValueError(f"Unknown log level: {level}")
+        self._min_level = self._LEVELS[normalized]
 
     def debug(self, message: str) -> None:
         self._write("DEBUG", message)
@@ -44,26 +68,57 @@ class PipelineLogger:
         with self._lock:
             self._result_history.clear()
 
+    def flush(self) -> None:
+        with self._lock:
+            if self._file_handle is not None and not self._file_handle.closed:
+                self._file_handle.flush()
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_file_handle()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def print_result_history(self) -> None:
         for entry in self._result_history:
             print(self._colorize("RESULT", entry))
 
     def _write(self, level: str, message: str, *, emit_console: bool = True) -> None:
-        timestamp = datetime.now(UTC).isoformat()
-        entry = f"{timestamp} [{level}] {message}"
+        timestamp = datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
+        entry = f"{timestamp} {level} {message}"
         with self._lock:
-            with self.log_file_path.open("a", encoding="utf-8") as handle:
-                handle.write(entry + "\n")
+            if self._file_logging_enabled and self._file_handle is not None:
+                try:
+                    self._file_handle.write(entry + "\n")
+                    self._file_handle.flush()
+                except OSError:
+                    self._file_logging_enabled = False
+                    self._close_file_handle()
+                    if not self._file_logging_warning_printed:
+                        self._file_logging_warning_printed = True
+                        print(
+                            "PipelineLogger file logging disabled after OSError while writing pipeline.log",
+                            file=sys_stdout,
+                        )
             if level == "RESULT":
                 self._result_history.append(entry)
-        if emit_console:
-            print(self._colorize(level, entry), file=sys_stdout)
+        if emit_console and self._LEVELS[level] >= self._min_level:
+            console_text = message if level == "PRINT" else self._colorize(level, entry)
+            print(console_text, file=sys_stdout)
+
+    def _close_file_handle(self) -> None:
+        if self._file_handle is not None and not self._file_handle.closed:
+            self._file_handle.close()
 
     def _colorize(self, level: str, entry: str) -> str:
         color_map = {
             "DEBUG": "cyan",
             "INFO": "blue",
-            "WARNING": "yellow",
+            "WARNING": "magenta",
             "ERROR": "red",
             "CRITICAL": "red",
             "RESULT": "green",

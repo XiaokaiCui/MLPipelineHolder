@@ -1,16 +1,51 @@
-[tool.poetry]
+[project]
 name = "mlpipelineholder"
 version = "0.1.0"
 description = "Lightweight machine learning pipeline handler"
 authors = []
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11,<4.0"
+keywords = ["machine-learning", "pipeline", "experimentation", "orchestration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "termcolor",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/XiaokaiCui/MLPipelineHolder"
+Repository = "https://github.com/XiaokaiCui/MLPipelineHolder"
+Issues = "https://github.com/XiaokaiCui/MLPipelineHolder/issues"
+
+[project.optional-dependencies]
+dataframe = ["pandas", "pyarrow", "dask[dataframe]"]
+torch = ["torch"]
+memory = ["psutil"]
+all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "psutil"]
+
+[tool.poetry]
 packages = [{ include = "mlpipelineholder", from = "src" }]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<4.0"
-termcolor = "*"
-numpy = "*"
-
-[tool.poetry.group.dev.dependencies]
+[tool.poetry.group.test.dependencies]
+pandas = "*"
+pyarrow = "*"
+dask = { version = "*", extras = ["dataframe"] }
+torch = "*"
+psutil = "*"
+build = "*"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]
