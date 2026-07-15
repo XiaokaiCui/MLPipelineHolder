@@ -85,6 +85,28 @@ pip install poetry
 poetry install --no-interaction
 ```
 
+For the full local feature set used by many examples/tests:
+
+```bash
+poetry install --with test
+```
+
+If you only want selected optional runtime features, you can install extras instead:
+
+```bash
+poetry install --extras "dataframe"
+poetry install --extras "torch"
+poetry install --extras "memory"
+poetry install --extras "all"
+```
+
+Notes:
+
+- `dataframe` enables pandas / pyarrow / dask dataframe support
+- `torch` enables torch model / tensor / optimizer persistence support
+- `memory` enables `psutil`-based memory profiling logs
+- the `test` group is what the project test suite expects in CI and local verification
+
 ### Main dependency
 
 - `termcolor` for colorful logger and chart output
@@ -284,14 +306,15 @@ Available execution methods:
 ### Update config
 
 ```python
-pipeline.update_config({"multiplier": 10})
+pipeline.set_config({"multiplier": 10})
 ```
 
 Rules:
 
 - the pipeline may be created with `configuration=None`, which is treated as an empty config
-- non-conflicting new fields may be added
-- updates that would conflict with declared output names are skipped with a warning
+- `set_config(...)` adds new fields or updates existing ones
+- `update_config(...)` updates existing fields only
+- config writes that would conflict with declared output names are rejected or skipped depending on the method used
 
 ### Inspect config
 
@@ -314,6 +337,18 @@ value = pipeline.get_value("model_blob")
 ```
 
 If the value is disk-backed, the true object is loaded and returned.
+
+To modify values:
+
+```python
+pipeline.update_value("existing_name", 10)
+pipeline.set_value("new_or_existing_name", 20)
+```
+
+Behavior:
+
+- `update_value(...)` updates existing visible values only
+- `set_value(...)` creates a new pipeline-owned value if it does not exist, otherwise it updates the existing value
 
 ### Remove a block safely
 
@@ -699,18 +734,18 @@ The pipeline can capture `print(...)` output from registered functions and send 
 
 Current implementation details:
 
-- print capture uses `redirect_stdout(...)`
-- blocks can still run multiple functions in parallel using threads
+- print capture uses `redirect_stdout(...)` only for single-function execution paths
+- parallel block functions still run in threads, but print capture is intentionally disabled there to avoid corrupting process-wide `sys.stdout`
 
 This is usually fine for normal usage, but it has an important caveat:
 
-- `stdout` is still process-level state
-- print-heavy concurrent functions may interleave output or attribute lines less cleanly than explicit logger calls
+- print-heavy concurrent functions may still interleave raw stdout output
+- parallel function `print(...)` calls are not captured into pipeline logs
 
 Recommendation:
 
 - use the logger directly for important structured messages
-- treat captured `print(...)` as a convenience feature, not the strongest concurrency-safe logging path
+- treat captured `print(...)` as a convenience feature for non-parallel execution paths, not the strongest concurrency-safe logging path
 
 ### 3. Child result history after attachment is intentionally asymmetric
 

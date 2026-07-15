@@ -237,6 +237,7 @@ class ExecutionBlock:
                         dict(visible_outputs),
                         overrides or {},
                         parent_config or {},
+                        len(self.functions) == 1,
                     )
                 )
 
@@ -272,6 +273,7 @@ class ExecutionBlock:
         visible_outputs: dict[str, Any],
         overrides: dict[str, Any],
         parent_config: dict[str, Any],
+        capture_prints: bool,
     ) -> FunctionExecutionResult:
         del run_id
         positional_args, keyword_args, loaded_artifacts = self.parent._prepare_call_arguments(
@@ -282,11 +284,14 @@ class ExecutionBlock:
             block=self,
         )
         try:
-            result = self.parent._capture_prints(
-                registration.callable_obj,
-                *positional_args,
-                **keyword_args,
-            )
+            if capture_prints:
+                result = self.parent._capture_prints(
+                    registration.callable_obj,
+                    *positional_args,
+                    **keyword_args,
+                )
+            else:
+                result = registration.callable_obj(*positional_args, **keyword_args)
         except ResolutionError:
             raise
         except Exception as exc:

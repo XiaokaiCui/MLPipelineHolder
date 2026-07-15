@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import gc
 import inspect
 import pickle
 import shutil
+import platform
 import sys
 import warnings
+from ctypes import CDLL
 from contextlib import redirect_stdout
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
@@ -30,6 +33,8 @@ class PipelineHandler:
         local_folder_path: str | Path,
         execution_priority: float | None = None,
         forced: bool = False,
+        memory_saving_mode: bool = False,
+        memory_profile_logging: bool = False,
         _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
@@ -44,6 +49,8 @@ class PipelineHandler:
         self.metadata_root.mkdir(parents=True, exist_ok=True)
         self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
         self.print_capture_mode = "tee"
+        self.memory_saving_mode = memory_saving_mode
+        self.memory_profile_logging = memory_profile_logging
         self.historical_result_log_path: str | None = None
         self._attached_result_history_override: list[str] | None = None
 
@@ -53,6 +60,7 @@ class PipelineHandler:
         self.blocks_by_name: dict[str, Any] = {}
         self.gate_block: GateBlock | None = None
 
+        self.manual_values: dict[str, Any] = {}
         self.para_value_dict: dict[str, Any] = {}
         self.artifact_registry: dict[str, ArtifactRecord] = {}
         self.producer_outputs: dict[str, dict[str, Any]] = {}
@@ -124,10 +132,20 @@ class PipelineHandler:
             return None
         if conflicts and forced:
             self._replace_conflicting_nodes(conflicts)
+        if (
+            forced
+            and child_pipeline.parent_pipeline is not None
+            and child_pipeline.parent_pipeline is not self
+        ):
+            child_pipeline.parent_pipeline._remove_registered_node(child_pipeline)
+            child_pipeline.parent_pipeline = None
         self._validate_node_registration(child_pipeline, execution_priority)
         self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
+        if child_pipeline.para_value_dict:
+            self.producer_outputs[child_pipeline.registration_name] = dict(child_pipeline.para_value_dict)
+            self._rebuild_visible_state(self._incoming_parent_outputs())
         return child_pipeline
 
     def create_atom_child_pipeline(
@@ -148,6 +166,18 @@ class PipelineHandler:
         forced: bool = True,
         block_priority: float = 10.0,
     ) -> None:
+        output_names = (
+            []
+            if output_variable_names is None
+            else [output_variable_names]
+            if isinstance(output_variable_names, str)
+            else list(output_variable_names)
+        )
+        save_names = set(save_to_disk_lst or [])
+        if not save_names.issubset(set(output_names)):
+            raise RegistrationError(
+                "save_to_disk_lst must be a subset of output_variable_names in create_atom_child_pipeline"
+            )
         child_root = self.project_root / "children" / child_name
         temp_pipeline = PipelineHandler(
             registration_name=child_name,
@@ -159,7 +189,7 @@ class PipelineHandler:
         )
         if gate_config is not None:
             if gate_config not in temp_pipeline.get_full_config():
-                temp_pipeline.update_config({gate_config: default_config_value})
+                temp_pipeline.set_config({gate_config: default_config_value})
             temp_pipeline.set_gate_block(
                 gate_config,
                 expected_value=expected_value,
@@ -213,7 +243,7 @@ class PipelineHandler:
     ) -> Any:
         return self.add_gate_block(function_or_path, expected_value=expected_value, forced=forced)
 
-    def update_config(self, overrides: dict[str, Any]) -> None:
+    def set_config(self, overrides: dict[str, Any]) -> None:
         declared_outputs = self.list_declared_outputs()
         for field_name, value in overrides.items():
             if field_name in declared_outputs:
@@ -223,17 +253,35 @@ class PipelineHandler:
                 continue
             self._set_config_value(field_name, value)
 
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        config_names = self.get_full_config()
+        for field_name, value in overrides.items():
+            if field_name not in config_names:
+                raise ResolutionError(f"Unknown config field: {field_name}")
+            if field_name in self.list_declared_outputs():
+                raise ResolutionError(
+                    f"Cannot update config field '{field_name}' because it conflicts with a declared output"
+                )
+            self._set_config_value(field_name, value)
+
     def get_value(self, variable_name: str) -> Any:
-        if variable_name not in self.para_value_dict:
-            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
-        value = self.para_value_dict[variable_name]
+        if variable_name in self.para_value_dict:
+            value = self.para_value_dict[variable_name]
+        else:
+            upstream_outputs = self._incoming_parent_outputs()
+            if variable_name in upstream_outputs:
+                value = upstream_outputs[variable_name]
+            else:
+                value = self._descendant_visible_value(variable_name)
+                if value is None:
+                    raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         if isinstance(value, TorchStateArtifactRecord):
             return value
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
         return value
 
-    def set_value(self, variable_name: str, value: Any) -> None:
+    def update_value(self, variable_name: str, value: Any) -> None:
         if variable_name not in self.para_value_dict:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
@@ -242,6 +290,8 @@ class PipelineHandler:
             self.artifact_store.delete(previous_value)
 
         self.para_value_dict[variable_name] = value
+        if variable_name in self.manual_values:
+            self.manual_values[variable_name] = value
         if isinstance(value, ArtifactRecord):
             self.artifact_registry[variable_name] = value
         else:
@@ -253,6 +303,20 @@ class PipelineHandler:
                 continue
             outputs[variable_name] = value
             break
+
+    def set_value(self, variable_name: str, value: Any) -> None:
+        if variable_name in self.para_value_dict:
+            self.update_value(variable_name, value)
+            return
+
+        self.manual_values[variable_name] = value
+        self.para_value_dict[variable_name] = value
+        if isinstance(value, ArtifactRecord):
+            self.artifact_registry[variable_name] = value
+        else:
+            self.artifact_registry.pop(variable_name, None)
+        if self.parent_pipeline is not None:
+            self._sync_attached_outputs_to_parent()
 
     def get_full_config(self) -> dict[str, Any]:
         return dict(self._ancestor_config_values(), **self.config_as_dict())
@@ -512,6 +576,8 @@ class PipelineHandler:
             configuration=payload["config"],
             local_folder_path=project_root,
             execution_priority=payload.get("execution_priority"),
+            memory_saving_mode=payload.get("memory_saving_mode", False),
+            memory_profile_logging=payload.get("memory_profile_logging", False),
             _allow_existing_root=True,
         )
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
@@ -571,6 +637,7 @@ class PipelineHandler:
                 child.logger = pipeline.logger
                 pipeline._register_node(child)
         pipeline.producer_outputs = payload.get("producer_outputs", {})
+        pipeline.manual_values = payload.get("manual_values", {})
         pipeline.para_value_dict = payload.get("para_value_dict", {})
         pipeline.artifact_registry = payload.get("artifact_registry", {})
         pipeline.run_history = payload.get("run_history", [])
@@ -589,9 +656,22 @@ class PipelineHandler:
             "registration_name": self.registration_name,
             "config": self.config,
             "execution_priority": self.execution_priority,
+            "memory_saving_mode": self.memory_saving_mode,
+            "memory_profile_logging": self.memory_profile_logging,
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
+            "manual_values": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "manual_values",
+                    output_name,
+                    sibling_outputs=self.manual_values,
+                )
+                for output_name, value in self.manual_values.items()
+            },
             "producer_outputs": {
                 node_name: {
                     output_name: self._serialize_runtime_value_for_save(
@@ -910,6 +990,7 @@ class PipelineHandler:
                     node.execution_priority,
                     upstream_outputs=upstream_outputs,
                 )
+                visible_outputs.update(self.manual_values)
                 prior_outputs = (previous_node_outputs or {}).get(node.registration_name)
                 if prior_outputs:
                     visible_outputs = dict(visible_outputs) | prior_outputs
@@ -933,10 +1014,16 @@ class PipelineHandler:
                     )
                 self.producer_outputs[node.registration_name] = produced_outputs
                 self._rebuild_visible_state(upstream_outputs)
+                if self.memory_profile_logging:
+                    self._log_memory_profile(node.registration_name, phase="after_compute")
                 run_record.executed_blocks.append(node.registration_name)
                 run_record.produced_outputs.extend(produced_outputs.keys())
                 if node_executed:
                     executed_priority_groups.add(priority_group)
+                if self.memory_saving_mode:
+                    self._cleanup_block_memory(node.registration_name)
+                elif self.memory_profile_logging:
+                    self._log_memory_profile(node.registration_name, phase="after_cleanup")
 
             run_record.status = "success"
             self._rebuild_visible_state(upstream_outputs)
@@ -1111,6 +1198,11 @@ class PipelineHandler:
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
         self._invalidate_from_priority(child_priority)
+        child_target_name = path_parts[1]
+        child_target = child_pipeline._get_node_or_raise(child_target_name)
+        child_previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
+        child_pipeline.producer_outputs[child_target.registration_name] = dict(child_previous_outputs)
+        child_pipeline._rebuild_visible_state(child_pipeline._incoming_parent_outputs())
         child_run = child_pipeline.run_from(*path_parts[1:], overrides=overrides)
         self.producer_outputs[child_pipeline.registration_name] = dict(child_pipeline.para_value_dict)
         self._rebuild_visible_state(self._incoming_parent_outputs())
@@ -1238,12 +1330,14 @@ class PipelineHandler:
                 if isinstance(value, ArtifactRecord):
                     all_artifacts.append(value)
             visible.update(produced_outputs)
+        visible.update(self.manual_values)
         declared_outputs = self.list_declared_outputs()
         self.para_value_dict = {
             output_name: visible[output_name]
             for output_name in declared_outputs
             if output_name in visible
         }
+        self.para_value_dict.update(self.manual_values)
         self.artifact_registry = {
             output_name: value
             for output_name, value in self.para_value_dict.items()
@@ -1265,6 +1359,7 @@ class PipelineHandler:
         upstream_outputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         visible = dict(upstream_outputs or self._incoming_parent_outputs())
+        visible.update(self.manual_values)
         if priority is None:
             return visible
         for node in self._sorted_nodes():
@@ -1293,6 +1388,17 @@ class PipelineHandler:
             return {}
         return self.parent_pipeline._visible_outputs_before_priority(self.execution_priority)
 
+    def _descendant_visible_value(self, variable_name: str) -> Any | None:
+        for node in self._sorted_nodes():
+            if not isinstance(node, PipelineHandler):
+                continue
+            if variable_name in node.para_value_dict:
+                return node.para_value_dict[variable_name]
+            descendant_value = node._descendant_visible_value(variable_name)
+            if descendant_value is not None:
+                return descendant_value
+        return None
+
     def _ancestor_config_values(self) -> dict[str, Any]:
         config: dict[str, Any] = {}
         current = self.parent_pipeline
@@ -1304,8 +1410,69 @@ class PipelineHandler:
             config.update(pipeline.config_as_dict())
         return config
 
+    def _ancestor_manual_values(self) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        current = self.parent_pipeline
+        chain: list[PipelineHandler] = []
+        while current is not None:
+            chain.append(current)
+            current = current.parent_pipeline
+        for pipeline in reversed(chain):
+            values.update(pipeline.manual_values)
+        return values
+
     def _visible_config_names(self) -> set[str]:
         return set(self.config_as_dict()).union(self._ancestor_config_values())
+
+    def _required_input_names(self, node: Any) -> set[str]:
+        if isinstance(node, PipelineHandler):
+            return node._required_input_names_for_pipeline()
+        required = set()
+        for registration in node.functions:
+            required.update(registration.input_names)
+            if registration.var_pos_name is not None:
+                required.add(registration.var_pos_name)
+            if registration.var_kw_name is not None:
+                required.add(registration.var_kw_name)
+        return required
+
+    def _required_input_names_for_pipeline(self) -> set[str]:
+        required: set[str] = set()
+        if self.gate_block is not None:
+            required.update(self.gate_block.registration.input_names)
+            if self.gate_block.config_field_name is not None:
+                required.add(self.gate_block.config_field_name)
+        for node in self._sorted_nodes():
+            required.update(self._required_input_names(node))
+        return required
+
+    def _cleanup_block_memory(self, node_name: str) -> None:
+        gc.collect()
+        self._attempt_allocator_trim()
+        if self.memory_profile_logging:
+            self._log_memory_profile(node_name, phase="after_cleanup")
+
+    def _log_memory_profile(self, node_name: str, phase: str = "after_cleanup") -> None:
+        try:
+            import psutil  # type: ignore
+
+            process = psutil.Process()
+            rss_mb = process.memory_info().rss / (1024 * 1024)
+            self.logger.info(f"memory {phase} {node_name}: rss={rss_mb:.2f}MB")
+        except Exception:
+            return
+
+    def _attempt_allocator_trim(self) -> None:
+        if platform.system() != "Linux":
+            return
+        try:
+            libc = CDLL("libc.so.6")
+            malloc_trim = getattr(libc, "malloc_trim", None)
+            if malloc_trim is None:
+                return
+            malloc_trim(0)
+        except Exception:
+            return
 
     def _prepare_call_arguments(
         self,
@@ -1453,6 +1620,10 @@ class PipelineHandler:
             value = overrides[input_name]
         elif input_name in visible_outputs:
             value = visible_outputs[input_name]
+        elif input_name in self.manual_values:
+            value = self.manual_values[input_name]
+        elif input_name in self._ancestor_manual_values():
+            value = self._ancestor_manual_values()[input_name]
         elif self._config_has_field(self.config, input_name):
             value = self._config_value(self.config, input_name)
         elif parent_config and input_name in parent_config:
@@ -1522,6 +1693,7 @@ class PipelineHandler:
         for node in self._sorted_nodes():
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
+        self._rebuild_visible_state(self._incoming_parent_outputs())
 
     def _delete_artifacts_from_outputs(self, outputs: dict[str, Any]) -> None:
         for value in outputs.values():
@@ -1563,6 +1735,8 @@ class PipelineHandler:
         self.parent_pipeline = parent
         self.execution_priority = execution_priority
         self.logger = parent.logger
+        self.memory_saving_mode = parent.memory_saving_mode
+        self.memory_profile_logging = parent.memory_profile_logging
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)
@@ -1630,6 +1804,8 @@ class PipelineHandler:
             node.metadata_root.mkdir(parents=True, exist_ok=True)
             node.artifact_store = ArtifactStore(new_child_root)
             node.logger = self.logger
+            node.memory_saving_mode = self.memory_saving_mode
+            node.memory_profile_logging = self.memory_profile_logging
             node._rewrite_artifact_paths(old_child_root, new_child_root)
             node._rewrite_run_history_paths(old_child_root, new_child_root)
             node._refresh_descendant_roots(old_child_root, new_child_root)
@@ -1841,7 +2017,14 @@ class PipelineHandler:
 
     def config_as_dict(self) -> dict[str, Any]:
         if is_dataclass(self.config) and not isinstance(self.config, type):
-            return asdict(self.config)
+            config_dict = asdict(self.config)
+            extra_attrs = {
+                key: value
+                for key, value in vars(self.config).items()
+                if key not in config_dict
+            }
+            config_dict.update(extra_attrs)
+            return config_dict
         if isinstance(self.config, dict):
             return dict(self.config)
         if hasattr(self.config, "__dict__"):
@@ -1850,21 +2033,23 @@ class PipelineHandler:
 
     def _snapshot_runtime_state(
         self,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, ArtifactRecord]]:
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, ArtifactRecord], dict[str, Any]]:
         return (
             {name: dict(outputs) for name, outputs in self.producer_outputs.items()},
             dict(self.para_value_dict),
             dict(self.artifact_registry),
+            dict(self.manual_values),
         )
 
     def _restore_runtime_state(
         self,
-        snapshot: tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, ArtifactRecord]],
+        snapshot: tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, ArtifactRecord], dict[str, Any]],
     ) -> None:
-        producer_outputs, para_values, artifacts = snapshot
+        producer_outputs, para_values, artifacts, manual_values = snapshot
         self.producer_outputs = {name: dict(outputs) for name, outputs in producer_outputs.items()}
         self.para_value_dict = dict(para_values)
         self.artifact_registry = dict(artifacts)
+        self.manual_values = dict(manual_values)
 
 
 class _TeeStdout:

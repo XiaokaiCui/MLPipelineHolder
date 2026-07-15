@@ -1,16 +1,29 @@
-[tool.poetry]
+[project]
 name = "mlpipelineholder"
 version = "0.1.0"
 description = "Lightweight machine learning pipeline handler"
 authors = []
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "termcolor",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dataframe = ["pandas", "pyarrow", "dask[dataframe]"]
+torch = ["torch"]
+memory = ["psutil"]
+all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "psutil"]
+
+[tool.poetry]
 packages = [{ include = "mlpipelineholder", from = "src" }]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<4.0"
-termcolor = "*"
-numpy = "*"
-
-[tool.poetry.group.dev.dependencies]
+[tool.poetry.group.test.dependencies]
+pandas = "*"
+pyarrow = "*"
+dask = { version = "*", extras = ["dataframe"] }
+torch = "*"
+psutil = "*"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]
