@@ -2,6 +2,12 @@
 
 Lightweight Python library for building, running, recording, and modifying small machine-learning pipelines.
 
+Install from PyPI:
+
+```bash
+pip install mlpipelineholder
+```
+
 ## At a glance
 
 ### What is this project?
@@ -675,7 +681,6 @@ Projects are saved as:
 - duplicate outputs across different parent-level nodes are allowed and resolved by execution order
 - renamed keyword arguments are supported during registration
 - renamed `*args` / `**kwargs` are supported during registration
-- `pos_mapping` is not supported
 - functions inside one block cannot depend on outputs from the same block
 - non-importable callables cannot be saved for load/replay
 
