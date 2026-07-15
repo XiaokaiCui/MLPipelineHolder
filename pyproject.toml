@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "mlpipelineholder"
+version = "0.1.0"
+description = "Lightweight machine learning pipeline handler"
+authors = []
+packages = [{ include = "mlpipelineholder", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+termcolor = "*"
+numpy = "*"
+
+[tool.poetry.group.dev.dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
