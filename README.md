@@ -107,6 +107,48 @@ Notes:
 - `memory` enables `psutil`-based memory profiling logs
 - the `test` group is what the project test suite expects in CI and local verification
 
+## Install as a package
+
+Once published, install from PyPI with:
+
+```bash
+pip install mlpipelineholder
+```
+
+Optional extras:
+
+```bash
+pip install "mlpipelineholder[dataframe]"
+pip install "mlpipelineholder[torch]"
+pip install "mlpipelineholder[memory]"
+pip install "mlpipelineholder[all]"
+```
+
+## Publishing to PyPI
+
+This repository is prepared to publish from GitHub Actions.
+
+Workflow:
+
+1. Ensure project metadata in `pyproject.toml` is correct
+2. Ensure the README is publish-ready
+3. Add a real `LICENSE` file before public release
+4. Create a GitHub release (or trigger the publish workflow manually)
+5. GitHub Actions builds the wheel and sdist with Poetry and publishes to PyPI
+
+The publish workflow is:
+
+- `.github/workflows/publish-pypi.yml`
+
+Recommended checks before publishing:
+
+```bash
+poetry check
+poetry build
+poetry install --with test --no-interaction
+poetry run python -m unittest discover -s tests -v
+```
+
 ### Main dependency
 
 - `termcolor` for colorful logger and chart output
