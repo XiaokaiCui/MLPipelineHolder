@@ -67,6 +67,14 @@ def annotated_two_outputs(value: int) -> tuple[int, int]:
     return value, value + 1
 
 
+def implicit_input(value: int) -> int:
+    return value + 1
+
+
+def mutate_disk_backed_input(shared: str) -> str:
+    return shared + "!"
+
+
 
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
@@ -199,6 +207,33 @@ class ExecutionBlockTests(unittest.TestCase):
             registration = block.register_function(unresolved_annotation_func, ["result"])
 
             self.assertIsNotNone(registration)
+
+    def test_registration_warns_for_unmapped_resolvable_input(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("warn", {"value": 1}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(implicit_input, ["result"])
+
+            self.assertIsNotNone(registration)
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("may be resolved implicitly", log_text)
+
+    def test_registration_warns_for_disk_backed_input_not_declared_as_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("warn", BlockConfig(value=1), tmp_path)
+            first = pipeline.add_block("first", 1)
+            first.register_function(source, ["shared"], save_to_disk=["shared"])
+            pipeline.run_all()
+            second = pipeline.add_block("second", 2)
+
+            registration = second.register_function(mutate_disk_backed_input, ["result"])
+
+            self.assertIsNotNone(registration)
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("in-function mutations will not persist", log_text)
 
     def test_same_name_input_and_output_update_is_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:

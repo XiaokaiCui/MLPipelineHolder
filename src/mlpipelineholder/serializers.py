@@ -98,7 +98,13 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
         torch.save(value, path)
         return
     if serializer == "feather":
-        value.to_feather(path)
+        import pyarrow as pa  # type: ignore
+        import pyarrow.ipc as ipc  # type: ignore
+
+        table = pa.Table.from_pandas(value, preserve_index=False)
+        with path.open("wb") as handle:
+            with ipc.new_file(handle, table.schema) as writer:
+                writer.write_table(table)
         return
     if serializer == "parquet":
         try:
@@ -134,9 +140,11 @@ def load_value(serializer: str, path: Path) -> Any:
 
         return torch.load(path, weights_only=False)
     if serializer == "feather":
-        import pandas as pd  # type: ignore
+        import pyarrow.ipc as ipc  # type: ignore
 
-        return pd.read_feather(path)
+        with path.open("rb") as handle:
+            table = ipc.open_file(handle).read_all()
+        return table.to_pandas()
     if serializer == "parquet":
         try:
             import dask.dataframe as dd  # type: ignore

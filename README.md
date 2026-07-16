@@ -673,6 +673,76 @@ Projects are saved as:
 - log file under `metadata/pipeline.log`
 - config snapshots under `metadata/`
 
+## Backup and restore workflow
+
+### Important note
+
+`save_pipeline()` is good for saving pipeline state inside the same project tree, but it is **not** the best tool for creating an isolated backup copy of an already-populated pipeline directory.
+
+Why:
+
+- existing disk-backed outputs may still be preserved as path-based references
+- saving to a second location does not guarantee a full deep copy of every artifact file
+- so a "working copy" created only through `load_pipeline(...)` + `save_pipeline(...)` may still share artifact files with the original directory
+
+### Recommended backup strategy
+
+Use a normal filesystem copy for backups and restores.
+
+#### Backup
+
+Create a full folder copy of the pipeline directory:
+
+```python
+import shutil
+from pathlib import Path
+
+source = Path("/path/to/quant_pipeline")
+backup = Path("/path/to/quant_pipeline_backup")
+
+if backup.exists():
+    shutil.rmtree(backup)
+
+shutil.copytree(source, backup)
+```
+
+#### Restore
+
+Restore by copying the backup back into a working directory, then load it:
+
+```python
+import shutil
+from pathlib import Path
+
+from mlpipelineholder import PipelineHandler
+
+backup = Path("/path/to/quant_pipeline_backup")
+work = Path("/path/to/quant_pipeline")
+
+if work.exists():
+    shutil.rmtree(work)
+
+shutil.copytree(backup, work)
+
+pipeline = PipelineHandler.load_pipeline(work)
+```
+
+### What not to use for backup cloning
+
+Avoid using this as your backup/restore cloning method:
+
+```python
+pipeline = PipelineHandler.load_pipeline(backup_path)
+pipeline.save_pipeline(work_path)
+```
+
+That pattern can preserve artifact references instead of creating a fully isolated clone.
+
+### Rule of thumb
+
+- use `save_pipeline()` to save state in-place for the same working tree
+- use `shutil.copytree(...)` when you want a robust independent backup copy
+
 ## Rules and safeguards
 
 - exact parent-level priorities must be unique
@@ -807,6 +877,21 @@ This preserves access to pre-attachment child history, but it also means there a
 - historical child result display: child historical log source
 
 So the behavior is workable, but conceptually brittle. It is best understood as a compatibility-oriented compromise rather than a fully unified nested logging model.
+
+### 4. Some registration-time advisories are intentionally heuristic
+
+The library can emit informational advisory logs during function registration for cases such as:
+
+- an input name is not listed in `param_mapping` but still matches a visible pipeline/config name, so it may be resolved implicitly
+- a function reads a disk-backed input without declaring that same name as an output, so in-function mutations would not persist back into pipeline state
+
+These advisories are:
+
+- best-effort only
+- based on what is visible at registration time
+- non-blocking (they do not change execution behavior)
+
+For helper-created child pipelines via `create_atom_child_pipeline(...)`, these advisories are logged to the parent pipeline logger immediately so they are easier to notice.
 
 ## Recommended next steps
 
