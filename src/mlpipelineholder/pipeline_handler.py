@@ -51,6 +51,7 @@ class PipelineHandler:
         self.print_capture_mode = "tee"
         self.memory_saving_mode = memory_saving_mode
         self.memory_profile_logging = memory_profile_logging
+        self.suppress_registration_advisories = False
         self.historical_result_log_path: str | None = None
         self._attached_result_history_override: list[str] | None = None
 
@@ -583,6 +584,7 @@ class PipelineHandler:
             _allow_existing_root=True,
         )
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
+        pipeline.suppress_registration_advisories = True
         if payload.get("gate") is not None:
             gate_payload = payload["gate"]
             if gate_payload.get("kind") == "config_field":
@@ -643,6 +645,7 @@ class PipelineHandler:
         pipeline.para_value_dict = payload.get("para_value_dict", {})
         pipeline.artifact_registry = payload.get("artifact_registry", {})
         pipeline.run_history = payload.get("run_history", [])
+        pipeline.suppress_registration_advisories = False
         if parent is not None:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
