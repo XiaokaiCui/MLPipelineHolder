@@ -176,9 +176,63 @@ class ExecutionBlock:
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
         )
+        self._warn_on_unmapped_resolvable_inputs(callable_obj, registration)
+        self._warn_on_disk_backed_input_persistence_pitfall(registration)
         self.functions.append(registration)
         self.parent._register_node(self)
         return registration
+
+    def _warn_on_unmapped_resolvable_inputs(
+        self,
+        callable_obj: Any,
+        registration: FunctionRegistration,
+    ) -> None:
+        try:
+            signature = inspect.signature(callable_obj)
+            visible_names = set(self.parent._registration_visible_names())
+            suspicious: list[str] = []
+            for parameter in signature.parameters.values():
+                if parameter.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    continue
+                if parameter.name == "logger":
+                    continue
+                if parameter.name in registration.param_mapping:
+                    continue
+                if parameter.name in visible_names:
+                    suspicious.append(parameter.name)
+            if suspicious:
+                self.parent.logger.info(
+                    f"Function '{registration.function_name}' in block '{self.registration_name}' has unmapped input(s) {sorted(suspicious)} that match visible pipeline/config names and may be resolved implicitly"
+                )
+        except Exception:
+            return
+
+    def _warn_on_disk_backed_input_persistence_pitfall(
+        self,
+        registration: FunctionRegistration,
+    ) -> None:
+        try:
+            mapped_inputs = set(registration.param_mapping.values())
+            mapped_inputs.update(
+                name
+                for name in registration.input_names
+                if name not in registration.param_mapping and name != "logger"
+            )
+            risky = sorted(
+                name
+                for name in mapped_inputs
+                if name in self.parent._registration_disk_backed_names()
+                and name not in registration.output_names
+            )
+            if risky:
+                self.parent.logger.info(
+                    f"Function '{registration.function_name}' in block '{self.registration_name}' reads disk-backed input(s) {risky} without declaring them as outputs; in-function mutations will not persist unless those names are also outputs"
+                )
+        except Exception:
+            return
 
     def remove_function(self, function_name: str) -> None:
         matches = [

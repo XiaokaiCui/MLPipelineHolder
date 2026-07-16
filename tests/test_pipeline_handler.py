@@ -190,6 +190,14 @@ def join_with_variadics(prefix: str, *parts: str, **named_parts: str) -> str:
     return "|".join(ordered)
 
 
+def implicit_input(value: int) -> int:
+    return value + 1
+
+
+def mutate_disk_backed_input(shared: str) -> str:
+    return shared + "!"
+
+
 def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
@@ -1714,6 +1722,29 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("memory after_compute setup", log_text)
             self.assertIn("memory after_cleanup setup", log_text)
 
+    def test_memory_profile_logging_skips_duplicate_child_wrapper_lines(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler(
+                "parent",
+                DemoConfig(base=2, factor=4),
+                tmp_path / "parent",
+                memory_saving_mode=True,
+                memory_profile_logging=True,
+            )
+            child = PipelineHandler("child", DemoConfig(base=2, factor=4), tmp_path / "child")
+            block = child.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            parent.add_child_pipeline(child, 1)
+
+            parent.run_all()
+
+            log_text = (tmp_path / "parent" / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("memory after_compute setup", log_text)
+            self.assertIn("memory after_cleanup setup", log_text)
+            self.assertNotIn("memory after_compute child", log_text)
+            self.assertNotIn("memory after_cleanup child", log_text)
+
     def test_memory_saving_mode_false_keeps_old_behavior(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1885,6 +1916,42 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(run.status, "success")
             self.assertEqual(parent.get_value("joined"), "P|A|B")
+
+    def test_create_atom_child_pipeline_warns_for_parent_visible_unmapped_input(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"value": 1}, tmp_path / "parent")
+
+            parent.create_atom_child_pipeline(
+                child_name="child_warn",
+                execution_priority=10.0,
+                target_function=implicit_input,
+                output_variable_names=["result"],
+                forced=True,
+            )
+
+            log_text = (tmp_path / "parent" / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("may be resolved implicitly", log_text)
+
+    def test_create_atom_child_pipeline_warns_for_parent_disk_backed_input_pitfall(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=1), tmp_path / "parent")
+            setup = parent.add_block("setup", 1)
+            setup.register_function(produce_seed, ["shared"], save_to_disk=["shared"])
+            parent.run_all()
+
+            parent.create_atom_child_pipeline(
+                child_name="child_warn",
+                execution_priority=10.0,
+                target_function=mutate_disk_backed_input,
+                output_variable_names=["result"],
+                param_mapping_dct={"shared": "shared"},
+                forced=True,
+            )
+
+            log_text = (tmp_path / "parent" / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("in-function mutations will not persist", log_text)
 
     def test_create_atom_child_pipeline_rejects_invalid_save_to_disk_names(self) -> None:
         with TemporaryDirectory() as temp_dir:

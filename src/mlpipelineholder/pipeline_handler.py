@@ -187,6 +187,8 @@ class PipelineHandler:
             forced=forced,
             _allow_existing_root=allow_existing_root,
         )
+        temp_pipeline.logger = self.logger
+        temp_pipeline.parent_pipeline = self
         if gate_config is not None:
             if gate_config not in temp_pipeline.get_full_config():
                 temp_pipeline.set_config({gate_config: default_config_value})
@@ -1014,15 +1016,16 @@ class PipelineHandler:
                     )
                 self.producer_outputs[node.registration_name] = produced_outputs
                 self._rebuild_visible_state(upstream_outputs)
-                if self.memory_profile_logging:
+                if self.memory_profile_logging and not isinstance(node, PipelineHandler):
                     self._log_memory_profile(node.registration_name, phase="after_compute")
                 run_record.executed_blocks.append(node.registration_name)
                 run_record.produced_outputs.extend(produced_outputs.keys())
                 if node_executed:
                     executed_priority_groups.add(priority_group)
                 if self.memory_saving_mode:
-                    self._cleanup_block_memory(node.registration_name)
-                elif self.memory_profile_logging:
+                    if not isinstance(node, PipelineHandler):
+                        self._cleanup_block_memory(node.registration_name)
+                elif self.memory_profile_logging and not isinstance(node, PipelineHandler):
                     self._log_memory_profile(node.registration_name, phase="after_cleanup")
 
             run_record.status = "success"
@@ -1423,6 +1426,38 @@ class PipelineHandler:
 
     def _visible_config_names(self) -> set[str]:
         return set(self.config_as_dict()).union(self._ancestor_config_values())
+
+    def _registration_visible_names(self) -> set[str]:
+        names = set(self._visible_config_names())
+        names.update(self.list_declared_outputs())
+        names.update(self._incoming_parent_output_names())
+        names.update(self.manual_values)
+        names.update(self._ancestor_manual_values())
+        return names
+
+    def _registration_disk_backed_names(self) -> set[str]:
+        names = self._known_disk_backed_output_names()
+        try:
+            for key, value in self._incoming_parent_outputs().items():
+                if isinstance(value, ArtifactRecord):
+                    names.add(key)
+        except Exception:
+            pass
+        for key, value in self.manual_values.items():
+            if isinstance(value, ArtifactRecord):
+                names.add(key)
+        for key, value in self._ancestor_manual_values().items():
+            if isinstance(value, ArtifactRecord):
+                names.add(key)
+        return names
+
+    def _known_disk_backed_output_names(self) -> set[str]:
+        names = set(self.artifact_registry)
+        for outputs in self.producer_outputs.values():
+            for key, value in outputs.items():
+                if isinstance(value, ArtifactRecord):
+                    names.add(key)
+        return names
 
     def _required_input_names(self, node: Any) -> set[str]:
         if isinstance(node, PipelineHandler):
