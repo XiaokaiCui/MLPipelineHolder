@@ -154,9 +154,10 @@ class ExecutionBlock:
             var_kw_name=var_kw_name,
         )
         if not output_names and declared_output_count is not None and declared_output_count > 0:
-            self.parent.logger.warning(
-                f"Function '{function_name}' in block '{self.registration_name}' declares {declared_output_count} output(s), but output_variable_names=None was used; any returned value will be ignored"
-            )
+            if not getattr(self.parent, "suppress_registration_advisories", False):
+                self.parent.logger.warning(
+                    f"Function '{function_name}' in block '{self.registration_name}' declares {declared_output_count} output(s), but output_variable_names=None was used; any returned value will be ignored"
+                )
         if (
             declared_output_count is not None
             and output_names
@@ -204,9 +205,10 @@ class ExecutionBlock:
                 if parameter.name in visible_names:
                     suspicious.append(parameter.name)
             if suspicious:
-                self.parent.logger.info(
-                    f"Function '{registration.function_name}' in block '{self.registration_name}' has unmapped input(s) {sorted(suspicious)} that match visible pipeline/config names and may be resolved implicitly"
-                )
+                if not getattr(self.parent, "suppress_registration_advisories", False):
+                    self.parent.logger.info(
+                        f"Function '{registration.function_name}' in block '{self.registration_name}' has unmapped input(s) {sorted(suspicious)} that match visible pipeline/config names and may be resolved implicitly"
+                    )
         except Exception:
             return
 
@@ -228,9 +230,10 @@ class ExecutionBlock:
                 and name not in registration.output_names
             )
             if risky:
-                self.parent.logger.info(
-                    f"Function '{registration.function_name}' in block '{self.registration_name}' reads disk-backed input(s) {risky} without declaring them as outputs; in-function mutations will not persist unless those names are also outputs"
-                )
+                if not getattr(self.parent, "suppress_registration_advisories", False):
+                    self.parent.logger.info(
+                        f"Function '{registration.function_name}' in block '{self.registration_name}' reads disk-backed input(s) {risky} without declaring them as outputs; in-function mutations will not persist unless those names are also outputs"
+                    )
         except Exception:
             return
 
