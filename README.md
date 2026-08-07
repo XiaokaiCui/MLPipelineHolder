@@ -263,7 +263,9 @@ Current serializer behavior:
 - JSON-serializable values use `json`
 - `numpy.ndarray` values use `.npy`
 - torch tensors/modules use `torch`
-- pandas DataFrames use `feather` when available
+- pandas DataFrames use `feather` by default
+- pandas DataFrames with more than 3 million rows use a single parquet file
+- Dask DataFrames use parquet directories and remain Dask on reload
 - everything else falls back to `pickle`
 
 ## Main features
@@ -310,6 +312,12 @@ Registration UX notes:
 - `forced=True` can be used to replace an existing block, child pipeline, gate block, or function registration
 - `forced=True` only replaces an existing block/child pipeline with the same name; a different name using an existing priority still raises an error
 
+For convenience, you can also create a one-block child pipeline directly:
+
+```python
+parent.create_atom_child_pipeline(...)
+```
+
 ### Rename function inputs and use variadics safely
 
 When a function uses generic names like `obj`, or uses `*args` / `**kwargs`, you can expose safer pipeline-facing names during registration.
@@ -351,6 +359,14 @@ Available execution methods:
 - `run_from(block_name)`
 - `run_block(block_name)`
 
+Nested targeting is also supported by path:
+
+```python
+pipeline.run_until("modeling_pipeline", "predictor_components")
+pipeline.run_from("modeling_pipeline", "predictor_training_pipeline", "predictor_saving_pipeline")
+pipeline.run_block("modeling_pipeline", "predictor_components")
+```
+
 ### Update config
 
 ```python
@@ -377,6 +393,7 @@ Behavior:
 - parent configs are included recursively for nested child pipelines
 - current pipeline config overrides same-named parent values
 - `get_config_value(name)` raises if the key does not exist
+- child configs are not propagated upward to parents or siblings
 
 ### Access values safely
 
@@ -397,6 +414,7 @@ Behavior:
 
 - `update_value(...)` updates existing visible values only
 - `set_value(...)` creates a new pipeline-owned value if it does not exist, otherwise it updates the existing value
+- values created with `set_value(...)` are visible to the pipeline, its descendants, and downstream siblings through the parent visibility model
 
 ### Remove a block safely
 
@@ -489,6 +507,12 @@ Helper accessors:
 block = pipeline.get_block("setup")
 child = pipeline.get_child_pipeline("child_pipeline")
 pipeline.reset_gate_block()
+```
+
+There is also a convenience helper for one-block children:
+
+```python
+pipeline.create_atom_child_pipeline(...)
 ```
 
 ### Add a gate block
@@ -632,6 +656,24 @@ Print capture modes:
 - `tee` (default): send `print(...)` output to both normal stdout and the pipeline log
 - `logger_only`: capture `print(...)` output only into the pipeline log
 - `off`: leave normal `print(...)` behavior unchanged
+
+### Memory options
+
+You can enable optional runtime memory tools when creating a pipeline:
+
+```python
+pipeline = PipelineHandler(
+    ...,
+    memory_saving_mode=True,
+    memory_profile_logging=True,
+)
+```
+
+Behavior:
+
+- `memory_saving_mode=True` runs a best-effort cleanup after each block finishes
+- `memory_profile_logging=True` logs memory after compute and after cleanup for each block
+- attached child pipelines inherit these settings from their parent
 
 ## Example script
 
@@ -795,6 +837,9 @@ Current test coverage verifies:
 - parent-level output conflict reporting
 - stale-output protection for individual reruns of earlier nodes
 - importable vs non-importable save behavior
+- nested path targeting for child pipelines
+- block-scoped args/kwargs helpers
+- memory profiling and optional block-level cleanup
 
 ## Run tests
 
