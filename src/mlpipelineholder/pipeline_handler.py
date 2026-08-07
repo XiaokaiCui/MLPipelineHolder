@@ -645,6 +645,10 @@ class PipelineHandler:
         pipeline.para_value_dict = payload.get("para_value_dict", {})
         pipeline.artifact_registry = payload.get("artifact_registry", {})
         pipeline.run_history = payload.get("run_history", [])
+        saved_project_root = payload.get("saved_project_root")
+        if saved_project_root is not None:
+            pipeline._rewrite_artifact_paths(Path(saved_project_root), project_root)
+            pipeline._rewrite_run_history_paths(Path(saved_project_root), project_root)
         pipeline.suppress_registration_advisories = False
         if parent is not None:
             pipeline.parent_pipeline = parent
@@ -661,6 +665,7 @@ class PipelineHandler:
             "registration_name": self.registration_name,
             "config": self.config,
             "execution_priority": self.execution_priority,
+            "saved_project_root": str(self.project_root),
             "memory_saving_mode": self.memory_saving_mode,
             "memory_profile_logging": self.memory_profile_logging,
             "historical_result_log_path": self.historical_result_log_path,
@@ -1032,6 +1037,7 @@ class PipelineHandler:
                     self._log_memory_profile(node.registration_name, phase="after_cleanup")
 
             run_record.status = "success"
+            run_record.produced_outputs = list(dict.fromkeys(run_record.produced_outputs))
             self._rebuild_visible_state(upstream_outputs)
             if sync_parent_on_completion:
                 self._sync_attached_outputs_to_parent()
@@ -1349,13 +1355,9 @@ class PipelineHandler:
             for output_name, value in self.para_value_dict.items()
             if isinstance(value, ArtifactRecord)
         }
-        active_artifacts = {
-            id(value)
-            for value in self.para_value_dict.values()
-            if isinstance(value, ArtifactRecord)
-        }
+        active_artifact_paths = self._collect_referenced_artifact_paths()
         for artifact in all_artifacts:
-            if id(artifact) in active_artifacts:
+            if artifact.file_path in active_artifact_paths:
                 continue
             self.artifact_store.delete(artifact)
 
@@ -1371,8 +1373,14 @@ class PipelineHandler:
         for node in self._sorted_nodes():
             if node.execution_priority >= priority:
                 break
-            visible.update(self.producer_outputs.get(node.registration_name, {}))
+            visible.update(self._node_visible_outputs(node))
         return visible
+
+    def _node_visible_outputs(self, node: Any) -> dict[str, Any]:
+        outputs = dict(self.producer_outputs.get(node.registration_name, {}))
+        if isinstance(node, PipelineHandler):
+            outputs.update(node.para_value_dict)
+        return outputs
 
     def _incoming_parent_output_names(self) -> set[str]:
         if self.parent_pipeline is None or self.execution_priority is None:
@@ -1403,6 +1411,15 @@ class PipelineHandler:
             descendant_value = node._descendant_visible_value(variable_name)
             if descendant_value is not None:
                 return descendant_value
+        return None
+
+    def _ancestor_descendant_visible_value(self, variable_name: str) -> Any | None:
+        current = self.parent_pipeline
+        while current is not None:
+            descendant_value = current._descendant_visible_value(variable_name)
+            if descendant_value is not None:
+                return descendant_value
+            current = current.parent_pipeline
         return None
 
     def _ancestor_config_values(self) -> dict[str, Any]:
@@ -1670,6 +1687,8 @@ class PipelineHandler:
             value = defaults[input_name]
         elif input_name in declared_output_names:
             value = None
+        elif (ancestor_descendant := self._ancestor_descendant_visible_value(input_name)) is not None:
+            value = ancestor_descendant
         elif allow_missing:
             value = missing_value
         else:
@@ -1734,9 +1753,30 @@ class PipelineHandler:
         self._rebuild_visible_state(self._incoming_parent_outputs())
 
     def _delete_artifacts_from_outputs(self, outputs: dict[str, Any]) -> None:
+        active_artifact_paths = self._collect_referenced_artifact_paths()
         for value in outputs.values():
             if isinstance(value, ArtifactRecord):
+                if value.file_path in active_artifact_paths:
+                    continue
                 self.artifact_store.delete(value)
+
+    def _collect_referenced_artifact_paths(self) -> set[str]:
+        paths: set[str] = set()
+
+        def collect_from_mapping(mapping: dict[str, Any]) -> None:
+            for value in mapping.values():
+                if isinstance(value, ArtifactRecord):
+                    paths.add(value.file_path)
+
+        collect_from_mapping(self.para_value_dict)
+        collect_from_mapping(self.artifact_registry)
+        collect_from_mapping(self.manual_values)
+        for outputs in self.producer_outputs.values():
+            collect_from_mapping(outputs)
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                paths.update(node._collect_referenced_artifact_paths())
+        return paths
 
     def _persist_config_snapshot(self, path: Path) -> None:
         with path.open("wb") as handle:

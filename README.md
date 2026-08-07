@@ -899,3 +899,22 @@ For helper-created child pipelines via `create_atom_child_pipeline(...)`, these 
 - add README examples for `run_until`, `run_from`, and `remove_block`
 - add optional per-run logs
 - add richer artifact serializers if needed
+
+## Q&A / Troubleshooting
+
+### Why does a later pipeline step seem to use the wrong value when an upstream sibling produced the same output name?
+
+This usually happens because the current pipeline already has a **stale local output** with the same name from an earlier run, while an upstream sibling pipeline also provides a fresh value with that same name.
+
+Example shape:
+
+- upstream sibling pipeline produces `group_metrics_df`
+- downstream pipeline also previously produced its own `group_metrics_df`
+- on rerun, the stale local `group_metrics_df` may shadow the upstream one
+
+If that stale local artifact is missing on disk, later execution can fail when trying to load it.
+
+Practical recommendation:
+
+- avoid reusing the same output name across upstream sibling pipelines and later local descendant pipelines when the outputs mean different things
+- prefer distinct names for intermediate and postprocessed outputs

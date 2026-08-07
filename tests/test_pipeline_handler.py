@@ -611,6 +611,27 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("shared"), "memory=3")
             self.assertFalse(any(path.is_file() for path in artifact_files))
 
+    def test_referenced_artifact_is_not_deleted_during_rebuild(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=2), tmp_path / "child")
+            setup = child.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = child.add_block("disk_write", 2)
+            block.register_function(save_text, ["shared"], save_to_disk=["shared"])
+            child.run_all()
+            parent.add_child_pipeline(child, 1)
+
+            artifact = child.para_value_dict["shared"]
+            self.assertIsInstance(artifact, ArtifactRecord)
+            artifact_path = Path(artifact.file_path)
+            self.assertTrue(artifact_path.exists())
+
+            parent._rebuild_visible_state(parent._incoming_parent_outputs())
+
+            self.assertTrue(artifact_path.exists())
+
     def test_earlier_block_individual_run_does_not_see_later_override(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1798,6 +1819,30 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded_parent.get_value("seed"), 3)
             self.assertEqual(loaded_child_two.get_value("seed"), 3)
 
+    def test_load_pipeline_rebases_artifact_paths_to_copied_tree(self) -> None:
+        import shutil
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "source"
+            pipeline = PipelineHandler("source", DemoConfig(base=2), source)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("disk_write", 2)
+            block.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            copied = tmp_path / "copied"
+            shutil.copytree(source, copied)
+
+            loaded = PipelineHandler.load_pipeline(copied)
+            artifact = loaded.para_value_dict["saved_blob"]
+
+            self.assertIsInstance(artifact, ArtifactRecord)
+            self.assertTrue(str(artifact.file_path).startswith(str(copied)))
+            self.assertEqual(loaded.get_value("saved_blob"), "value=3")
+
     def test_attached_sibling_child_can_read_parent_visible_value_via_get_value(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1813,6 +1858,49 @@ class PipelineHandlerTests(unittest.TestCase):
             root.add_child_pipeline(consumer_child, 20)
 
             self.assertEqual(consumer_child.get_value("seed"), 3)
+
+    def test_run_all_sibling_child_can_consume_descendant_output_from_earlier_child(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=2), tmp_path / "root")
+
+            parent_child = PipelineHandler("producer_parent", DemoConfig(base=2), tmp_path / "producer_parent")
+            grandchild = PipelineHandler("grandchild", DemoConfig(base=2), tmp_path / "grandchild")
+            grandchild_block = grandchild.add_block("setup", 1)
+            grandchild_block.register_function(produce_seed, ["seed"])
+            parent_child.add_child_pipeline(grandchild, 1)
+
+            consumer_child = PipelineHandler("consumer", DemoConfig(base=2), tmp_path / "consumer")
+            consumer_block = consumer_child.add_block("consume", 1)
+            consumer_block.register_function(branch_left, ["left"])
+
+            root.add_child_pipeline(parent_child, 10)
+            root.add_child_pipeline(consumer_child, 20)
+            root.run_all()
+
+            self.assertEqual(root.get_value("seed"), 3)
+            self.assertEqual(root.get_value("left"), 13)
+
+    def test_downstream_sibling_child_can_consume_deep_descendant_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=2), tmp_path / "root")
+
+            middle = PipelineHandler("middle", DemoConfig(base=2), tmp_path / "middle")
+            deep_child = PipelineHandler("deep_child", DemoConfig(base=2), tmp_path / "deep_child")
+            deep_block = deep_child.add_block("setup", 1)
+            deep_block.register_function(produce_seed, ["seed"])
+            middle.add_child_pipeline(deep_child, 1)
+
+            consumer = PipelineHandler("consumer", DemoConfig(base=2), tmp_path / "consumer")
+            consumer_block = consumer.add_block("consume", 1)
+            consumer_block.register_function(branch_left, ["left"])
+
+            root.add_child_pipeline(middle, 10)
+            root.add_child_pipeline(consumer, 20)
+            root.run_all()
+
+            self.assertEqual(root.get_value("left"), 13)
 
     def test_set_value_is_visible_to_child_during_run_all(self) -> None:
         with TemporaryDirectory() as temp_dir:
