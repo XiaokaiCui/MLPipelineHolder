@@ -46,7 +46,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
             self.assertEqual(loaded.para_value_dict["result"], 3)
 
@@ -75,7 +75,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 51)
@@ -90,7 +90,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 7)

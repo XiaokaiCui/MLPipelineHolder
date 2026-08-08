@@ -35,6 +35,7 @@ class PipelineHandler:
         forced: bool = False,
         memory_saving_mode: bool = False,
         memory_profile_logging: bool = False,
+        pipeline_backup_directory: str | Path | None = None,
         _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
@@ -42,6 +43,12 @@ class PipelineHandler:
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
         self.project_root = Path(local_folder_path)
+        self.pipeline_backup_root = (
+            None
+            if pipeline_backup_directory is None
+            else Path(pipeline_backup_directory)
+        )
+        self._validate_backup_path_safety()
         if not _allow_existing_root:
             self._prepare_project_root(forced)
         self.project_root.mkdir(parents=True, exist_ok=True)
@@ -141,6 +148,7 @@ class PipelineHandler:
             child_pipeline.parent_pipeline._remove_registered_node(child_pipeline)
             child_pipeline.parent_pipeline = None
         self._validate_node_registration(child_pipeline, execution_priority)
+        self._validate_related_pipeline_names(child_pipeline)
         self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
@@ -346,6 +354,13 @@ class PipelineHandler:
             raise RegistrationError(f"Registered node '{pipeline_name}' is a block, not a child pipeline")
         return node
 
+    def list_child_pipeline_names(self) -> list[str]:
+        return [
+            node.registration_name
+            for node in self._sorted_nodes()
+            if isinstance(node, PipelineHandler)
+        ]
+
     def reset_gate_block(self) -> None:
         if self.gate_block is None:
             return
@@ -535,11 +550,16 @@ class PipelineHandler:
             pickle.dump(payload, handle)
         with (target / "config.pkl").open("wb") as handle:
             pickle.dump(self.config, handle)
+        self._write_pipeline_metadata(target)
         if save_log_to_file is not None:
             self.logger.flush()
             log_target = Path(save_log_to_file)
             log_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.logger.log_file_path, log_target)
+        if self._should_refresh_backup_on_save(target):
+            backup_root = self.pipeline_backup_root
+            if backup_root is not None:
+                self._refresh_backup_copy(target, backup_root)
         return target
 
     def save_project(
@@ -550,12 +570,21 @@ class PipelineHandler:
         return self.save_pipeline(path, save_log_to_file=save_log_to_file)
 
     @classmethod
-    def load_pipeline(cls, path: str | Path) -> "PipelineHandler":
+    def load_pipeline(
+        cls,
+        path: str | Path,
+        *,
+        forced_deleting: bool = False,
+    ) -> "PipelineHandler":
         warnings.warn(
             "Loaded pipelines restore current importable functions, not historical function snapshots; changed source code may alter behavior.",
             stacklevel=2,
         )
         target = Path(path)
+        target = cls._restore_working_tree_if_needed(
+            target,
+            forced_deleting=forced_deleting,
+        )
         try:
             with (target / "pipeline_state.pkl").open("rb") as handle:
                 payload = pickle.load(handle)
@@ -564,8 +593,123 @@ class PipelineHandler:
         return cls._from_payload(payload, target)
 
     @classmethod
-    def load_project(cls, path: str | Path) -> "PipelineHandler":
-        return cls.load_pipeline(path)
+    def load_project(
+        cls,
+        path: str | Path,
+        *,
+        forced_deleting: bool = False,
+    ) -> "PipelineHandler":
+        return cls.load_pipeline(path, forced_deleting=forced_deleting)
+
+    def _write_pipeline_metadata(self, target: Path) -> None:
+        with (target / "pipeline_meta.pkl").open("wb") as handle:
+            pickle.dump(
+                {
+                    "pipeline_directory": str(self.project_root),
+                    "pipeline_backup_directory": (
+                        None
+                        if self.pipeline_backup_root is None
+                        else str(self.pipeline_backup_root)
+                    ),
+                },
+                handle,
+            )
+
+    def _should_refresh_backup_on_save(self, target: Path) -> bool:
+        backup_root = self.pipeline_backup_root
+        if backup_root is None:
+            return False
+        return self._normalized_path(target) == self._normalized_path(self.project_root)
+
+    def _refresh_backup_copy(self, source: Path, backup_root: Path) -> None:
+        if self._normalized_path(source) == self._normalized_path(backup_root):
+            return
+        if backup_root.exists():
+            if backup_root.is_dir():
+                shutil.rmtree(backup_root)
+            else:
+                backup_root.unlink()
+        shutil.copytree(source, backup_root)
+
+    @classmethod
+    def _load_pipeline_metadata(cls, path: Path) -> dict[str, Any] | None:
+        metadata_path = path / "pipeline_meta.pkl"
+        if not metadata_path.exists():
+            return None
+        with metadata_path.open("rb") as handle:
+            return pickle.load(handle)
+
+    @classmethod
+    def _restore_working_tree_if_needed(
+        cls,
+        source_path: Path,
+        *,
+        forced_deleting: bool,
+    ) -> Path:
+        metadata = cls._load_pipeline_metadata(source_path)
+        if metadata is None:
+            return source_path
+        pipeline_directory = metadata.get("pipeline_directory")
+        if pipeline_directory is None:
+            return source_path
+        work_root = Path(pipeline_directory)
+        if cls._normalized_path(source_path) == cls._normalized_path(work_root):
+            return source_path
+        if cls._paths_overlap(source_path, work_root):
+            raise PersistenceError(
+                f"Cannot restore pipeline from '{source_path}' into overlapping working directory '{work_root}'"
+            )
+        cls._clear_path_with_optional_confirmation(
+            work_root,
+            source_path=source_path,
+            forced_deleting=forced_deleting,
+        )
+        shutil.copytree(source_path, work_root)
+        return work_root
+
+    @classmethod
+    def _clear_path_with_optional_confirmation(
+        cls,
+        target_path: Path,
+        *,
+        source_path: Path,
+        forced_deleting: bool,
+    ) -> None:
+        if not target_path.exists():
+            return
+        if target_path.is_dir() and not any(target_path.iterdir()):
+            target_path.rmdir()
+            return
+        if not forced_deleting:
+            user_input = input(
+                f"Working pipeline directory '{target_path}' will be deleted and replaced from '{source_path}'. Type 'yes' or 'y' to continue: "
+            ).strip().lower()
+            if user_input not in {"yes", "y"}:
+                raise PersistenceError(
+                    f"Aborted restoring pipeline directory '{target_path}' from '{source_path}'"
+                )
+        if target_path.is_dir():
+            shutil.rmtree(target_path)
+            return
+        target_path.unlink()
+
+    @staticmethod
+    def _normalized_path(path: Path) -> Path:
+        return path.expanduser().resolve(strict=False)
+
+    @classmethod
+    def _paths_overlap(cls, first_path: Path, second_path: Path) -> bool:
+        first = cls._normalized_path(first_path)
+        second = cls._normalized_path(second_path)
+        return first == second or first in second.parents or second in first.parents
+
+    def _validate_backup_path_safety(self) -> None:
+        if self.pipeline_backup_root is None:
+            return
+        if self._paths_overlap(self.project_root, self.pipeline_backup_root):
+            raise RegistrationError(
+                f"Pipeline backup directory '{self.pipeline_backup_root}' must not overlap with pipeline directory '{self.project_root}'"
+            )
 
     @classmethod
     def _from_payload(
@@ -581,6 +725,7 @@ class PipelineHandler:
             execution_priority=payload.get("execution_priority"),
             memory_saving_mode=payload.get("memory_saving_mode", False),
             memory_profile_logging=payload.get("memory_profile_logging", False),
+            pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
         )
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
@@ -681,6 +826,11 @@ class PipelineHandler:
             "config": self.config,
             "execution_priority": self.execution_priority,
             "saved_project_root": str(self.project_root),
+            "pipeline_backup_directory": (
+                None
+                if self.pipeline_backup_root is None
+                else str(self.pipeline_backup_root)
+            ),
             "memory_saving_mode": self.memory_saving_mode,
             "memory_profile_logging": self.memory_profile_logging,
             "historical_result_log_path": self.historical_result_log_path,
@@ -1183,6 +1333,47 @@ class PipelineHandler:
                 raise RegistrationError(
                     f"Execution priority already registered: {execution_priority}"
                 )
+
+    def _validate_related_pipeline_names(self, candidate: "PipelineHandler") -> None:
+        candidate_pipelines = list(candidate._iter_attached_pipelines())
+        candidate_names = [pipeline.registration_name for pipeline in candidate_pipelines]
+        duplicates = sorted(
+            {
+                name
+                for name in candidate_names
+                if candidate_names.count(name) > 1
+            }
+        )
+        if duplicates:
+            raise RegistrationError(
+                f"Pipeline names must be unique inside the attached subtree: {duplicates}"
+            )
+
+        candidate_ids = {id(pipeline) for pipeline in candidate_pipelines}
+        related_names = {
+            pipeline.registration_name
+            for pipeline in self._root_pipeline()._iter_attached_pipelines()
+            if id(pipeline) not in candidate_ids
+        }
+        overlap = sorted(set(candidate_names).intersection(related_names))
+        if overlap:
+            raise RegistrationError(
+                f"Pipeline names must be unique across the related pipeline tree: {overlap}"
+            )
+
+    def _root_pipeline(self) -> "PipelineHandler":
+        current = self
+        while current.parent_pipeline is not None:
+            current = current.parent_pipeline
+        return current
+
+    def _iter_attached_pipelines(self) -> list["PipelineHandler"]:
+        pipelines: list[PipelineHandler] = [self]
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                for pipeline in node._iter_attached_pipelines():
+                    pipelines.append(pipeline)
+        return pipelines
 
     def _get_node_or_raise(self, block_name: str) -> Any:
         node = self.nodes_by_name.get(block_name)

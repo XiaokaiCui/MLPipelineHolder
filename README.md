@@ -211,6 +211,7 @@ Construct with:
 - `registration_name`
 - `configuration`
 - `local_folder_path`
+- optional `pipeline_backup_directory`
 
 It manages:
 
@@ -220,6 +221,7 @@ It manages:
 - run history
 - metadata directory
 - logger
+- optional backup-root metadata used by backup-aware save/load
 
 ### 2. ExecutionBlock
 
@@ -552,6 +554,7 @@ Helper accessors:
 ```python
 block = pipeline.get_block("setup")
 child = pipeline.get_child_pipeline("child_pipeline")
+child_names = pipeline.list_child_pipeline_names()
 pipeline.reset_gate_block()
 ```
 
@@ -609,6 +612,27 @@ loaded = PipelineHandler.load_pipeline("demo_run")
 ```
 
 `save_pipeline()` defaults to `local_folder_path` when no path is given.
+
+You can also configure an optional backup root when creating the pipeline:
+
+```python
+pipeline = PipelineHandler(
+    "demo",
+    config,
+    Path("demo_run"),
+    pipeline_backup_directory=Path("demo_backup"),
+)
+```
+
+Current save/load behavior:
+
+- if `pipeline_backup_directory is None`, `save_pipeline()` keeps the normal current behavior
+- if `pipeline_backup_directory` is set and you call `save_pipeline()` in-place, the working tree is saved normally and then copied to the backup directory
+- `load_pipeline(path)` reads lightweight pipeline metadata first
+- if `path` is the canonical working directory, loading behaves like the normal direct load path
+- if `path` differs from the canonical working directory, the library restores `path` into the canonical working directory first and then loads from the canonical working directory
+- `load_pipeline(path, forced_deleting=False)` asks for keyboard confirmation with `yes` or `y` before deleting a non-empty canonical working directory during restore
+- `load_pipeline(path, forced_deleting=True)` deletes the canonical working directory directly during restore
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
 
@@ -775,7 +799,11 @@ Why:
 
 ### Recommended backup strategy
 
-Use a normal filesystem copy for backups and restores.
+There are now two supported patterns.
+
+#### Pattern A: explicit filesystem copy
+
+Use a normal filesystem copy for backups and restores when you want a fully explicit workflow.
 
 #### Backup
 
@@ -815,6 +843,28 @@ shutil.copytree(backup, work)
 pipeline = PipelineHandler.load_pipeline(work)
 ```
 
+#### Pattern B: backup-aware pipeline save/load
+
+If the pipeline was created with `pipeline_backup_directory=...`, you can keep using the pipeline API directly:
+
+```python
+pipeline = PipelineHandler(
+    "quant_pipeline",
+    config,
+    Path("/path/to/work"),
+    pipeline_backup_directory=Path("/path/to/backup"),
+)
+
+pipeline.save_pipeline()
+loaded = PipelineHandler.load_pipeline("/path/to/backup")
+```
+
+In that case:
+
+- saving in-place refreshes the backup copy automatically
+- loading from the backup path restores the backup into the canonical working directory first
+- the final loaded pipeline points at the canonical working directory, not the backup directory
+
 ### What not to use for backup cloning
 
 Avoid using this as your backup/restore cloning method:
@@ -829,6 +879,7 @@ That pattern can preserve artifact references instead of creating a fully isolat
 ### Rule of thumb
 
 - use `save_pipeline()` to save state in-place for the same working tree
+- use `pipeline_backup_directory=...` if you want `save_pipeline()` to refresh a backup copy automatically
 - use `shutil.copytree(...)` when you want a robust independent backup copy
 
 ## Rules and safeguards
@@ -841,6 +892,9 @@ That pattern can preserve artifact references instead of creating a fully isolat
 - renamed `*args` / `**kwargs` are supported during registration
 - functions inside one block cannot depend on outputs from the same block
 - non-importable callables cannot be saved for load/replay
+- direct child pipeline names can be listed with `list_child_pipeline_names()`
+- child pipeline registration names must be unique across the related attached pipeline tree, not just within one direct parent
+- `pipeline_backup_directory` must not overlap with the working pipeline directory
 
 ## Save/load limitation
 

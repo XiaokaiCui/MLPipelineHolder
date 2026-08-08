@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 import re
+import shutil
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import MagicMock
@@ -11,7 +12,7 @@ from unittest.mock import patch
 import warnings
 
 from src import GateBlock as TopLevelGateBlock
-from src.mlpipelineholder import ExecutionError, GateBlock, PipelineHandler, RegistrationError, ResolutionError
+from src.mlpipelineholder import ExecutionError, GateBlock, PersistenceError, PipelineHandler, RegistrationError, ResolutionError
 from src.mlpipelineholder.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
 
 
@@ -266,7 +267,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "save_bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
             self.assertEqual(loaded.registration_name, "persisted")
             self.assertEqual(loaded.para_value_dict["seed"], 6)
@@ -300,7 +301,7 @@ class PipelineHandlerTests(unittest.TestCase):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("stale log\n", encoding="utf-8")
 
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             self.assertEqual(loaded.logger.log_file_path.read_text(encoding="utf-8"), "")
 
@@ -344,7 +345,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             loaded_value = loaded.get_value("model_obj")
 
             self.assertEqual(type(loaded.para_value_dict["model_obj"]).__name__, "ArtifactRecord")
@@ -362,7 +363,7 @@ class PipelineHandlerTests(unittest.TestCase):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             self.assertTrue(
                 any("reference placeholder" in str(item.message) for item in caught)
@@ -379,7 +380,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             loaded_value = loaded.get_value("optimizer_obj")
 
             self.assertIsInstance(loaded.para_value_dict["optimizer_obj"], TorchStateArtifactRecord)
@@ -398,7 +399,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             me_optimizer = loaded.get_value("me_optimizer")
             predictor_optimizer = loaded.get_value("predictor_optimizer")
@@ -746,7 +747,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "success")
@@ -801,7 +802,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "skipped")
@@ -821,7 +822,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "skipped")
@@ -1037,6 +1038,18 @@ class PipelineHandlerTests(unittest.TestCase):
             parent.add_child_pipeline(child, 1)
 
             self.assertIs(parent.get_child_pipeline("child"), child)
+
+    def test_list_child_pipeline_names_returns_direct_children_only(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            child_b = PipelineHandler("child_b", DemoConfig(base=3), tmp_path / "child-b")
+            child_a = PipelineHandler("child_a", DemoConfig(base=4), tmp_path / "child-a")
+            parent.add_child_pipeline(child_b, 2)
+            parent.add_child_pipeline(child_a, 1)
+            parent.add_block("local_block", 3)
+
+            self.assertEqual(parent.list_child_pipeline_names(), ["child_a", "child_b"])
 
     def test_get_block_rejects_child_pipeline_name(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1418,7 +1431,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                PipelineHandler.load_project(save_dir)
+                PipelineHandler.load_project(save_dir, forced_deleting=True)
 
             self.assertTrue(
                 any("historical function snapshots" in str(item.message) for item in caught)
@@ -1451,7 +1464,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             loaded_child = loaded.get_child_pipeline("child")
 
             self.assertEqual(loaded_child.project_root, save_dir / "children" / "child")
@@ -1472,7 +1485,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("seed"), 4)
@@ -1621,6 +1634,32 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIsNotNone(replacement)
             self.assertIs(parent.nodes_by_name["child"], second_child)
 
+    def test_add_child_pipeline_rejects_name_matching_ancestor_pipeline(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("shared_name", DemoConfig(base=1), tmp_path / "root")
+            child = PipelineHandler("shared_name", DemoConfig(base=2), tmp_path / "child")
+
+            with self.assertRaises(RegistrationError):
+                root.add_child_pipeline(child, 1)
+
+    def test_add_child_pipeline_rejects_duplicate_descendant_pipeline_name_in_related_tree(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=1), tmp_path / "root")
+
+            first_parent = PipelineHandler("first_parent", DemoConfig(base=1), tmp_path / "first-parent")
+            first_grandchild = PipelineHandler("shared_descendant", DemoConfig(base=1), tmp_path / "first-grandchild")
+            first_parent.add_child_pipeline(first_grandchild, 1)
+            root.add_child_pipeline(first_parent, 1)
+
+            second_parent = PipelineHandler("second_parent", DemoConfig(base=1), tmp_path / "second-parent")
+            second_grandchild = PipelineHandler("shared_descendant", DemoConfig(base=1), tmp_path / "second-grandchild")
+            second_parent.add_child_pipeline(second_grandchild, 1)
+
+            with self.assertRaises(RegistrationError):
+                root.add_child_pipeline(second_parent, 2)
+
     def test_forced_add_child_pipeline_reparents_from_old_parent(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1698,7 +1737,7 @@ class PipelineHandlerTests(unittest.TestCase):
             )
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             self.assertTrue(loaded.memory_saving_mode)
             self.assertTrue(loaded.memory_profile_logging)
@@ -1810,7 +1849,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_pipeline(save_dir)
-            loaded_parent = PipelineHandler.load_pipeline(save_dir)
+            loaded_parent = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             loaded_child_one = loaded_parent.get_child_pipeline("pipeline_children_1")
             loaded_child_two = loaded_parent.get_child_pipeline("pipeline_children_2")
@@ -1819,9 +1858,7 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded_parent.get_value("seed"), 3)
             self.assertEqual(loaded_child_two.get_value("seed"), 3)
 
-    def test_load_pipeline_rebases_artifact_paths_to_copied_tree(self) -> None:
-        import shutil
-
+    def test_load_pipeline_from_copied_tree_restores_canonical_work_tree(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             source = tmp_path / "source"
@@ -1836,12 +1873,102 @@ class PipelineHandlerTests(unittest.TestCase):
             copied = tmp_path / "copied"
             shutil.copytree(source, copied)
 
-            loaded = PipelineHandler.load_pipeline(copied)
+            loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
             artifact = loaded.para_value_dict["saved_blob"]
 
             self.assertIsInstance(artifact, ArtifactRecord)
-            self.assertTrue(str(artifact.file_path).startswith(str(copied)))
+            self.assertTrue(str(artifact.file_path).startswith(str(source)))
             self.assertEqual(loaded.get_value("saved_blob"), "value=3")
+
+    def test_load_pipeline_from_backup_restores_into_work_root_after_confirmation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            backup = tmp_path / "backup"
+            pipeline = PipelineHandler(
+                "source",
+                DemoConfig(base=2),
+                work,
+                pipeline_backup_directory=backup,
+            )
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("disk_write", 2)
+            block.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            stale_file = work / "stale.txt"
+            stale_file.write_text("stale", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes") as mocked_input:
+                loaded = PipelineHandler.load_pipeline(backup)
+
+            self.assertEqual(mocked_input.call_count, 1)
+            self.assertEqual(loaded.project_root, work)
+            self.assertFalse(stale_file.exists())
+            self.assertEqual(loaded.get_value("saved_blob"), "value=3")
+
+    def test_load_pipeline_from_backup_with_forced_deleting_skips_prompt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            backup = tmp_path / "backup"
+            pipeline = PipelineHandler(
+                "source",
+                DemoConfig(base=2),
+                work,
+                pipeline_backup_directory=backup,
+            )
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            (work / "stale.txt").write_text("stale", encoding="utf-8")
+
+            with patch("builtins.input", side_effect=AssertionError("input should not be called")):
+                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True)
+
+            self.assertEqual(loaded.project_root, work)
+            self.assertEqual(loaded.get_value("seed"), 3)
+
+    def test_load_pipeline_from_backup_refusal_keeps_work_tree_untouched(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            backup = tmp_path / "backup"
+            pipeline = PipelineHandler(
+                "source",
+                DemoConfig(base=2),
+                work,
+                pipeline_backup_directory=backup,
+            )
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            stale_file = work / "stale.txt"
+            stale_file.write_text("stale", encoding="utf-8")
+
+            with patch("builtins.input", return_value="no"):
+                with self.assertRaises(PersistenceError):
+                    PipelineHandler.load_pipeline(backup)
+
+            self.assertTrue(stale_file.exists())
+
+    def test_pipeline_rejects_overlapping_backup_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+
+            with self.assertRaises(RegistrationError):
+                PipelineHandler(
+                    "source",
+                    DemoConfig(base=2),
+                    tmp_path / "work",
+                    pipeline_backup_directory=tmp_path / "work" / "backup",
+                )
 
     def test_attached_sibling_child_can_read_parent_visible_value_via_get_value(self) -> None:
         with TemporaryDirectory() as temp_dir:
