@@ -303,6 +303,44 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("train_recorder"), [1])
             self.assertEqual(pipeline.get_value("eval_recorder"), [2])
 
+    def test_expression_assignment_executes_with_visible_pipeline_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = value + 3")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["value"])
+            self.assertEqual(registration.output_names, ["result"])
+            self.assertEqual(pipeline.get_value("result"), 5)
+
+    def test_expression_print_only_runs_without_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-print", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("print(value)")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.output_names, [])
+            self.assertEqual(pipeline.para_value_dict, {})
+
+    def test_expression_registration_rejects_forbidden_syntax(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-forbidden", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = [item for item in values]")
+
+            self.assertIsNone(registration)
+            self.assertEqual(block.functions, [])
+
     def test_duplicate_function_registration_raises_without_force(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

@@ -79,3 +79,18 @@ class SaveLoadTests(unittest.TestCase):
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 51)
+
+    def test_expression_registration_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("persist-expression", SaveConfig(value=2), tmp_path / "project")
+            block = pipeline.add_block("block", 1)
+            block.register_expression("result = value + 5", save_to_disk=True)
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir)
+            loaded.run_all()
+
+            self.assertEqual(loaded.get_value("result"), 7)

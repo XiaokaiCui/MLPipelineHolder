@@ -38,6 +38,19 @@ class FunctionRegistration:
 
 
 @dataclass(slots=True)
+class ExpressionRegistration:
+    code: str
+    input_names: list[str]
+    output_names: list[str]
+    save_to_disk: set[str]
+    warn_on_input_mutation: bool = False
+
+    @property
+    def function_name(self) -> str:
+        return "expression"
+
+
+@dataclass(slots=True)
 class BlockArgsRegistration:
     """Block-scoped ordered items used to build *args for specific functions."""
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from concurrent.futures import ThreadPoolExecutor
 import inspect
 from typing import TYPE_CHECKING, Any
@@ -10,6 +11,7 @@ from .function_registry import inspect_exposed_input_names
 from .models import (
     BlockArgsRegistration,
     BlockKwargsRegistration,
+    ExpressionRegistration,
     FunctionExecutionResult,
     FunctionRegistration,
 )
@@ -27,9 +29,136 @@ class ExecutionBlock:
         self.parent = parent
         self.registration_name = registration_name
         self.execution_priority = execution_priority
-        self.functions: list[FunctionRegistration] = []
+        self.functions: list[FunctionRegistration | ExpressionRegistration] = []
         self.registered_args: dict[str, BlockArgsRegistration] = {}
         self.registered_kwargs: dict[str, BlockKwargsRegistration] = {}
+
+    def register_expression(
+        self,
+        code: str,
+        *,
+        output_variable_name: str | None = None,
+        save_to_disk: bool = False,
+        forced: bool = False,
+        warn_on_input_mutation: bool = False,
+    ) -> Any:
+        try:
+            registration = self._register_expression_strict(
+                code,
+                output_variable_name=output_variable_name,
+                save_to_disk=save_to_disk,
+                forced=forced,
+                warn_on_input_mutation=warn_on_input_mutation,
+            )
+        except RegistrationError as exc:
+            self.parent.logger.warning(
+                f"Skipped expression registration in block '{self.registration_name}': {exc}"
+            )
+            return None
+        return registration
+
+    def _register_expression_strict(
+        self,
+        code: str,
+        *,
+        output_variable_name: str | None,
+        save_to_disk: bool,
+        forced: bool,
+        warn_on_input_mutation: bool,
+    ) -> ExpressionRegistration:
+        expression = self._parse_expression(code)
+        inferred_output, input_names, printing_only = self._analyze_expression(expression)
+        final_output = output_variable_name if output_variable_name is not None else inferred_output
+        if printing_only and final_output is not None:
+            raise RegistrationError("Printing expressions cannot declare an output variable")
+        if not printing_only and final_output is None:
+            raise RegistrationError("Assignment expressions must resolve to exactly one output variable")
+        if inferred_output is not None and output_variable_name is not None and inferred_output != output_variable_name:
+            raise RegistrationError(
+                f"Expression output '{inferred_output}' does not match declared output '{output_variable_name}'"
+            )
+        output_names = [] if final_output is None else [final_output]
+        if save_to_disk and not output_names:
+            raise RegistrationError("save_to_disk=True requires an output variable")
+        if output_names:
+            self.parent._validate_output_names_against_config(output_names)
+        identity = final_output or code
+        existing = next(
+            (
+                registration
+                for registration in self.functions
+                if isinstance(registration, ExpressionRegistration)
+                and ((registration.output_names[0] if registration.output_names else registration.code) == identity)
+            ),
+            None,
+        )
+        if existing is not None and not forced:
+            raise RegistrationError(
+                f"Expression '{identity}' is already registered in block '{self.registration_name}'"
+            )
+        if existing is not None and forced:
+            self.functions.remove(existing)
+        registration = ExpressionRegistration(
+            code=code,
+            input_names=input_names,
+            output_names=output_names,
+            save_to_disk={final_output} if save_to_disk and final_output is not None else set(),
+            warn_on_input_mutation=warn_on_input_mutation,
+        )
+        if warn_on_input_mutation and input_names:
+            self.parent.logger.info(
+                f"Expression registration in block '{self.registration_name}' is intended for one line and one variable change; if more than one variable may be mutated, prefer a registered function or multiple expressions"
+            )
+        self.functions.append(registration)
+        self.parent._register_node(self)
+        return registration
+
+    def _parse_expression(self, code: str) -> ast.Module:
+        if "\n" in code or ";" in code:
+            raise RegistrationError("Expressions must be a single line with no semicolons")
+        try:
+            parsed = ast.parse(code, mode="exec")
+        except SyntaxError as exc:
+            raise RegistrationError(f"Invalid expression syntax: {exc}") from exc
+        if len(parsed.body) != 1:
+            raise RegistrationError("Expressions must contain exactly one statement")
+        for node in ast.walk(parsed):
+            if isinstance(node, (ast.Import, ast.ImportFrom, ast.NamedExpr, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.AsyncFunctionDef, ast.FunctionDef, ast.ClassDef, ast.Lambda)):
+                raise RegistrationError("Expression uses a forbidden Python construct")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec", "__import__"}:
+                raise RegistrationError("Expression may not call eval, exec, or __import__")
+        return parsed
+
+    def _analyze_expression(self, parsed: ast.Module) -> tuple[str | None, list[str], bool]:
+        stmt = parsed.body[0]
+        if isinstance(stmt, ast.Assign):
+            if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+                raise RegistrationError("Expressions must assign to exactly one plain variable name")
+            input_names = self._extract_loaded_names(stmt.value)
+            return stmt.targets[0].id, input_names, False
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            is_print = isinstance(call.func, ast.Name) and call.func.id == "print"
+            is_logger = (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "logger"
+            )
+            if not (is_print or is_logger):
+                raise RegistrationError("Expression statements must be print(...) or logger.xxx(...)")
+            input_names = self._extract_loaded_names(stmt.value)
+            return None, input_names, True
+        raise RegistrationError("Expressions must be either NAME = EXPR or a print/logger call")
+
+    def _extract_loaded_names(self, node: ast.AST) -> list[str]:
+        names: list[str] = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                if child.id in {"True", "False", "None", "print", "logger"}:
+                    continue
+                if child.id not in names:
+                    names.append(child.id)
+        return names
 
     def register_args(
         self, name: str, ordered_items: tuple[str, ...] | list[str], forced: bool = False
@@ -325,14 +454,44 @@ class ExecutionBlock:
 
     def _execute_function(
         self,
-        registration: FunctionRegistration,
+        registration: FunctionRegistration | ExpressionRegistration,
         run_id: str,
         visible_outputs: dict[str, Any],
         overrides: dict[str, Any],
         parent_config: dict[str, Any],
         capture_prints: bool,
     ) -> FunctionExecutionResult:
-        del run_id
+        match registration:
+            case FunctionRegistration():
+                return self._execute_callable_registration(
+                    registration,
+                    visible_outputs,
+                    overrides,
+                    parent_config,
+                    capture_prints,
+                )
+            case ExpressionRegistration():
+                return self._execute_expression_registration(
+                    registration,
+                    visible_outputs,
+                    overrides,
+                    parent_config,
+                    capture_prints,
+                )
+            case _:
+                del run_id
+                raise ExecutionError(
+                    f"Unsupported registration type in block '{self.registration_name}'"
+                )
+
+    def _execute_callable_registration(
+        self,
+        registration: FunctionRegistration,
+        visible_outputs: dict[str, Any],
+        overrides: dict[str, Any],
+        parent_config: dict[str, Any],
+        capture_prints: bool,
+    ) -> FunctionExecutionResult:
         positional_args, keyword_args, loaded_artifacts = self.parent._prepare_call_arguments(
             registration,
             overrides,
@@ -363,6 +522,57 @@ class ExecutionBlock:
             outputs=outputs,
             loaded_artifact_inputs=loaded_artifacts,
         )
+
+    def _execute_expression_registration(
+        self,
+        registration: ExpressionRegistration,
+        visible_outputs: dict[str, Any],
+        overrides: dict[str, Any],
+        parent_config: dict[str, Any],
+        capture_prints: bool,
+    ) -> FunctionExecutionResult:
+        loaded_artifacts: list[str] = []
+        declared_output_names = set(visible_outputs).union(self.parent.list_declared_outputs())
+        declared_output_names.update(self.declared_outputs())
+        namespace = {
+            input_name: self.parent._resolve_named_input(
+                input_name,
+                registration.function_name,
+                overrides,
+                visible_outputs,
+                parent_config,
+                {},
+                loaded_artifacts,
+                declared_output_names,
+            )
+            for input_name in registration.input_names
+        }
+        namespace["logger"] = self.parent.logger
+        try:
+            if capture_prints:
+                self.parent._capture_prints(self._run_expression_code, registration.code, namespace)
+            else:
+                self._run_expression_code(registration.code, namespace)
+        except ResolutionError:
+            raise
+        except Exception as exc:
+            raise ExecutionError(
+                f"Expression in block '{self.registration_name}' failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        outputs = {
+            output_name: namespace[output_name]
+            for output_name in registration.output_names
+        }
+        return FunctionExecutionResult(
+            function_name=registration.function_name,
+            outputs=outputs,
+            loaded_artifact_inputs=loaded_artifacts,
+        )
+
+    @staticmethod
+    def _run_expression_code(code: str, namespace: dict[str, Any]) -> None:
+        exec(compile(code, "<pipeline-expression>", "exec"), {}, namespace)
 
     @staticmethod
     def _normalize_outputs(registration: FunctionRegistration, result: Any) -> dict[str, Any]:

@@ -22,7 +22,7 @@ from .exceptions import ExecutionError, PersistenceError, RegistrationError, Res
 from .function_registry import default_map
 from .gate_block import GateBlock
 from .logger import PipelineLogger
-from .models import ArtifactRecord, FunctionRegistration, RunRecord, RuntimeValueReference, TorchStateArtifactRecord
+from .models import ArtifactRecord, ExpressionRegistration, FunctionRegistration, RunRecord, RuntimeValueReference, TorchStateArtifactRecord
 
 
 class PipelineHandler:
@@ -609,14 +609,29 @@ class PipelineHandler:
                         node_payload["execution_priority"],
                     )
                 for function_payload in node_payload["functions"]:
-                    registration = block._register_function_strict(
-                        function_payload["import_path"],
-                        function_payload["output_names"],
-                        function_payload["save_to_disk"],
-                        param_mapping=function_payload.get("param_mapping"),
-                        var_pos_name=function_payload.get("var_pos_name"),
-                        var_kw_name=function_payload.get("var_kw_name"),
-                    )
+                    if function_payload.get("kind") == "expression":
+                        registration = block._register_expression_strict(
+                            function_payload["code"],
+                            output_variable_name=(
+                                function_payload["output_names"][0]
+                                if function_payload["output_names"]
+                                else None
+                            ),
+                            save_to_disk=bool(function_payload["save_to_disk"]),
+                            forced=False,
+                            warn_on_input_mutation=function_payload.get(
+                                "warn_on_input_mutation", False
+                            ),
+                        )
+                    else:
+                        registration = block._register_function_strict(
+                            function_payload["import_path"],
+                            function_payload["output_names"],
+                            function_payload["save_to_disk"],
+                            param_mapping=function_payload.get("param_mapping"),
+                            var_pos_name=function_payload.get("var_pos_name"),
+                            var_kw_name=function_payload.get("var_kw_name"),
+                        )
                     if registration is None:
                         raise PersistenceError(
                             f"Failed to restore function in block '{block.registration_name}'"
@@ -907,20 +922,37 @@ class PipelineHandler:
             }
         functions = []
         for registration in node.functions:
-            if registration.import_path is None:
-                raise PersistenceError(
-                    f"Function '{registration.function_name}' is not importable; save/load requires importable callables"
-                )
-            functions.append(
-                {
-                    "import_path": registration.import_path,
-                    "output_names": registration.output_names,
-                    "save_to_disk": sorted(registration.save_to_disk),
-                    "param_mapping": registration.param_mapping,
-                    "var_pos_name": registration.var_pos_name,
-                    "var_kw_name": registration.var_kw_name,
-                }
-            )
+            match registration:
+                case FunctionRegistration():
+                    if registration.import_path is None:
+                        raise PersistenceError(
+                            f"Function '{registration.function_name}' is not importable; save/load requires importable callables"
+                        )
+                    functions.append(
+                        {
+                            "kind": "function",
+                            "import_path": registration.import_path,
+                            "output_names": registration.output_names,
+                            "save_to_disk": sorted(registration.save_to_disk),
+                            "param_mapping": registration.param_mapping,
+                            "var_pos_name": registration.var_pos_name,
+                            "var_kw_name": registration.var_kw_name,
+                        }
+                    )
+                case ExpressionRegistration():
+                    functions.append(
+                        {
+                            "kind": "expression",
+                            "code": registration.code,
+                            "output_names": registration.output_names,
+                            "save_to_disk": sorted(registration.save_to_disk),
+                            "warn_on_input_mutation": registration.warn_on_input_mutation,
+                        }
+                    )
+                case _:
+                    raise PersistenceError(
+                        f"Unsupported registration type in block '{node.registration_name}'"
+                    )
         return {
             "kind": "block",
             "registration_name": node.registration_name,
@@ -1485,10 +1517,12 @@ class PipelineHandler:
         required = set()
         for registration in node.functions:
             required.update(registration.input_names)
-            if registration.var_pos_name is not None:
-                required.add(registration.var_pos_name)
-            if registration.var_kw_name is not None:
-                required.add(registration.var_kw_name)
+            var_pos_name = getattr(registration, "var_pos_name", None)
+            if var_pos_name is not None:
+                required.add(var_pos_name)
+            var_kw_name = getattr(registration, "var_kw_name", None)
+            if var_kw_name is not None:
+                required.add(var_kw_name)
         return required
 
     def _required_input_names_for_pipeline(self) -> set[str]:
@@ -2009,7 +2043,7 @@ class PipelineHandler:
 
     def _displayed_argument_names(
         self,
-        registration: FunctionRegistration,
+        registration: FunctionRegistration | ExpressionRegistration,
         priority: float | None,
         block: Any | None = None,
     ) -> list[str]:
@@ -2020,18 +2054,20 @@ class PipelineHandler:
             for name in registration.input_names
             if name in visible_output_names or name in visible_config_names
         ]
+        var_pos_name = getattr(registration, "var_pos_name", None)
         if (
             block is not None
-            and registration.var_pos_name is not None
-            and registration.var_pos_name in block.registered_args
+            and var_pos_name is not None
+            and var_pos_name in block.registered_args
         ):
-            displayed.append(registration.var_pos_name)
+            displayed.append(var_pos_name)
+        var_kw_name = getattr(registration, "var_kw_name", None)
         if (
             block is not None
-            and registration.var_kw_name is not None
-            and registration.var_kw_name in block.registered_kwargs
+            and var_kw_name is not None
+            and var_kw_name in block.registered_kwargs
         ):
-            displayed.append(registration.var_kw_name)
+            displayed.append(var_kw_name)
         return displayed
 
     def _read_result_history_from_file(self, file_path: str) -> list[str]:

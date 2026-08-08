@@ -312,6 +312,52 @@ Registration UX notes:
 - `forced=True` can be used to replace an existing block, child pipeline, gate block, or function registration
 - `forced=True` only replaces an existing block/child pipeline with the same name; a different name using an existing priority still raises an error
 
+### Register a restricted one-line expression
+
+For quick single-line transformations, a block can also register a restricted Python expression.
+
+Example assignment form:
+
+```python
+block.register_expression(
+    "train_df = output_df[valid_filter][tune_symbols + [target_col] + [date_col]].copy().reset_index(drop=True)",
+    save_to_disk=True,
+)
+```
+
+Example print/log form:
+
+```python
+block.register_expression("print(train_df.shape)")
+block.register_expression("logger.info(train_df.shape)")
+```
+
+Current behavior:
+
+- the expression is parsed at registration time, so its input names and output name appear in the pipeline chart like a normal block registration
+- assignment form is inferred as `NAME = EXPR`
+- print/log form has no output
+- the expression resolves visible names with the same runtime visibility rules as normal function registration
+- `save_to_disk=True` is allowed only when there is one inferred output
+- expression registrations save and load as code strings, not Python callables
+
+Current restrictions:
+
+- exactly one line only
+- no `;`
+- no imports
+- no `eval(...)`, `exec(...)`, or `__import__(...)`
+- no multiple assignment targets
+- no tuple/list unpacking assignment
+- no walrus operator
+- no comprehensions or generator expressions
+- no nested function/class/lambda definitions
+- statement form must be either `NAME = EXPR` or `print(...)` / `logger.xxx(...)`
+
+Caveat:
+
+- expressions are intended for one line and one variable change; if your code mutates multiple variables or needs more complex state changes, prefer a normal registered function or multiple expression registrations
+
 For convenience, you can also create a one-block child pipeline directly:
 
 ```python
