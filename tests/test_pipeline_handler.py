@@ -354,7 +354,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(pipeline.logger.log_file_path.read_text(encoding="utf-8"), "")
 
-    def test_load_pipeline_recreates_blank_runtime_log(self) -> None:
+    def test_load_pipeline_replaces_stale_log_with_current_load_messages(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             project_dir = tmp_path / "project"
@@ -371,7 +371,10 @@ class PipelineHandlerTests(unittest.TestCase):
 
             loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
-            self.assertEqual(loaded.logger.log_file_path.read_text(encoding="utf-8"), "")
+            log_text = loaded.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertNotIn("stale log", log_text)
+            self.assertIn("Pipeline project directory has been copied from backup path", log_text)
+            self.assertIn("Pipeline has been loaded from the project root", log_text)
 
     def test_save_pipeline_does_not_export_log_by_default(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1577,7 +1580,7 @@ class PipelineHandlerTests(unittest.TestCase):
             history = child.get_result_history()
             self.assertTrue(any(" RESULT final-seed=5" in line for line in history))
 
-    def test_loaded_child_pipeline_keeps_nested_project_root(self) -> None:
+    def test_loaded_child_pipeline_uses_restored_nested_project_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             parent = PipelineHandler("parent", DemoConfig(base=5), tmp_path / "parent")
@@ -1591,7 +1594,10 @@ class PipelineHandlerTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
             loaded_child = loaded.get_child_pipeline("child")
 
-            self.assertEqual(loaded_child.project_root, save_dir / "children" / "child")
+            self.assertEqual(
+                loaded_child.project_root,
+                tmp_path / "parent" / "children" / "child",
+            )
 
     def test_nested_pipeline_with_gate_round_trips_through_save_load(self) -> None:
         with TemporaryDirectory() as temp_dir:

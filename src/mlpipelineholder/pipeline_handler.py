@@ -24,7 +24,7 @@ from uuid import uuid4
 
 from .artifact_store import ArtifactStore
 from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
-from .function_registry import default_map, resolve_callable
+from .function_registry import callable_signature, default_map, resolve_callable
 from .gate_block import GateBlock
 from .logger import PipelineLogger
 from .models import (
@@ -1264,15 +1264,11 @@ class PipelineHandler:
         output_name: str,
         sibling_outputs: dict[str, Any] | None = None,
     ) -> Any:
-        if callable(value):
-            return self._serialize_callable_runtime_value(
-                value,
-                node_name,
-                output_name,
-            )
         try:
-            import torch  # type: ignore
-
+            torch = import_module("torch")
+        except ModuleNotFoundError:
+            torch = None
+        if torch is not None:
             if isinstance(value, torch.nn.Module) or isinstance(value, torch.Tensor):
                 save_store = ArtifactStore(target_root)
                 return save_store.save(
@@ -1312,8 +1308,13 @@ class PipelineHandler:
                         "linked_model_variable": None if linked_model_record is None else linked_model_record.variable_name,
                     },
                 )
-        except Exception:
-            pass
+
+        if callable(value):
+            return self._serialize_callable_runtime_value(
+                value,
+                node_name,
+                output_name,
+            )
 
         try:
             pickle.dumps(value)
@@ -1642,14 +1643,17 @@ class PipelineHandler:
                     for output_name in self.list_declared_outputs()
                     if output_name not in base_visible
                 }
+                removed_outputs: list[dict[str, Any]] = []
                 for node in nodes:
-                    self._delete_artifacts_from_outputs(
+                    removed_outputs.append(
                         self.producer_outputs.pop(node.registration_name, {})
                     )
                     if isinstance(node, PipelineHandler):
                         node._invalidate_all_outputs()
                 self.para_value_dict = skipped_outputs
                 self.artifact_registry = {}
+                for outputs in removed_outputs:
+                    self._delete_artifacts_from_outputs(outputs)
                 run_record.status = "skipped"
                 run_record.produced_outputs.extend(sorted(skipped_outputs))
                 if sync_parent_on_completion:
@@ -1660,11 +1664,14 @@ class PipelineHandler:
             for node in nodes:
                 priority_group = self._priority_group(node.execution_priority)
                 if priority_group in executed_priority_groups:
-                    self._delete_artifacts_from_outputs(
-                        self.producer_outputs.pop(node.registration_name, {})
+                    removed_node_outputs: dict[str, Any] = self.producer_outputs.pop(
+                        node.registration_name,
+                        {},
                     )
                     if isinstance(node, PipelineHandler):
                         node._invalidate_all_outputs()
+                    self._rebuild_visible_state(upstream_outputs)
+                    self._delete_artifacts_from_outputs(removed_node_outputs)
                     continue
                 visible_outputs = self._visible_outputs_before_priority(
                     node.execution_priority,
@@ -2258,7 +2265,7 @@ class PipelineHandler:
         block: Any | None = None,
     ) -> tuple[list[Any], dict[str, Any], list[str]]:
         defaults = default_map(registration.callable_obj)
-        signature = inspect.signature(registration.callable_obj)
+        signature = callable_signature(registration.callable_obj)
         parameters = list(signature.parameters.values())
         declared_output_names = set(visible_outputs).union(self.list_declared_outputs())
         if block is not None:
@@ -2480,21 +2487,23 @@ class PipelineHandler:
     def _invalidate_from_priority(self, priority: float, include_target: bool = True) -> None:
         if priority is None:
             return
+        removed_outputs: list[dict[str, Any]] = []
         for node in list(self._sorted_nodes()):
             if node.execution_priority < priority:
                 continue
             if node.execution_priority == priority and not include_target:
                 continue
-            self._delete_artifacts_from_outputs(
+            removed_outputs.append(
                 self.producer_outputs.pop(node.registration_name, {})
             )
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
         self._rebuild_visible_state(self._incoming_parent_outputs())
+        for outputs in removed_outputs:
+            self._delete_artifacts_from_outputs(outputs)
 
     def _invalidate_all_outputs(self) -> None:
-        for outputs in self.producer_outputs.values():
-            self._delete_artifacts_from_outputs(outputs)
+        removed_outputs = list(self.producer_outputs.values())
         self.producer_outputs.clear()
         self.para_value_dict.clear()
         self.artifact_registry.clear()
@@ -2502,6 +2511,8 @@ class PipelineHandler:
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
         self._rebuild_visible_state(self._incoming_parent_outputs())
+        for outputs in removed_outputs:
+            self._delete_artifacts_from_outputs(outputs)
 
     def _delete_artifacts_from_outputs(self, outputs: dict[str, Any]) -> None:
         active_artifact_paths = self._collect_referenced_artifact_paths()
@@ -2522,8 +2533,6 @@ class PipelineHandler:
         collect_from_mapping(self.para_value_dict)
         collect_from_mapping(self.artifact_registry)
         collect_from_mapping(self.manual_values)
-        for outputs in self.producer_outputs.values():
-            collect_from_mapping(outputs)
         for node in self._sorted_nodes():
             if isinstance(node, PipelineHandler):
                 paths.update(node._collect_referenced_artifact_paths())

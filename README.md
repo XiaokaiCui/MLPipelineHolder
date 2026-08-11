@@ -421,22 +421,6 @@ Open and run:
 examples/comprehensive_pipeline.ipynb
 ```
 
-The comprehensive example demonstrates:
-
-- config-backed execution
-- multiple blocks
-- parent/child pipeline registration
-- config-based child gates with expected values
-- float priority branch groups
-- block-scoped args/kwargs helpers
-- disk artifact storage
-- chart rendering
-- injected logger usage
-- result history collection
-- config inspection helpers
-- priority-group inspection helper
-- save/load round-trip
-
 The notebook writes its runtime data under:
 
 - `examples/example_run/`

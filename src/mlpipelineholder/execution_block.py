@@ -8,7 +8,7 @@ from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
-from .function_registry import infer_declared_output_count, inspect_input_names, rename_args, resolve_callable
+from .function_registry import callable_signature, infer_declared_output_count, inspect_input_names, rename_args, resolve_callable
 from .function_registry import inspect_exposed_input_names
 from .models import (
     BlockArgsRegistration,
@@ -361,7 +361,7 @@ class ExecutionBlock:
         registration: FunctionRegistration,
     ) -> None:
         try:
-            signature = inspect.signature(callable_obj)
+            signature = callable_signature(callable_obj)
             visible_names = set(self.parent._registration_visible_names())
             suspicious: list[str] = []
             for parameter in signature.parameters.values():
