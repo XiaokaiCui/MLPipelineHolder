@@ -1,6 +1,8 @@
 # MLPipelineHolder
 
-Lightweight Python library for building, running, recording, and modifying small machine-learning pipelines.
+MLPipelineHolder is a lightweight Python library for building, running, tracking, and modifying experiment-driven machine-learning pipelines, particularly in Jupyter and Google Colab notebooks.
+
+## Installation
 
 Install from PyPI:
 
@@ -8,120 +10,7 @@ Install from PyPI:
 pip install mlpipelineholder
 ```
 
-## At a glance
-
-### What is this project?
-
-MLPipelineHolder is a lightweight pipeline orchestration library for experiment-driven machine-learning workflows. It focuses on building pipelines out of explicit execution blocks and nested child pipelines while keeping the runtime model easy to inspect and modify.
-
-### What does this project do?
-
-It helps you:
-
-- define a pipeline from reusable execution blocks
-- run full pipelines, individual blocks, or partial downstream segments
-- store large intermediate artifacts on disk automatically
-- track logs, results, and saved pipeline state
-- branch execution cleanly with gates, float-priority groups, and child pipelines
-
-### What makes it different?
-
-Compared with heavier workflow/orchestration tools, this project is optimized for local Python-first experimentation and explicit control.
-
-Its main advantages are:
-
-- very small mental model: blocks, pipelines, gates, artifacts
-- easy partial reruns and direct manipulation of registered blocks/pipelines
-- nested pipelines with parent/child config and output visibility rules
-- built-in experiment-friendly logging, charting, and save/load support without needing a full platform
-
-### Two best use cases
-
-1. **Iterative ML experimentation on one codebase**
-   - when you want to rerun only certain stages, swap model branches, and keep artifacts/results organized without adopting a heavyweight workflow system
-
-2. **Modular training/evaluation pipelines with reusable branches**
-   - when you want parent pipelines to orchestrate multiple child pipelines such as different model families, preprocessing branches, or conditional training flows
-
-The project is centered on two concepts:
-
-- `PipelineHandler`: owns config, block registration, execution state, artifacts, run history, persistence, and logging
-- `ExecutionBlock`: owns a priority and one or more registered functions that run in parallel inside that block
-
-Pipelines can also be nested, so a `PipelineHandler` may be registered inside another `PipelineHandler` as a child execution node.
-
-## Current status
-
-This project is implemented and tested.
-
-Current verified behavior includes:
-
-- ordered node execution by numeric priority, including float priorities
-- branch-style execution groups based on the integer part of float priorities
-- parallel function execution inside a block
-- automatic argument binding from runtime overrides, pipeline values, config fields, and function defaults
-- in-memory outputs plus disk-backed artifacts for selected outputs
-- partial reruns with downstream invalidation
-- single-block execution
-- project save/load
-- config updates from dictionaries
-- resolved value access for disk-backed artifacts
-- colorful pipeline chart output
-- colorful UTC logger output with custom `result` level
-- optional capture of `print(...)` output into the pipeline log with default tee behavior
-- result-history cleanup without deleting persisted logs
-- safe block removal with state cleanup
-- safe function removal inside a block with state cleanup
-- json and numpy artifact serializers
-- nested child pipelines with shared upstream/downstream outputs
-- optional gate block for conditional pipeline skipping
-- parent-level output override reporting
-- renamed keyword and variadic function inputs for safer registration
-
-## Installation and environment
-
-This project uses **Poetry**.
-
-The current project metadata is in `pyproject.toml`.
-
-### Install dependencies with Poetry
-
-```bash
-pip install poetry
-poetry install --no-interaction
-```
-
-For the full local feature set used by many examples/tests:
-
-```bash
-poetry install --with test
-```
-
-If you only want selected optional runtime features, you can install extras instead:
-
-```bash
-poetry install --extras "dataframe"
-poetry install --extras "torch"
-poetry install --extras "memory"
-poetry install --extras "all"
-```
-
-Notes:
-
-- `dataframe` enables pandas / pyarrow / dask dataframe support
-- `torch` enables torch model / tensor / optimizer persistence support
-- `memory` enables `psutil`-based memory profiling logs
-- the `test` group is what the project test suite expects in CI and local verification
-
-## Install as a package
-
-Once published, install from PyPI with:
-
-```bash
-pip install mlpipelineholder
-```
-
-Optional extras:
+Install optional integrations as needed:
 
 ```bash
 pip install "mlpipelineholder[dataframe]"
@@ -130,77 +19,85 @@ pip install "mlpipelineholder[memory]"
 pip install "mlpipelineholder[all]"
 ```
 
-## Publishing to PyPI
+Each extra adds:
 
-This repository is prepared to publish from GitHub Actions.
+- `dataframe`: pandas, PyArrow, and Dask DataFrame support
+- `torch`: PyTorch model, tensor, and optimiser persistence
+- `memory`: `psutil`-based memory profiling logs
+- `all`: all optional features listed above
 
-Workflow:
+The core package requires Python 3.11 or later and includes `termcolor` and NumPy.
 
-1. Ensure project metadata in `pyproject.toml` is correct
-2. Ensure the README is publish-ready
-3. Add a real `LICENSE` file before public release
-4. Create a GitHub release (or trigger the publish workflow manually)
-5. GitHub Actions builds the wheel and sdist with Poetry and publishes to PyPI
+## At a glance
 
-The publish workflow is:
+MLPipelineHolder organises workflows into explicit execution blocks and nested child pipelines while keeping their runtime structure easy to inspect and modify. It helps you:
 
-- `.github/workflows/publish-pypi.yml`
+- Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes.
+- Persist intermediate and final outputs to disk, then reload them quickly and easily after a kernel restart.
+- Automatically run independent functions in parallel within the same execution block, while keeping cross-block execution explicit and ordered by priority.
+- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed.
+- Track logs, results, and pipeline state with minimal effort.
+- Improve the stability and reproducibility of modelling and analysis outputs while retaining full flexibility over the pipeline structure.
 
-Recommended checks before publishing:
+## Fastest way to start: collaborate with an LLM on your notebook
 
-```bash
-poetry check
-poetry build
-poetry install --with test --no-interaction
-poetry run python -m unittest discover -s tests -v
-```
+If you already have a data modelling or analysis notebook, the fastest way to get started is to ask an LLM to convert it into a pipeline-managed workflow.
 
-### Main dependency
+This repository includes a notebook-oriented guide for the LLM agent:
 
-- `termcolor` for colorful logger and chart output
-- `numpy` for ndarray artifact serialization
+- [`PIPELINE_CREATOR_SKILL.md`](PIPELINE_CREATOR_SKILL.md)
 
-## Project layout
+The guide explains how to inspect your notebook, design pipeline scopes, identify persistence and memory requirements, and produce the converted code.
+
+### Low-pressure onboarding workflow
+
+You do not need a perfect prompt or complete answers. Responses such as "not sure", "suggest for me", or "use sensible defaults" are fine.
+
+The agent will inspect your code, propose a scope plan and likely disk-backed outputs, and ask only a short batch of blocking or high-impact questions.
+
+### Recommended prompt template
+
+Copy and paste this prompt, filling in what you can:
 
 ```text
-MLPipelineHolder/
-├── examples/
-│   ├── comprehensive_pipeline.ipynb
-│   └── example_run/
-├── src/
-│   ├── __init__.py
-│   ├── main.py
-│   └── mlpipelineholder/
-│       ├── __init__.py
-│       ├── artifact_store.py
-│       ├── exceptions.py
-│       ├── execution_block.py
-│       ├── function_registry.py
-│       ├── logger.py
-│       ├── models.py
-│       ├── pipeline_handler.py
-│       └── serializers.py
-├── tests/
-│   ├── test_execution_block.py
-│   ├── test_pipeline_handler.py
-│   └── test_save_load.py
-└── pyproject.toml
+I have a Jupyter notebook for data modelling or analysis that I want to convert into a pipeline-managed notebook using MLPipelineHolder.
+
+Repository:
+https://github.com/XiaokaiCui/MLPipelineHolder
+
+Please read the repository and the file `PIPELINE_CREATOR_SKILL.md` first. Then use that guidance to convert my notebook.
+
+Here are my workflow details (rough answers are fine, or say "not sure" / "suggest for me"):
+- Group 1 (Intent and Context): Are we creating a new pipeline from scratch, or extending an existing saved parent pipeline? If extending, what is the parent path or structure?
+- Group 2 (Scope and Prefix): Which parts are shared vs workflow-local, and what prefix should we use for workflow-local config/values?
+- Group 3 (Large Objects): Which produced objects are expected to be large and should use save_to_disk? (Answer yes/no/not sure; suggest candidates for me.)
+- Group 4 (Memory Settings): Do you want memory_saving_mode or memory_profile_logging enabled? (Answer yes/no/not sure; suggest defaults for me.)
+- Group 5 (Persistence and Callables): Do you intend to save and reload the pipeline later, and where are your callables defined?
+
+Please inspect my code, propose likely large outputs and a scope plan, and then ask only a short batch of blocking or high-impact questions before writing the code.
+
+Your final output must include:
+1. Structure Explanation: A short explanation of the proposed pipeline structure.
+2. Concise Conversion Manifest: The manifest detailing hierarchy, stage types, priorities, inputs/outputs, prefixes, and disk-backed outputs.
+3. Converted Code: The complete converted notebook code as one contiguous deliverable. Use one fenced code block if the script is reasonably short; otherwise, create one `.py` file and provide its path or link. Do not split the script into blocks that I must combine manually.
+4. Assumptions and Questions: Any assumptions made or blocking questions.
+5. Verification and Persistence Notes: Notes on how to verify the pipeline and any persistence limitations.
+
+I will now provide my notebook/code.
 ```
 
-## Public API
+### Understanding large objects and memory settings
 
-Exports from `src.mlpipelineholder`:
+**Large objects and disk backing**
 
-- `PipelineHandler`
-- `ExecutionBlock`
-- `GateBlock`
-- `PipelineLogger`
-- `rename_args`
-- `PipelineError`
-- `RegistrationError`
-- `ResolutionError`
-- `ExecutionError`
-- `PersistenceError`
+Large objects are usually large DataFrames, arrays, models, or expensive intermediates. Storing them on disk lowers the RAM retained during execution, but it adds serialisation and I/O cost. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_value`.
+
+**Memory saving and profiling**
+
+- `memory_saving_mode` performs best-effort cleanup of intermediate values after each block finishes.
+- `memory_profile_logging` logs memory usage after computation and cleanup for each block.
+
+Attached child pipelines inherit both settings from their parent, so configure the policy on the owning or root pipeline.
 
 ## Core concepts
 
@@ -209,8 +106,9 @@ Exports from `src.mlpipelineholder`:
 Construct with:
 
 - `registration_name`
-- `configuration`
-- `local_folder_path`
+- optional `configuration`
+- optional `local_folder_path`
+- optional `pipeline_backup_directory`
 
 It manages:
 
@@ -220,6 +118,18 @@ It manages:
 - run history
 - metadata directory
 - logger
+- optional backup metadata used by backup-aware save/load
+
+If `configuration` is omitted, the pipeline starts with an empty config.
+
+If `local_folder_path` is omitted, the pipeline automatically uses a temporary staging root. This is useful when building a child pipeline in a notebook before attaching it to a parent. Once attached, the child moves under the parent project tree and the temporary root is no longer its working location.
+
+This staging root is a notebook-friendly convenience:
+
+- unattached temporary-root pipelines are cleaned up during normal object or runtime cleanup
+- if such a pipeline is attached to a parent, it is relocated under the parent tree
+- if such a pipeline is saved to an explicit path, its `project_root` is materialised in that directory
+- for a durable standalone location from the beginning, pass an explicit `local_folder_path`
 
 ### 2. ExecutionBlock
 
@@ -229,7 +139,7 @@ Each block has:
 - a numeric execution priority
 - one or more registered functions
 
-All functions inside the same block run in parallel.
+Independent functions registered in the same block run in parallel. Blocks remain explicit execution boundaries and run according to priority.
 
 Parent-level execution can also use float priorities for branch groups. For example, `5.1`, `5.3`, and `5.9` all belong to group `5`. Once one node in that integer-priority group actually executes, later nodes in the same group are skipped automatically.
 
@@ -242,7 +152,7 @@ When executing a registered function, inputs are resolved in this order:
 3. config fields
 4. function defaults
 
-Special case:
+Special cases:
 
 - if a function declares an argument named `logger`, the pipeline logger is injected automatically
 - child pipelines can use upstream parent outputs from earlier parent-level nodes
@@ -258,59 +168,17 @@ Function outputs can be:
 
 Disk-backed outputs are represented in memory by `ArtifactRecord`, but can be resolved back to real values using `get_value(...)`.
 
-Current serializer behavior:
+Current serialisation behaviour:
 
-- JSON-serializable values use `json`
+- JSON-serialisable values use `json`
 - `numpy.ndarray` values use `.npy`
-- torch tensors/modules use `torch`
-- pandas DataFrames use `feather` when available
+- PyTorch tensors and modules use `torch`
+- pandas DataFrames use Feather by default
+- pandas DataFrames with more than 3 million rows use a single Parquet file
+- Dask DataFrames use Parquet directories and remain Dask on reload
 - everything else falls back to `pickle`
 
-## Main features
-
-### Register blocks and functions
-
-Example:
-
-```python
-from dataclasses import dataclass
-from pathlib import Path
-
-from mlpipelineholder import PipelineHandler
-
-
-@dataclass
-class Config:
-    raw_value: int = 5
-    multiplier: int = 3
-
-
-def create_seed(raw_value: int) -> int:
-    return raw_value + 1
-
-
-def create_features(seed: int) -> tuple[int, int]:
-    return seed * 2, seed * 4
-
-
-pipeline = PipelineHandler("demo", Config(), Path("demo_run"))
-
-setup = pipeline.add_block("setup", 1)
-setup.register_function(create_seed, ["seed"])
-
-features = pipeline.add_block("features", 2)
-features.register_function(create_features, ["feature_a", "feature_b"])
-```
-
-Registration UX notes:
-
-- invalid `add_block(...)` requests are skipped with a warning log instead of raising
-- invalid `register_function(...)` requests are skipped with a warning log instead of raising
-- `output_variable_names=None` is allowed when a function should run only for side effects
-- `forced=True` can be used to replace an existing block, child pipeline, gate block, or function registration
-- `forced=True` only replaces an existing block/child pipeline with the same name; a different name using an existing priority still raises an error
-
-### Rename function inputs and use variadics safely
+### 5. Rename function inputs and use variadics safely
 
 When a function uses generic names like `obj`, or uses `*args` / `**kwargs`, you can expose safer pipeline-facing names during registration.
 
@@ -342,7 +210,7 @@ Rules:
 - mapping metadata is preserved on save/load
 - if the same function is already registered in a block, use `forced=True` to replace it
 
-### Run modes
+### 6. Run modes
 
 Available execution methods:
 
@@ -351,7 +219,15 @@ Available execution methods:
 - `run_from(block_name)`
 - `run_block(block_name)`
 
-### Update config
+Nested targeting is also supported by path:
+
+```python
+pipeline.run_until("modeling_pipeline", "predictor_components")
+pipeline.run_from("modeling_pipeline", "predictor_training_pipeline", "predictor_saving_pipeline")
+pipeline.run_block("modeling_pipeline", "predictor_components")
+```
+
+### 7. Manage configuration
 
 ```python
 pipeline.set_config({"multiplier": 10})
@@ -364,21 +240,20 @@ Rules:
 - `update_config(...)` updates existing fields only
 - config writes that would conflict with declared output names are rejected or skipped depending on the method used
 
-### Inspect config
-
 ```python
 full_config = pipeline.get_full_config()
 model_cls = pipeline.get_config_value("model_cls")
 ```
 
-Behavior:
+Behaviour:
 
 - `get_full_config()` returns the visible merged config for the pipeline
 - parent configs are included recursively for nested child pipelines
 - current pipeline config overrides same-named parent values
 - `get_config_value(name)` raises if the key does not exist
+- child configs are not propagated upward to parents or siblings
 
-### Access values safely
+### 8. Access values safely
 
 ```python
 value = pipeline.get_value("model_blob")
@@ -393,156 +268,56 @@ pipeline.update_value("existing_name", 10)
 pipeline.set_value("new_or_existing_name", 20)
 ```
 
-Behavior:
+Behaviour:
 
 - `update_value(...)` updates existing visible values only
 - `set_value(...)` creates a new pipeline-owned value if it does not exist, otherwise it updates the existing value
+- values created with `set_value(...)` are visible to the pipeline, its descendants, and downstream siblings through the parent visibility model
 
-### Remove a block safely
-
-```python
-pipeline.remove_block("feature_generation")
-```
-
-This removes the block and invalidates outputs from the removed block and all downstream blocks so pipeline state stays consistent.
-
-### Remove a function safely
-
-```python
-block.remove_function("feature_step")
-```
-
-This removes the named function from the block and invalidates outputs from that function and all downstream block outputs.
-
-### Register a child pipeline
-
-```python
-parent.add_child_pipeline(child_pipeline, 3)
-```
-
-Full example:
-
-```python
-from dataclasses import dataclass
-from pathlib import Path
-
-from mlpipelineholder import PipelineHandler
-
-
-@dataclass
-class ParentConfig:
-    raw_value: int = 5
-    multiplier: int = 3
-
-
-@dataclass
-class ChildConfig:
-    raw_value: int = 99
-    bias: int = 7
-
-
-def create_seed(raw_value: int) -> int:
-    return raw_value + 1
-
-
-def allow_child(seed: int) -> bool:
-    return seed > 0
-
-
-def child_feature(seed: int, raw_value: int, bias: int) -> int:
-    return seed + raw_value + bias
-
-
-def final_metric(child_score: int, multiplier: int) -> int:
-    return child_score * multiplier
-
-
-parent = PipelineHandler("parent", ParentConfig(), Path("nested_run"))
-setup = parent.add_block("setup", 1)
-setup.register_function(create_seed, ["seed"])
-
-child = PipelineHandler("child", ChildConfig(), Path("child_original"))
-child.set_gate_block(allow_child)
-child_block = child.add_block("feature", 1)
-child_block.register_function(child_feature, ["child_score"])
-
-parent.add_child_pipeline(child, 2)
-
-final = parent.add_block("final", 3)
-final.register_function(final_metric, ["final_metric"])
-
-parent.run_all()
-```
-
-Behavior:
-
-- the child pipeline participates in the parent priority order as one parent-level execution node
-- parent upstream outputs are visible inside the child pipeline
-- child outputs are visible to later parent nodes
-- later parent-level nodes override earlier outputs with the same name
-- the parent logger is used for future child execution
-- if an attached child pipeline is run directly, its current outputs are synced back into the parent visible state and downstream parent outputs are invalidated
-
-Helper accessors:
-
-```python
-block = pipeline.get_block("setup")
-child = pipeline.get_child_pipeline("child_pipeline")
-pipeline.reset_gate_block()
-```
-
-### Add a gate block
-
-```python
-pipeline.set_gate_block(should_run)
-```
-
-Minimal example:
-
-```python
-def should_run(seed: int) -> bool:
-    return seed > 0
-
-
-pipeline.set_gate_block(should_run)
-```
-
-You can also use a boolean config field directly:
-
-```python
-pipeline = PipelineHandler("demo", {"run_enabled": False}, Path("demo_run"))
-pipeline.add_gate_block("run_enabled")
-```
-
-Or compare against any expected basic value:
-
-```python
-pipeline.add_gate_block("model_cls", "cls_a")
-pipeline.add_gate_block("enabled", False)
-pipeline.add_gate_block("score_mode", 3.333)
-```
-
-Rules:
-
-- one gate block per pipeline
-- the gate block runs before every other node
-- it may be defined by a callable that returns `True`/`False`
-- it may be defined by a config field plus an expected value
-- when `False`, the whole pipeline is skipped
-- skipping does not overwrite an existing upstream value with `None`; it only exposes `None` for unique outputs introduced by that skipped pipeline
-
-### Save and load a project
+### 9. Save and load projects
 
 ```python
 pipeline.save_pipeline()
 loaded = PipelineHandler.load_pipeline("demo_run")
 ```
 
-`save_pipeline()` defaults to `local_folder_path` when no path is given.
+Without a path, `save_pipeline()` saves to the current `project_root`.
+
+Passing a different path creates a restart-safe copy of the current project tree before writing fresh state and metadata. The copy includes nested child directories and disk-backed artifacts. The target must not overlap the current project tree.
+
+You can also configure a backup directory when creating the pipeline:
+
+```python
+pipeline = PipelineHandler(
+    "demo",
+    config,
+    Path("demo_run"),
+    pipeline_backup_directory=Path("demo_backup"),
+)
+```
+
+Save and load behaviour:
+
+- if `pipeline_backup_directory is None`, an in-place save updates only the working tree
+- if `pipeline_backup_directory` is set, an in-place save also refreshes the backup copy
+- `load_pipeline(path)` reads lightweight metadata before loading the full state
+- if `path` is the canonical working directory, the pipeline loads directly
+- if `path` differs from the canonical working directory, the library restores the saved tree to the canonical directory before loading it
+- `load_pipeline(path, forced_deleting=False)` asks for keyboard confirmation with `yes` or `y` before deleting a non-empty canonical working directory during restore
+- `load_pipeline(path, forced_deleting=True)` deletes the canonical working directory directly during restore
+
+Saved projects contain:
+
+- `config.pkl`
+- `pipeline_state.pkl`
+- disk-backed outputs under `artifacts/`
+- logs and configuration snapshots under `metadata/`
+
+Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables must be defined or imported under the same name before calling `load_pipeline(...)`. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
 
-### Print the pipeline chart
+### 10. Print the pipeline chart
 
 ```python
 print(pipeline.describe_pipeline())
@@ -561,27 +336,14 @@ Current chart format includes:
 - output names
 - `*` marker for disk-backed outputs
 
-Additional chart behavior:
+Additional chart behaviour:
 
 - child pipelines gated off by config are greyed out when the current config value does not match the gate’s expected value
 - the root pipeline is never greyed out this way
 
-Gate lines do not show `-> bool`, and chart symbols such as `()` and `->` use the same color family as priority markers for readability.
+Gate lines do not show `-> bool`, and chart symbols such as `()` and `->` use the same colour family as priority markers for readability.
 
-### Priority group helper
-
-```python
-names, active = pipeline.get_priority_group(5)
-```
-
-Returns:
-
-- all node names whose priority has integer part `5`
-- the node name most likely to execute under the current state, or `None`
-
-For callable-gated child pipelines, if the gate cannot yet be evaluated because required inputs are not available, the helper assumes that child has the best chance to run.
-
-### Output conflicts and overrides
+### 11. Output conflicts and overrides
 
 Duplicate output names across different parent-level blocks or child pipelines are allowed.
 
@@ -595,7 +357,7 @@ conflicts = pipeline.get_output_conflicts()
 print(pipeline.describe_output_conflicts())
 ```
 
-### Logging
+### 12. Logging
 
 The pipeline creates a logger automatically.
 
@@ -609,7 +371,7 @@ Supported methods:
 - `result(...)`
 - `print(...)`
 
-Behavior:
+Behaviour:
 
 - every log line includes a UTC timestamp
 - all log lines are appended to `metadata/pipeline.log`
@@ -631,11 +393,27 @@ Print capture modes:
 
 - `tee` (default): send `print(...)` output to both normal stdout and the pipeline log
 - `logger_only`: capture `print(...)` output only into the pipeline log
-- `off`: leave normal `print(...)` behavior unchanged
+- `off`: leave normal `print(...)` behaviour unchanged
 
-## Example script
+### 13. Memory options
 
-Run:
+You can enable optional runtime memory tools when creating a pipeline:
+
+```python
+pipeline = PipelineHandler(
+    ...,
+    memory_saving_mode=True,
+    memory_profile_logging=True,
+)
+```
+
+Behaviour:
+
+- `memory_saving_mode=True` runs a best-effort cleanup after each block finishes
+- `memory_profile_logging=True` logs memory after computation and cleanup for each block
+- attached child pipelines inherit these settings from their parent
+
+## Example notebook
 
 Open and run:
 
@@ -643,259 +421,6 @@ Open and run:
 examples/comprehensive_pipeline.ipynb
 ```
 
-The comprehensive example demonstrates:
-
-- config-backed execution
-- multiple blocks
-- parent/child pipeline registration
-- config-based child gates with expected values
-- float priority branch groups
-- block-scoped args/kwargs helpers
-- disk artifact storage
-- chart rendering
-- injected logger usage
-- result history collection
-- config inspection helpers
-- priority-group inspection helper
-- save/load round-trip
-
 The notebook writes its runtime data under:
 
 - `examples/example_run/`
-
-## Persistence model
-
-Projects are saved as:
-
-- `config.pkl`
-- `pipeline_state.pkl`
-- artifact files under `artifacts/`
-- log file under `metadata/pipeline.log`
-- config snapshots under `metadata/`
-
-## Backup and restore workflow
-
-### Important note
-
-`save_pipeline()` is good for saving pipeline state inside the same project tree, but it is **not** the best tool for creating an isolated backup copy of an already-populated pipeline directory.
-
-Why:
-
-- existing disk-backed outputs may still be preserved as path-based references
-- saving to a second location does not guarantee a full deep copy of every artifact file
-- so a "working copy" created only through `load_pipeline(...)` + `save_pipeline(...)` may still share artifact files with the original directory
-
-### Recommended backup strategy
-
-Use a normal filesystem copy for backups and restores.
-
-#### Backup
-
-Create a full folder copy of the pipeline directory:
-
-```python
-import shutil
-from pathlib import Path
-
-source = Path("/path/to/quant_pipeline")
-backup = Path("/path/to/quant_pipeline_backup")
-
-if backup.exists():
-    shutil.rmtree(backup)
-
-shutil.copytree(source, backup)
-```
-
-#### Restore
-
-Restore by copying the backup back into a working directory, then load it:
-
-```python
-import shutil
-from pathlib import Path
-
-from mlpipelineholder import PipelineHandler
-
-backup = Path("/path/to/quant_pipeline_backup")
-work = Path("/path/to/quant_pipeline")
-
-if work.exists():
-    shutil.rmtree(work)
-
-shutil.copytree(backup, work)
-
-pipeline = PipelineHandler.load_pipeline(work)
-```
-
-### What not to use for backup cloning
-
-Avoid using this as your backup/restore cloning method:
-
-```python
-pipeline = PipelineHandler.load_pipeline(backup_path)
-pipeline.save_pipeline(work_path)
-```
-
-That pattern can preserve artifact references instead of creating a fully isolated clone.
-
-### Rule of thumb
-
-- use `save_pipeline()` to save state in-place for the same working tree
-- use `shutil.copytree(...)` when you want a robust independent backup copy
-
-## Rules and safeguards
-
-- exact parent-level priorities must be unique
-- multiple nodes may share the same integer priority group by using float priorities such as `5.1`, `5.2`, `5.9`
-- duplicate outputs inside the same parallel block are rejected
-- duplicate outputs across different parent-level nodes are allowed and resolved by execution order
-- renamed keyword arguments are supported during registration
-- renamed `*args` / `**kwargs` are supported during registration
-- functions inside one block cannot depend on outputs from the same block
-- non-importable callables cannot be saved for load/replay
-
-## Save/load limitation
-
-Saved pipelines currently preserve **import paths**, not historical function snapshots.
-
-That means:
-
-- if a source function changes later, a loaded pipeline may use the new behavior
-- if a transitive dependency of that function changes later, behavior may also change
-
-Because of that, `save_pipeline()` and `load_pipeline()` emit warnings explaining this limitation.
-
-The preferred public API names are `save_pipeline()` and `load_pipeline()`.
-
-This is intentionally deferred because reliable historical behavior preservation would require a much heavier code and environment snapshot system.
-
-## Tested behavior
-
-Current test coverage verifies:
-
-- full pipeline execution
-- partial reruns
-- disk artifact save/load behavior
-- duplicate output override behavior
-- duplicate priority rejection
-- config override behavior
-- resolved artifact loading via `get_value`
-- chart generation
-- `__str__` and `__repr__`
-- logger injection and result history
-- default save path
-- save/load warnings
-- safe block removal
-- safe function removal
-- json artifact serialization
-- numpy ndarray serialization
-- result-history cleanup
-- child pipeline registration and visibility rules
-- gate-block skip behavior
-- parent-level output conflict reporting
-- stale-output protection for individual reruns of earlier nodes
-- importable vs non-importable save behavior
-
-## Run tests
-
-Using Poetry:
-
-```bash
-poetry run python -m unittest discover -s tests -v
-```
-
-Using Python directly:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## Current limitations
-
-- no historical function snapshotting
-- no DAG beyond priority-based ordering
-- no retry scheduler
-- no distributed execution
-- no separate per-run log file yet
-- colors are optimized for notebook/CLI readability, but exact rendering still depends on the terminal frontend
-- save bundles currently preserve metadata/state references for disk-backed artifacts rather than creating a fully self-contained artifact snapshot
-- print capture uses process-level stdout redirection, so heavily parallel print-heavy functions may still interleave output
-
-Nested pipeline notes:
-
-- nested pipelines are persisted recursively
-- child runtime files are moved under the parent project path on registration
-- child result-history display continues to read from the child’s historical result log file after registration
-
-## Caveats
-
-### 1. Save/load is not a full artifact snapshot
-
-`save_pipeline()` saves the pipeline definition, config, runtime metadata, and artifact references, but it does **not** package every disk-backed file into a fully portable bundle.
-
-What this means in practice:
-
-- disk-backed outputs are restored through saved `ArtifactRecord` file paths
-- metadata such as historical log paths and config snapshot paths also remain path-based
-- the normal workflow is safe when the pipeline continues to live under the same `project_root`
-- portability is weaker when saving to a different folder as an export bundle, or when old project files are moved/deleted later
-
-In other words, the current save/load behavior is best treated as:
-
-- good for restoring pipeline state in the same project tree
-- not yet a guaranteed self-contained archive format
-
-### 2. Print capture under parallel threaded execution is not fully robust
-
-The pipeline can capture `print(...)` output from registered functions and send it into the logger.
-
-Current implementation details:
-
-- print capture uses `redirect_stdout(...)` only for single-function execution paths
-- parallel block functions still run in threads, but print capture is intentionally disabled there to avoid corrupting process-wide `sys.stdout`
-
-This is usually fine for normal usage, but it has an important caveat:
-
-- print-heavy concurrent functions may still interleave raw stdout output
-- parallel function `print(...)` calls are not captured into pipeline logs
-
-Recommendation:
-
-- use the logger directly for important structured messages
-- treat captured `print(...)` as a convenience feature for non-parallel execution paths, not the strongest concurrency-safe logging path
-
-### 3. Child result history after attachment is intentionally asymmetric
-
-When a child pipeline is attached to a parent pipeline:
-
-- future execution uses the **parent logger**
-- the child pipeline’s historical result-history reader still points at the child’s historical result log path
-
-This preserves access to pre-attachment child history, but it also means there are two concepts in play:
-
-- current runtime logging ownership: parent logger
-- historical child result display: child historical log source
-
-So the behavior is workable, but conceptually brittle. It is best understood as a compatibility-oriented compromise rather than a fully unified nested logging model.
-
-### 4. Some registration-time advisories are intentionally heuristic
-
-The library can emit informational advisory logs during function registration for cases such as:
-
-- an input name is not listed in `param_mapping` but still matches a visible pipeline/config name, so it may be resolved implicitly
-- a function reads a disk-backed input without declaring that same name as an output, so in-function mutations would not persist back into pipeline state
-
-These advisories are:
-
-- best-effort only
-- based on what is visible at registration time
-- non-blocking (they do not change execution behavior)
-
-For helper-created child pipelines via `create_atom_child_pipeline(...)`, these advisories are logged to the parent pipeline logger immediately so they are easier to notice.
-
-## Recommended next steps
-
-- add a small CLI wrapper
-- add README examples for `run_until`, `run_from`, and `remove_block`
-- add optional per-run logs
-- add richer artifact serializers if needed

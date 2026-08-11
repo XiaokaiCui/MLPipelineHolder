@@ -75,6 +75,10 @@ def mutate_disk_backed_input(shared: str) -> str:
     return shared + "!"
 
 
+def coalesce_optional(value: int, maybe_bonus: int | None) -> int:
+    return value if maybe_bonus is None else value + maybe_bonus
+
+
 
 class ExecutionBlockTests(unittest.TestCase):
     def test_same_block_dependency_is_rejected_at_execution_time(self) -> None:
@@ -155,6 +159,33 @@ class ExecutionBlockTests(unittest.TestCase):
 
             self.assertIsNone(registration)
             self.assertEqual(len(block.functions), 0)
+
+    def test_registration_rejects_builtin_name_as_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("builtin-output", BlockConfig(value=1), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(passthrough, ["list"])
+
+            self.assertIsNone(registration)
+            self.assertEqual(len(block.functions), 0)
+
+    def test_param_mapping_can_pass_literal_none(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("none-mapping", {"value": 7}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(
+                coalesce_optional,
+                ["result"],
+                param_mapping={"maybe_bonus": None},
+            )
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(pipeline.get_value("result"), 7)
 
     def test_no_output_function_registration_is_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -302,6 +333,169 @@ class ExecutionBlockTests(unittest.TestCase):
 
             self.assertEqual(pipeline.get_value("train_recorder"), [1])
             self.assertEqual(pipeline.get_value("eval_recorder"), [2])
+
+    def test_expression_assignment_executes_with_visible_pipeline_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = value + 3")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["value"])
+            self.assertEqual(registration.output_names, ["result"])
+            self.assertEqual(pipeline.get_value("result"), 5)
+
+    def test_expression_allows_formatting_newlines_for_single_statement(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-multiline", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression(
+                """
+                result = (
+                    value + 3
+                )
+                """
+            )
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["value"])
+            self.assertEqual(pipeline.get_value("result"), 5)
+
+    def test_expression_print_only_runs_without_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-print", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("print(value)")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.output_names, [])
+            self.assertEqual(pipeline.para_value_dict, {})
+
+    def test_expression_registration_rejects_forbidden_syntax(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-forbidden", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            with self.assertRaises(RegistrationError) as exc_info:
+                block.register_expression("result = [item for item in values]")
+
+            self.assertIn("comprehensions or generator expressions", str(exc_info.exception))
+            self.assertEqual(block.functions, [])
+
+    def test_expression_registration_rejects_semicolons(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-semicolon", {"value": 2}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            with self.assertRaises(RegistrationError) as exc_info:
+                block.register_expression("result = value + 1; print(result)")
+
+            self.assertIn("semicolons", str(exc_info.exception))
+            self.assertEqual(block.functions, [])
+
+    def test_expression_allows_safe_builtin_names_without_resolving_pipeline_inputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-builtins", {"value": 12}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = len(str(value))")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["value"])
+            self.assertEqual(pipeline.get_value("result"), 2)
+
+    def test_expression_astype_str_does_not_require_pipeline_value_named_str(self) -> None:
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is not installed")
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-astype", {}, tmp_path)
+            pipeline.set_value("series", pd.Series([1, 2, 3]))
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = series.astype(str)")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            result = pipeline.get_value("result")
+            self.assertEqual(result.tolist(), ["1", "2", "3"])
+
+    def test_expression_reserves_builtin_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-builtins-full", {}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = list((1, 2))")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, [])
+            self.assertEqual(pipeline.get_value("result"), [1, 2])
+
+    def test_expression_runtime_supports_imported_helpers(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-runtime", {"value": 9}, tmp_path)
+            pipeline.define_expression_runtime(
+                "from math import sqrt, ceil\nfrom functools import partial"
+            )
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = partial(ceil, sqrt(value))()")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["value"])
+            self.assertEqual(pipeline.get_value("result"), 3)
+
+    def test_expression_runtime_supports_dotted_from_imports_with_multiple_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-runtime-dotted", {}, tmp_path)
+            pipeline.define_expression_runtime(
+                "from xml.etree.ElementTree import fromstring, tostring"
+            )
+            pipeline.set_value("xml_text", "<root><child /></root>")
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_expression("result = fromstring(xml_text).tag")
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(registration.input_names, ["xml_text"])
+            self.assertEqual(pipeline.get_value("result"), "root")
+
+    def test_expression_runtime_inherits_from_immediate_ancestor_when_child_has_none(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"value": 9}, tmp_path / "parent")
+            parent.define_expression_runtime("from math import sqrt")
+            child = PipelineHandler("child", {}, tmp_path / "child")
+            parent.add_child_pipeline(child, 1)
+            block = child.add_block("block", 1)
+
+            registration = block.register_expression("result = sqrt(value)")
+            parent.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(child.get_value("result"), 3.0)
 
     def test_duplicate_function_registration_raises_without_force(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -3,10 +3,25 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import Sequence
-from functools import wraps
+from functools import partial, wraps
 from typing import Any, get_type_hints
 
 from .exceptions import RegistrationError
+
+
+def callable_signature(callable_obj: Any) -> inspect.Signature:
+    try:
+        return inspect.signature(callable_obj)
+    except ValueError:
+        if callable_obj is not partial:
+            raise
+        return inspect.Signature(
+            parameters=[
+                inspect.Parameter("func", inspect.Parameter.POSITIONAL_ONLY),
+                inspect.Parameter("args", inspect.Parameter.VAR_POSITIONAL),
+                inspect.Parameter("keywords", inspect.Parameter.VAR_KEYWORD),
+            ]
+        )
 
 
 def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
@@ -45,7 +60,7 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
 
 
 def inspect_input_names(callable_obj: Any) -> list[str]:
-    signature = inspect.signature(callable_obj)
+    signature = callable_signature(callable_obj)
     input_names: list[str] = []
     for parameter in signature.parameters.values():
         input_names.append(parameter.name)
@@ -53,7 +68,7 @@ def inspect_input_names(callable_obj: Any) -> list[str]:
 
 
 def infer_declared_output_count(callable_obj: Any) -> int | None:
-    signature = inspect.signature(callable_obj)
+    signature = callable_signature(callable_obj)
     try:
         hints = get_type_hints(callable_obj)
     except Exception:
@@ -80,7 +95,7 @@ def inspect_exposed_input_names(
     var_pos_name: str | None = None,
     var_kw_name: str | None = None,
 ) -> list[str]:
-    signature = inspect.signature(callable_obj)
+    signature = callable_signature(callable_obj)
     param_mapping = param_mapping or {}
     input_names: list[str] = []
     seen: set[str] = set()
@@ -110,7 +125,7 @@ def rename_args(
     if len(set(param_mapping.values())) != len(param_mapping.values()):
         raise RegistrationError("param_mapping contains duplicate target names")
 
-    signature = inspect.signature(func)
+    signature = callable_signature(func)
     renamed_parameters = []
     seen_names: set[str] = set()
     reverse_param_mapping = {new_name: old_name for old_name, new_name in param_mapping.items()}
@@ -143,7 +158,7 @@ def rename_args(
 
 
 def default_map(callable_obj: Any) -> dict[str, Any]:
-    signature = inspect.signature(callable_obj)
+    signature = callable_signature(callable_obj)
     defaults: dict[str, Any] = {}
     for parameter in signature.parameters.values():
         if parameter.default is not inspect._empty:
