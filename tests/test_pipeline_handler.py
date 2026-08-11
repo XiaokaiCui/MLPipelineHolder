@@ -199,6 +199,10 @@ def mutate_disk_backed_input(shared: str) -> str:
     return shared + "!"
 
 
+def combine_optional_value(base: int, optional_value: int | None) -> int:
+    return base if optional_value is None else base + optional_value
+
+
 def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
@@ -237,6 +241,70 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(pipeline.para_value_dict["left"], 21)
             self.assertEqual(pipeline.para_value_dict["right"], 31)
             self.assertEqual(pipeline.para_value_dict["total"], 52)
+
+    def test_pipeline_can_use_implicit_temporary_project_root(self) -> None:
+        pipeline = PipelineHandler("implicit-root", DemoConfig(base=3, factor=4))
+
+        try:
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertEqual(pipeline.project_root.name, pipeline.metadata_root.parent.name)
+            self.assertTrue((pipeline.project_root / "metadata").exists())
+        finally:
+            if pipeline.project_root.exists():
+                shutil.rmtree(pipeline.project_root)
+
+    def test_pipeline_can_omit_configuration_and_local_folder_path(self) -> None:
+        pipeline = PipelineHandler("implicit-root-empty")
+
+        try:
+            self.assertEqual(pipeline.config, {})
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertTrue((pipeline.project_root / "metadata").exists())
+        finally:
+            if pipeline.project_root.exists():
+                shutil.rmtree(pipeline.project_root)
+
+    def test_pipeline_can_pass_only_local_folder_path_by_keyword(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "keyword-only-root"
+            pipeline = PipelineHandler(
+                "keyword-root",
+                local_folder_path=project_root,
+            )
+
+            self.assertEqual(pipeline.config, {})
+            self.assertEqual(pipeline.project_root, project_root)
+
+    def test_child_pipeline_with_implicit_temporary_root_relocates_under_parent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp_path / "parent")
+            child = PipelineHandler("child", DemoConfig(base=3), None)
+            original_root = child.project_root
+
+            parent.add_child_pipeline(child, 1)
+
+            self.assertFalse(original_root.exists())
+            self.assertEqual(child.project_root, parent.project_root / "children" / "child")
+            self.assertTrue(child.project_root.exists())
+
+    def test_saving_temp_root_pipeline_to_explicit_path_overrides_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("temp-root", DemoConfig(base=2), None)
+            original_root = pipeline.project_root
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            target_root = tmp_path / "materialized"
+            pipeline.save_pipeline(target_root)
+
+            self.assertEqual(pipeline.project_root, target_root)
+            self.assertFalse(original_root.exists())
+            loaded = PipelineHandler.load_pipeline(target_root, forced_deleting=True)
+            self.assertEqual(loaded.get_value("seed"), 3)
 
     def test_disk_artifact_is_saved_and_loaded_for_downstream_use(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1009,6 +1077,62 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.set_value("manual_value", 123)
 
             self.assertEqual(pipeline.get_value("manual_value"), 123)
+
+    def test_pipeline_rejects_builtin_name_in_configuration(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+
+            with self.assertRaises(RegistrationError):
+                PipelineHandler("values", {"list": 1}, tmp_path)
+
+    def test_set_value_rejects_builtin_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("values", DemoConfig(base=2), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.set_value("id", 123)
+
+    def test_define_expression_runtime_rejects_non_import_statements(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("runtime", DemoConfig(base=2), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.define_expression_runtime("value = 1")
+
+    def test_define_expression_runtime_rejects_wildcard_imports(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("runtime", DemoConfig(base=2), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.define_expression_runtime("from math import *")
+
+    def test_define_expression_runtime_rejects_relative_imports(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("runtime", DemoConfig(base=2), tmp_path)
+
+            with self.assertRaises(RegistrationError):
+                pipeline.define_expression_runtime("from .module import helper")
+
+    def test_define_expression_runtime_allows_indented_multiline_imports(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("runtime", DemoConfig(base=2), tmp_path)
+
+            pipeline.define_expression_runtime(
+                """
+                    import math
+                    from functools import partial
+                """
+            )
+
+            self.assertEqual(
+                pipeline.get_expression_runtime_code(),
+                "import math\nfrom functools import partial",
+            )
 
     def test_set_value_updates_existing_value_via_update_semantics(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1908,6 +2032,9 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded.project_root, work)
             self.assertFalse(stale_file.exists())
             self.assertEqual(loaded.get_value("saved_blob"), "value=3")
+            log_text = loaded.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("Pipeline project directory has been copied from backup path", log_text)
+            self.assertIn("Pipeline has been loaded from the project root", log_text)
 
     def test_load_pipeline_from_backup_with_forced_deleting_skips_prompt(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1969,6 +2096,26 @@ class PipelineHandlerTests(unittest.TestCase):
                     tmp_path / "work",
                     pipeline_backup_directory=tmp_path / "work" / "backup",
                 )
+
+    def test_save_pipeline_logs_project_root_and_backup_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            backup = tmp_path / "backup"
+            pipeline = PipelineHandler(
+                "source",
+                DemoConfig(base=2),
+                work,
+                pipeline_backup_directory=backup,
+            )
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            pipeline.save_pipeline()
+
+            log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn(f"Pipeline has been saved to project root: {work}", log_text)
+            self.assertIn(f"Pipeline has been saved to project backup path: {backup}", log_text)
 
     def test_attached_sibling_child_can_read_parent_visible_value_via_get_value(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2147,6 +2294,91 @@ class PipelineHandlerTests(unittest.TestCase):
 
             log_text = (tmp_path / "parent" / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertIn("may be resolved implicitly", log_text)
+
+    def test_create_atom_child_pipeline_can_pass_literal_none_via_param_mapping(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"base_value": 7}, tmp_path / "parent")
+
+            parent.create_atom_child_pipeline(
+                child_name="child_none_mapping",
+                execution_priority=10.0,
+                target_function=combine_optional_value,
+                output_variable_names=["result"],
+                param_mapping_dct={
+                    "base": "base_value",
+                    "optional_value": None,
+                },
+                forced=True,
+            )
+
+            parent.run_all()
+
+            self.assertEqual(parent.get_value("result"), 7)
+
+    def test_create_atom_child_pipeline_accepts_param_mapping_alias(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"base_value": 7}, tmp_path / "parent")
+
+            parent.create_atom_child_pipeline(
+                child_name="child_param_mapping_alias",
+                execution_priority=10.0,
+                target_function=combine_optional_value,
+                output_variable_names=["result"],
+                param_mapping={
+                    "base": "base_value",
+                    "optional_value": None,
+                },
+                forced=True,
+            )
+
+            parent.run_all()
+
+            self.assertEqual(parent.get_value("result"), 7)
+
+    def test_create_atom_child_pipeline_rejects_both_param_mapping_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"base_value": 7}, tmp_path / "parent")
+
+            with self.assertRaises(RegistrationError):
+                parent.create_atom_child_pipeline(
+                    child_name="child_param_mapping_conflict",
+                    execution_priority=10.0,
+                    target_function=combine_optional_value,
+                    output_variable_names=["result"],
+                    param_mapping={"base": "base_value"},
+                    param_mapping_dct={"base": "base_value"},
+                    forced=True,
+                )
+
+    def test_create_atom_child_pipeline_keeps_legacy_positional_arguments_compatible(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {"base_value": 7}, tmp_path / "parent")
+
+            parent.create_atom_child_pipeline(
+                "child_legacy_positional",
+                10.0,
+                combine_optional_value,
+                None,
+                True,
+                True,
+                ["result"],
+                None,
+                {"base": "base_value", "optional_value": None},
+                None,
+                None,
+                None,
+                True,
+                True,
+                10.0,
+            )
+
+            parent.run_all()
+
+            self.assertEqual(parent.get_value("result"), 7)
 
     def test_create_atom_child_pipeline_warns_for_parent_disk_backed_input_pitfall(self) -> None:
         with TemporaryDirectory() as temp_dir:

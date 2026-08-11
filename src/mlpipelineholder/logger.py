@@ -77,6 +77,16 @@ class PipelineLogger:
         with self._lock:
             self._close_file_handle()
 
+    def rebind_path(self, log_file_path: str | Path) -> None:
+        with self._lock:
+            self._close_file_handle()
+            self.log_file_path = Path(log_file_path)
+            self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.log_file_path.exists():
+                self.log_file_path.touch()
+            self._file_handle = self.log_file_path.open("a", encoding="utf-8")
+            self._file_logging_enabled = True
+
     def __del__(self) -> None:
         try:
             self.close()

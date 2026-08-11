@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
+import builtins
 import gc
 import inspect
 import pickle
-import shutil
 import platform
+import shutil
 import sys
 import warnings
 from ctypes import CDLL
@@ -12,25 +14,69 @@ from contextlib import redirect_stdout
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from importlib import import_module
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from textwrap import dedent
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from .artifact_store import ArtifactStore
 from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
-from .function_registry import default_map
+from .function_registry import default_map, resolve_callable
 from .gate_block import GateBlock
 from .logger import PipelineLogger
-from .models import ArtifactRecord, ExpressionRegistration, FunctionRegistration, RunRecord, RuntimeValueReference, TorchStateArtifactRecord
+from .models import (
+    ArtifactRecord,
+    CallableValueReference,
+    ExpressionRegistration,
+    FunctionRegistration,
+    RunRecord,
+    RuntimeCallableReference,
+    RuntimeValueReference,
+    TorchStateArtifactRecord,
+)
+
+
+class _MissingMainClassPlaceholder:
+    pass
+
+
+_RESERVED_BUILTIN_NAMES = {
+    name
+    for name in dir(builtins)
+    if not name.startswith("_")
+}
+
+
+class _MissingClassUnpickler(pickle.Unpickler):
+    def __init__(self, file_obj: BytesIO) -> None:
+        super().__init__(file_obj)
+        self._placeholder_cache: dict[tuple[str, str], type[Any]] = {}
+
+    def find_class(self, module: str, name: str) -> Any:
+        try:
+            return super().find_class(module, name)
+        except (AttributeError, ImportError, ModuleNotFoundError):
+            if module != "__main__":
+                raise
+            cache_key = (module, name)
+            placeholder = self._placeholder_cache.get(cache_key)
+            if placeholder is not None:
+                return placeholder
+            placeholder = type(name, (_MissingMainClassPlaceholder,), {})
+            placeholder.__module__ = module
+            self._placeholder_cache[cache_key] = placeholder
+            return placeholder
 
 
 class PipelineHandler:
     def __init__(
         self,
         registration_name: str,
-        configuration: Any | None,
-        local_folder_path: str | Path,
+        configuration: Any | None = None,
+        local_folder_path: str | Path | None = None,
         execution_priority: float | None = None,
         forced: bool = False,
         memory_saving_mode: bool = False,
@@ -42,38 +88,82 @@ class PipelineHandler:
         self.config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
-        self.project_root = Path(local_folder_path)
+        self._temporary_root_handle: TemporaryDirectory[str] | None = None
+        generated_temp_root = local_folder_path is None
+        self.project_root = self._initial_project_root(
+            registration_name,
+            local_folder_path,
+        )
         self.pipeline_backup_root = (
             None
             if pipeline_backup_directory is None
             else Path(pipeline_backup_directory)
         )
-        self._validate_backup_path_safety()
-        if not _allow_existing_root:
-            self._prepare_project_root(forced)
-        self.project_root.mkdir(parents=True, exist_ok=True)
-        self.metadata_root = self.project_root / "metadata"
-        self.metadata_root.mkdir(parents=True, exist_ok=True)
-        self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
-        self.print_capture_mode = "tee"
-        self.memory_saving_mode = memory_saving_mode
-        self.memory_profile_logging = memory_profile_logging
-        self.suppress_registration_advisories = False
-        self.historical_result_log_path: str | None = None
-        self._attached_result_history_override: list[str] | None = None
+        try:
+            self._validate_builtin_name_conflicts_in_mapping(
+                self._config_name_mapping(self.config),
+                owner_label="configuration",
+            )
+            self._validate_backup_path_safety()
+            if not _allow_existing_root:
+                self._prepare_project_root(forced)
+            self.project_root.mkdir(parents=True, exist_ok=True)
+            self.metadata_root = self.project_root / "metadata"
+            self.metadata_root.mkdir(parents=True, exist_ok=True)
+            self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
+            self.print_capture_mode = "tee"
+            self.memory_saving_mode = memory_saving_mode
+            self.memory_profile_logging = memory_profile_logging
+            self.suppress_registration_advisories = False
+            self.historical_result_log_path: str | None = None
+            self._attached_result_history_override: list[str] | None = None
+            self.expression_runtime_code: str | None = None
+            self._expression_runtime_defined_names_cache: set[str] | None = None
+            self._expression_runtime_namespace_cache: dict[str, Any] | None = None
 
-        self.nodes: list[Any] = []
-        self.nodes_by_name: dict[str, Any] = {}
-        self.blocks: list[Any] = []
-        self.blocks_by_name: dict[str, Any] = {}
-        self.gate_block: GateBlock | None = None
+            self.nodes: list[Any] = []
+            self.nodes_by_name: dict[str, Any] = {}
+            self.blocks: list[Any] = []
+            self.blocks_by_name: dict[str, Any] = {}
+            self.gate_block: GateBlock | None = None
 
-        self.manual_values: dict[str, Any] = {}
-        self.para_value_dict: dict[str, Any] = {}
-        self.artifact_registry: dict[str, ArtifactRecord] = {}
-        self.producer_outputs: dict[str, dict[str, Any]] = {}
-        self.run_history: list[RunRecord] = []
-        self.artifact_store = ArtifactStore(self.project_root)
+            self.manual_values: dict[str, Any] = {}
+            self.para_value_dict: dict[str, Any] = {}
+            self.artifact_registry: dict[str, ArtifactRecord] = {}
+            self.producer_outputs: dict[str, dict[str, Any]] = {}
+            self.run_history: list[RunRecord] = []
+            self.artifact_store = ArtifactStore(self.project_root)
+        except Exception:
+            if generated_temp_root and self.project_root.exists():
+                shutil.rmtree(self.project_root, ignore_errors=True)
+            raise
+
+    def __del__(self) -> None:
+        try:
+            self.logger.close()
+        except Exception:
+            pass
+        try:
+            self._cleanup_temporary_root_handle()
+        except Exception:
+            pass
+
+    def _initial_project_root(
+        self,
+        registration_name: str,
+        local_folder_path: str | Path | None,
+    ) -> Path:
+        if local_folder_path is not None:
+            return Path(local_folder_path)
+        del registration_name
+        self._temporary_root_handle = TemporaryDirectory(prefix="mlpipelineholder_")
+        return Path(self._temporary_root_handle.name)
+
+    def _cleanup_temporary_root_handle(self) -> None:
+        if self._temporary_root_handle is None:
+            return
+        self._temporary_root_handle.cleanup()
+        self._temporary_root_handle = None
 
     def __str__(self) -> str:
         return self.describe_pipeline()
@@ -167,13 +257,15 @@ class PipelineHandler:
         default_config_value: Any = True,
         output_variable_names: str | list[str] | tuple[str, ...] | None = None,
         save_to_disk_lst: list[str] | tuple[str, ...] | set[str] | None = None,
-        param_mapping_dct: dict[str, str] | None = None,
+        param_mapping_dct: dict[str, str | None] | None = None,
         kwargs_dct: dict[str, str] | None = None,
         args_lst: tuple[str, ...] | list[str] | None = None,
         child_configuration: Any | None = None,
         allow_existing_root: bool = True,
         forced: bool = True,
         block_priority: float = 10.0,
+        *,
+        param_mapping: dict[str, str | None] | None = None,
     ) -> None:
         output_names = (
             []
@@ -187,6 +279,13 @@ class PipelineHandler:
             raise RegistrationError(
                 "save_to_disk_lst must be a subset of output_variable_names in create_atom_child_pipeline"
             )
+        if param_mapping is not None and param_mapping_dct is not None:
+            raise RegistrationError(
+                "Use either param_mapping or param_mapping_dct in create_atom_child_pipeline, not both"
+            )
+        effective_param_mapping = (
+            param_mapping if param_mapping is not None else param_mapping_dct
+        )
         child_root = self.project_root / "children" / child_name
         temp_pipeline = PipelineHandler(
             registration_name=child_name,
@@ -227,7 +326,7 @@ class PipelineHandler:
             save_to_disk=save_to_disk_lst,
             var_pos_name="default_args" if args_lst is not None else None,
             var_kw_name="default_kwargs" if kwargs_dct is not None else None,
-            param_mapping=param_mapping_dct,
+            param_mapping=effective_param_mapping,
             forced=forced,
         )
         child_priority = temp_pipeline.execution_priority
@@ -257,6 +356,7 @@ class PipelineHandler:
     def set_config(self, overrides: dict[str, Any]) -> None:
         declared_outputs = self.list_declared_outputs()
         for field_name, value in overrides.items():
+            self._validate_builtin_name_conflict(field_name, owner_label="configuration")
             if field_name in declared_outputs:
                 self.logger.warning(
                     f"Skipped config update for '{field_name}' because it conflicts with a declared output"
@@ -267,6 +367,7 @@ class PipelineHandler:
     def update_config(self, overrides: dict[str, Any]) -> None:
         config_names = self.get_full_config()
         for field_name, value in overrides.items():
+            self._validate_builtin_name_conflict(field_name, owner_label="configuration")
             if field_name not in config_names:
                 raise ResolutionError(f"Unknown config field: {field_name}")
             if field_name in self.list_declared_outputs():
@@ -288,11 +389,14 @@ class PipelineHandler:
                     raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         if isinstance(value, TorchStateArtifactRecord):
             return value
+        if isinstance(value, CallableValueReference):
+            return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
         return value
 
     def update_value(self, variable_name: str, value: Any) -> None:
+        self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
         if variable_name not in self.para_value_dict:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
@@ -316,6 +420,7 @@ class PipelineHandler:
             break
 
     def set_value(self, variable_name: str, value: Any) -> None:
+        self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
         if variable_name in self.para_value_dict:
             self.update_value(variable_name, value)
             return
@@ -398,6 +503,29 @@ class PipelineHandler:
             self.logger.set_level(level)
         except ValueError as exc:
             raise RegistrationError(str(exc)) from exc
+
+    def define_expression_runtime(self, code: str) -> None:
+        code = self._normalize_expression_runtime_code(code)
+        self._validate_expression_runtime_code(code)
+        self.expression_runtime_code = code
+        self._expression_runtime_defined_names_cache = None
+        self._expression_runtime_namespace_cache = None
+        try:
+            self._build_expression_runtime_namespace()
+        except PersistenceError as exc:
+            self.clear_expression_runtime()
+            raise RegistrationError(str(exc)) from exc
+
+    def clear_expression_runtime(self) -> None:
+        self.expression_runtime_code = None
+        self._expression_runtime_defined_names_cache = None
+        self._expression_runtime_namespace_cache = None
+
+    def get_expression_runtime_code(self) -> str | None:
+        owner = self._effective_expression_runtime_owner()
+        if owner is None:
+            return None
+        return owner.expression_runtime_code
 
     def list_declared_outputs(self) -> set[str]:
         outputs: set[str] = set()
@@ -537,11 +665,17 @@ class PipelineHandler:
         save_log_to_file: str | Path | None = None,
     ) -> Path:
         warnings.warn(
-            "Saved pipelines preserve import paths, not historical function behavior; later source changes may affect reloaded pipelines.",
+            "Saved pipelines preserve callable references, not historical function behavior; later source changes may affect reloaded pipelines.",
             stacklevel=2,
         )
         target = self.project_root if path is None else Path(path)
-        target.mkdir(parents=True, exist_ok=True)
+        if self._temporary_root_handle is not None and self._normalized_path(target) != self._normalized_path(self.project_root):
+            self._relocate_project_root(target)
+            target = self.project_root
+        if self._normalized_path(target) != self._normalized_path(self.project_root):
+            self._materialize_project_tree_for_save(target)
+        else:
+            target.mkdir(parents=True, exist_ok=True)
         try:
             payload = self._serialize_payload_for_save(target)
         except RegistrationError as exc:
@@ -549,8 +683,9 @@ class PipelineHandler:
         with (target / "pipeline_state.pkl").open("wb") as handle:
             pickle.dump(payload, handle)
         with (target / "config.pkl").open("wb") as handle:
-            pickle.dump(self.config, handle)
+            pickle.dump(self._serialize_config_for_save(self.config), handle)
         self._write_pipeline_metadata(target)
+        self.logger.info(f"Pipeline has been saved to project root: {target}")
         if save_log_to_file is not None:
             self.logger.flush()
             log_target = Path(save_log_to_file)
@@ -560,6 +695,9 @@ class PipelineHandler:
             backup_root = self.pipeline_backup_root
             if backup_root is not None:
                 self._refresh_backup_copy(target, backup_root)
+                self.logger.info(
+                    f"Pipeline has been saved to project backup path: {backup_root}"
+                )
         return target
 
     def save_project(
@@ -577,20 +715,25 @@ class PipelineHandler:
         forced_deleting: bool = False,
     ) -> "PipelineHandler":
         warnings.warn(
-            "Loaded pipelines restore current importable functions, not historical function snapshots; changed source code may alter behavior.",
+            "Loaded pipelines restore current callable references, not historical function snapshots; changed source code may alter behavior.",
             stacklevel=2,
         )
         target = Path(path)
-        target = cls._restore_working_tree_if_needed(
+        target, restore_message = cls._restore_working_tree_if_needed(
             target,
             forced_deleting=forced_deleting,
         )
         try:
             with (target / "pipeline_state.pkl").open("rb") as handle:
-                payload = pickle.load(handle)
+                payload = cls._load_pickle_with_missing_class_fallback(handle.read())
+            cls._validate_loaded_payload_placeholders(payload)
         except Exception as exc:
             raise PersistenceError("Failed to load pipeline project") from exc
-        return cls._from_payload(payload, target)
+        pipeline = cls._from_payload(payload, target)
+        if restore_message is not None:
+            pipeline.logger.info(restore_message)
+        pipeline.logger.info(f"Pipeline has been loaded from the project root: {target}")
+        return pipeline
 
     @classmethod
     def load_project(
@@ -631,13 +774,147 @@ class PipelineHandler:
                 backup_root.unlink()
         shutil.copytree(source, backup_root)
 
+    def _materialize_project_tree_for_save(self, target: Path) -> None:
+        if self._paths_overlap(self.project_root, target):
+            raise PersistenceError(
+                f"Cannot save pipeline from '{self.project_root}' into overlapping directory '{target}'"
+            )
+        self.logger.flush()
+        shutil.copytree(self.project_root, target, dirs_exist_ok=True)
+
     @classmethod
     def _load_pipeline_metadata(cls, path: Path) -> dict[str, Any] | None:
         metadata_path = path / "pipeline_meta.pkl"
         if not metadata_path.exists():
             return None
         with metadata_path.open("rb") as handle:
-            return pickle.load(handle)
+            return cls._load_pickle_with_missing_class_fallback(handle.read())
+
+    @staticmethod
+    def _load_pickle_with_missing_class_fallback(raw_bytes: bytes) -> Any:
+        return _MissingClassUnpickler(BytesIO(raw_bytes)).load()
+
+    @staticmethod
+    def _validate_expression_runtime_code(code: str) -> None:
+        try:
+            parsed = ast.parse(code, mode="exec")
+        except SyntaxError as exc:
+            raise RegistrationError(f"Invalid expression runtime syntax: {exc}") from exc
+        for node in parsed.body:
+            if isinstance(node, ast.Import):
+                continue
+            if isinstance(node, ast.ImportFrom):
+                if node.level != 0 or node.module is None:
+                    raise RegistrationError(
+                        "Expression runtime only supports absolute imports"
+                    )
+                if any(alias.name == "*" for alias in node.names):
+                    raise RegistrationError(
+                        "Expression runtime does not support wildcard imports"
+                    )
+                continue
+            raise RegistrationError(
+                "Expression runtime only supports import and from-import statements"
+            )
+
+    @staticmethod
+    def _normalize_expression_runtime_code(code: str) -> str:
+        normalized = dedent(code).strip()
+        if not normalized:
+            raise RegistrationError("Expression runtime code cannot be empty")
+        return normalized
+
+    def _effective_expression_runtime_owner(self) -> "PipelineHandler | None":
+        current: PipelineHandler | None = self
+        while current is not None:
+            if current.expression_runtime_code is not None:
+                return current
+            current = current.parent_pipeline
+        return None
+
+    def _expression_runtime_defined_names(self) -> set[str]:
+        owner = self._effective_expression_runtime_owner()
+        if owner is None or owner.expression_runtime_code is None:
+            return set()
+        if owner._expression_runtime_defined_names_cache is not None:
+            return set(owner._expression_runtime_defined_names_cache)
+        parsed = ast.parse(owner.expression_runtime_code, mode="exec")
+        names: set[str] = set()
+        for node in parsed.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name.split(".")[0])
+                continue
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
+        owner._expression_runtime_defined_names_cache = names
+        return set(names)
+
+    def _build_expression_runtime_namespace(self) -> dict[str, Any]:
+        owner = self._effective_expression_runtime_owner()
+        if owner is None or owner.expression_runtime_code is None:
+            return {}
+        if owner._expression_runtime_namespace_cache is not None:
+            return dict(owner._expression_runtime_namespace_cache)
+        globals_namespace: dict[str, Any] = {"__builtins__": builtins.__dict__}
+        try:
+            exec(owner.expression_runtime_code, globals_namespace, globals_namespace)
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to build expression runtime for pipeline '{owner.registration_name}': {type(exc).__name__}: {exc}"
+            ) from exc
+        runtime_namespace = {
+            key: value
+            for key, value in globals_namespace.items()
+            if key != "__builtins__"
+        }
+        owner._expression_runtime_namespace_cache = runtime_namespace
+        return dict(runtime_namespace)
+
+    @classmethod
+    def _contains_missing_main_placeholder(cls, value: Any) -> bool:
+        if isinstance(value, _MissingMainClassPlaceholder):
+            return True
+        if isinstance(value, dict):
+            return any(cls._contains_missing_main_placeholder(item) for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(cls._contains_missing_main_placeholder(item) for item in value)
+        return False
+
+    @classmethod
+    def _validate_loaded_payload_placeholders(cls, payload: dict[str, Any]) -> None:
+        if cls._contains_missing_placeholder_outside_config(payload):
+            raise PersistenceError(
+                "Failed to load pipeline project because a missing __main__ class was found outside the saved pipeline config"
+            )
+
+    @classmethod
+    def _contains_missing_placeholder_outside_config(
+        cls,
+        value: Any,
+        *,
+        inside_config: bool = False,
+    ) -> bool:
+        if isinstance(value, _MissingMainClassPlaceholder):
+            return not inside_config
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if cls._contains_missing_placeholder_outside_config(
+                    item,
+                    inside_config=inside_config or key == "config",
+                ):
+                    return True
+            return False
+        if isinstance(value, (list, tuple, set)):
+            return any(
+                cls._contains_missing_placeholder_outside_config(
+                    item,
+                    inside_config=inside_config,
+                )
+                for item in value
+            )
+        return False
 
     @classmethod
     def _restore_working_tree_if_needed(
@@ -645,16 +922,16 @@ class PipelineHandler:
         source_path: Path,
         *,
         forced_deleting: bool,
-    ) -> Path:
+    ) -> tuple[Path, str | None]:
         metadata = cls._load_pipeline_metadata(source_path)
         if metadata is None:
-            return source_path
+            return source_path, None
         pipeline_directory = metadata.get("pipeline_directory")
         if pipeline_directory is None:
-            return source_path
+            return source_path, None
         work_root = Path(pipeline_directory)
         if cls._normalized_path(source_path) == cls._normalized_path(work_root):
-            return source_path
+            return source_path, None
         if cls._paths_overlap(source_path, work_root):
             raise PersistenceError(
                 f"Cannot restore pipeline from '{source_path}' into overlapping working directory '{work_root}'"
@@ -665,7 +942,38 @@ class PipelineHandler:
             forced_deleting=forced_deleting,
         )
         shutil.copytree(source_path, work_root)
-        return work_root
+        return (
+            work_root,
+            f"Pipeline project directory has been copied from backup path: {source_path} -> {work_root}",
+        )
+
+    def _relocate_project_root(self, new_root: Path) -> None:
+        old_root = self.project_root
+        normalized_old_root = self._normalized_path(old_root)
+        normalized_new_root = self._normalized_path(new_root)
+        if normalized_old_root == normalized_new_root:
+            self._cleanup_temporary_root_handle()
+            return
+        self.logger.flush()
+        self.logger.close()
+        new_root.mkdir(parents=True, exist_ok=True)
+        for entry in old_root.iterdir():
+            destination = new_root / entry.name
+            if destination.exists():
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            shutil.move(str(entry), str(destination))
+        self.project_root = new_root
+        self.metadata_root = new_root / "metadata"
+        self.metadata_root.mkdir(parents=True, exist_ok=True)
+        self.logger.rebind_path(self.metadata_root / "pipeline.log")
+        self.artifact_store = ArtifactStore(new_root)
+        self._rewrite_artifact_paths(old_root, new_root)
+        self._rewrite_run_history_paths(old_root, new_root)
+        self._refresh_descendant_roots(old_root, new_root)
+        self._cleanup_temporary_root_handle()
 
     @classmethod
     def _clear_path_with_optional_confirmation(
@@ -711,6 +1019,7 @@ class PipelineHandler:
                 f"Pipeline backup directory '{self.pipeline_backup_root}' must not overlap with pipeline directory '{self.project_root}'"
             )
 
+
     @classmethod
     def _from_payload(
         cls,
@@ -718,9 +1027,10 @@ class PipelineHandler:
         project_root: Path,
         parent: "PipelineHandler | None" = None,
     ) -> "PipelineHandler":
+        config = cls._deserialize_saved_config(payload["config"])
         pipeline = cls(
             registration_name=payload["registration_name"],
-            configuration=payload["config"],
+            configuration=config,
             local_folder_path=project_root,
             execution_priority=payload.get("execution_priority"),
             memory_saving_mode=payload.get("memory_saving_mode", False),
@@ -728,6 +1038,8 @@ class PipelineHandler:
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
         )
+        if payload.get("expression_runtime_code") is not None:
+            pipeline.define_expression_runtime(payload["expression_runtime_code"])
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
         pipeline.suppress_registration_advisories = True
         if payload.get("gate") is not None:
@@ -769,8 +1081,24 @@ class PipelineHandler:
                             ),
                         )
                     else:
+                        function_source = function_payload.get("import_path")
+                        if function_source is None:
+                            runtime_reference = function_payload.get(
+                                "runtime_callable_reference"
+                            )
+                            if not isinstance(
+                                runtime_reference,
+                                RuntimeCallableReference,
+                            ):
+                                raise PersistenceError(
+                                    f"Saved function in block '{block.registration_name}' has no callable reference"
+                                )
+                            function_source = cls._restore_runtime_registered_callable(
+                                runtime_reference,
+                                block.registration_name,
+                            )
                         registration = block._register_function_strict(
-                            function_payload["import_path"],
+                            function_source,
                             function_payload["output_names"],
                             function_payload["save_to_disk"],
                             param_mapping=function_payload.get("param_mapping"),
@@ -823,7 +1151,7 @@ class PipelineHandler:
         cache = {} if cache is None else cache
         return {
             "registration_name": self.registration_name,
-            "config": self.config,
+            "config": self._serialize_config_for_save(self.config),
             "execution_priority": self.execution_priority,
             "saved_project_root": str(self.project_root),
             "pipeline_backup_directory": (
@@ -831,6 +1159,7 @@ class PipelineHandler:
                 if self.pipeline_backup_root is None
                 else str(self.pipeline_backup_root)
             ),
+            "expression_runtime_code": self.expression_runtime_code,
             "memory_saving_mode": self.memory_saving_mode,
             "memory_profile_logging": self.memory_profile_logging,
             "historical_result_log_path": self.historical_result_log_path,
@@ -935,6 +1264,12 @@ class PipelineHandler:
         output_name: str,
         sibling_outputs: dict[str, Any] | None = None,
     ) -> Any:
+        if callable(value):
+            return self._serialize_callable_runtime_value(
+                value,
+                node_name,
+                output_name,
+            )
         try:
             import torch  # type: ignore
 
@@ -994,6 +1329,67 @@ class PipelineHandler:
                 reason="not directly serializable during save_pipeline",
             )
 
+    def _serialize_callable_runtime_value(
+        self,
+        value: Any,
+        node_name: str,
+        output_name: str,
+    ) -> Any:
+        try:
+            _, import_path, callable_name = resolve_callable(value)
+        except RegistrationError:
+            import_path = None
+            callable_name = getattr(value, "__name__", type(value).__name__)
+        if (
+            import_path is None
+            or import_path.startswith("__main__.")
+            or not self._callable_reference_round_trips(value, import_path)
+        ):
+            warnings.warn(
+                f"Callable runtime value '{node_name}.{output_name}' is not importable; saving a reference placeholder instead.",
+                stacklevel=2,
+            )
+            return RuntimeValueReference(
+                type_name=type(value).__name__,
+                repr_text=repr(value),
+                reason="callable is not importable during save_pipeline",
+            )
+        return CallableValueReference(
+            callable_name=callable_name,
+            import_path=import_path,
+        )
+
+    @staticmethod
+    def _callable_reference_round_trips(value: Any, import_path: str) -> bool:
+        try:
+            resolved_callable, _, _ = resolve_callable(import_path)
+        except Exception:
+            return False
+        return resolved_callable is value
+
+    @staticmethod
+    def _restore_callable_value(reference: CallableValueReference) -> Any:
+        callable_obj, _, _ = resolve_callable(reference.import_path)
+        return callable_obj
+
+    @staticmethod
+    def _restore_runtime_registered_callable(
+        reference: RuntimeCallableReference,
+        block_name: str,
+    ) -> Any:
+        main_module = sys.modules.get("__main__")
+        callable_obj = (
+            None
+            if main_module is None
+            else getattr(main_module, reference.callable_name, None)
+        )
+        if not callable(callable_obj):
+            raise PersistenceError(
+                f"Required runtime callable '{reference.callable_name}' for block "
+                f"'{block_name}' is unavailable in __main__; import or define it before loading the pipeline"
+            )
+        return callable_obj
+
     def _find_linked_model_artifact(
         self,
         cache: dict[int, Any],
@@ -1051,8 +1447,9 @@ class PipelineHandler:
     def _serialize_payload(self) -> dict[str, Any]:
         return {
             "registration_name": self.registration_name,
-            "config": self.config,
+            "config": self._serialize_config_for_save(self.config),
             "execution_priority": self.execution_priority,
+            "expression_runtime_code": self.expression_runtime_code,
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node(node) for node in self._sorted_nodes()],
@@ -1061,6 +1458,94 @@ class PipelineHandler:
             "artifact_registry": self.artifact_registry,
             "run_history": self.run_history,
         }
+
+    @staticmethod
+    def _serialize_config_for_save(config: Any) -> Any:
+        return PipelineHandler._serialize_config_value(config)
+
+    @staticmethod
+    def _serialize_config_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                "__pipeline_serialized_config__": True,
+                "kind": "dict",
+                "data": {
+                    key: PipelineHandler._serialize_config_value(item)
+                    for key, item in value.items()
+                },
+            }
+        if is_dataclass(value) and not isinstance(value, type):
+            return {
+                "__pipeline_serialized_config__": True,
+                "kind": "namespace",
+                "class_name": type(value).__name__,
+                "data": {
+                    key: PipelineHandler._serialize_config_value(item)
+                    for key, item in PipelineHandler._config_object_as_dict(value).items()
+                },
+            }
+        if hasattr(value, "__dict__"):
+            return {
+                "__pipeline_serialized_config__": True,
+                "kind": "namespace",
+                "class_name": type(value).__name__,
+                "data": {
+                    key: PipelineHandler._serialize_config_value(item)
+                    for key, item in vars(value).items()
+                },
+            }
+        if isinstance(value, list):
+            return [PipelineHandler._serialize_config_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(PipelineHandler._serialize_config_value(item) for item in value)
+        return value
+
+    @staticmethod
+    def _deserialize_saved_config(saved_config: Any) -> Any:
+        return PipelineHandler._deserialize_config_value(saved_config)
+
+    @staticmethod
+    def _deserialize_config_value(value: Any) -> Any:
+        if not (
+            isinstance(value, dict)
+            and value.get("__pipeline_serialized_config__") is True
+        ):
+            if isinstance(value, dict):
+                return {
+                    key: PipelineHandler._deserialize_config_value(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, list):
+                return [PipelineHandler._deserialize_config_value(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(PipelineHandler._deserialize_config_value(item) for item in value)
+            return value
+        kind = value.get("kind")
+        if kind == "dict":
+            return {
+                key: PipelineHandler._deserialize_config_value(item)
+                for key, item in dict(value.get("data", {})).items()
+            }
+        if kind == "namespace":
+            config = SimpleNamespace(
+                **{
+                    key: PipelineHandler._deserialize_config_value(item)
+                    for key, item in dict(value.get("data", {})).items()
+                }
+            )
+            return config
+        return value
+
+    @staticmethod
+    def _config_object_as_dict(config_obj: Any) -> dict[str, Any]:
+        config_dict = asdict(config_obj)
+        extra_attrs = {
+            key: value
+            for key, value in vars(config_obj).items()
+            if key not in config_dict
+        }
+        config_dict.update(extra_attrs)
+        return config_dict
 
     def _serialize_node(self, node: Any) -> dict[str, Any]:
         if isinstance(node, PipelineHandler):
@@ -1074,14 +1559,17 @@ class PipelineHandler:
         for registration in node.functions:
             match registration:
                 case FunctionRegistration():
-                    if registration.import_path is None:
-                        raise PersistenceError(
-                            f"Function '{registration.function_name}' is not importable; save/load requires importable callables"
-                        )
                     functions.append(
                         {
                             "kind": "function",
                             "import_path": registration.import_path,
+                            "runtime_callable_reference": (
+                                None
+                                if registration.import_path is not None
+                                else RuntimeCallableReference(
+                                    callable_name=registration.function_name
+                                )
+                            ),
                             "output_names": registration.output_names,
                             "save_to_disk": sorted(registration.save_to_disk),
                             "param_mapping": registration.param_mapping,
@@ -1248,6 +1736,10 @@ class PipelineHandler:
     def _validate_output_names_against_config(self, output_names: list[str]) -> None:
         if not output_names:
             return
+        self._validate_builtin_name_conflicts_in_mapping(
+            {output_name: None for output_name in output_names},
+            owner_label="pipeline value",
+        )
         conflicts = set(output_names).intersection(self._visible_config_names())
         if conflicts:
             raise RegistrationError(
@@ -1707,7 +2199,10 @@ class PipelineHandler:
             return node._required_input_names_for_pipeline()
         required = set()
         for registration in node.functions:
-            required.update(registration.input_names)
+            if isinstance(registration, ExpressionRegistration):
+                required.update(node._effective_expression_input_names(registration))
+            else:
+                required.update(registration.input_names)
             var_pos_name = getattr(registration, "var_pos_name", None)
             if var_pos_name is not None:
                 required.add(var_pos_name)
@@ -1859,16 +2354,19 @@ class PipelineHandler:
                 continue
 
             input_name = registration.param_mapping.get(parameter.name, parameter.name)
-            value = self._resolve_named_input(
-                input_name,
-                registration.function_name,
-                overrides,
-                visible_outputs,
-                parent_config,
-                defaults,
-                loaded_artifacts,
-                declared_output_names,
-            )
+            if input_name is None:
+                value = None
+            else:
+                value = self._resolve_named_input(
+                    input_name,
+                    registration.function_name,
+                    overrides,
+                    visible_outputs,
+                    parent_config,
+                    defaults,
+                    loaded_artifacts,
+                    declared_output_names,
+                )
 
             if parameter.kind == inspect.Parameter.POSITIONAL_ONLY or (
                 parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
@@ -1924,6 +2422,8 @@ class PipelineHandler:
         if isinstance(value, ArtifactRecord):
             value = self.artifact_store.load(value)
             loaded_artifacts.append(input_name)
+        if isinstance(value, CallableValueReference):
+            value = self._restore_callable_value(value)
         return value
 
     def _config_has_field(self, config_obj: Any, field_name: str) -> bool:
@@ -1941,6 +2441,32 @@ class PipelineHandler:
         if isinstance(config_obj, dict):
             return config_obj[field_name]
         return getattr(config_obj, field_name)
+
+    @staticmethod
+    def _config_name_mapping(config_obj: Any) -> dict[str, Any]:
+        if is_dataclass(config_obj) and not isinstance(config_obj, type):
+            return PipelineHandler._config_object_as_dict(config_obj)
+        if isinstance(config_obj, dict):
+            return dict(config_obj)
+        if hasattr(config_obj, "__dict__"):
+            return dict(vars(config_obj))
+        return {}
+
+    @staticmethod
+    def _validate_builtin_name_conflict(name: str, owner_label: str) -> None:
+        if name in _RESERVED_BUILTIN_NAMES:
+            raise RegistrationError(
+                f"{owner_label.capitalize()} name '{name}' conflicts with a reserved Python builtin"
+            )
+
+    @classmethod
+    def _validate_builtin_name_conflicts_in_mapping(
+        cls,
+        values: dict[str, Any],
+        owner_label: str,
+    ) -> None:
+        for name in values:
+            cls._validate_builtin_name_conflict(name, owner_label)
 
     def _set_config_value(self, field_name: str, value: Any) -> None:
         if is_dataclass(self.config) and not isinstance(self.config, type):
@@ -2005,7 +2531,7 @@ class PipelineHandler:
 
     def _persist_config_snapshot(self, path: Path) -> None:
         with path.open("wb") as handle:
-            pickle.dump(self.config, handle)
+            pickle.dump(self._serialize_config_for_save(self.config), handle)
 
     def _attach_to_parent(self, parent: "PipelineHandler", execution_priority: float) -> None:
         # Registration moves the child's working tree underneath the parent project root.
@@ -2043,6 +2569,7 @@ class PipelineHandler:
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)
+        self._cleanup_temporary_root_handle()
 
     def _sync_attached_outputs_to_parent(self) -> None:
         if self.parent_pipeline is None or self.execution_priority is None:
@@ -2240,9 +2767,14 @@ class PipelineHandler:
     ) -> list[str]:
         visible_output_names = self._declared_output_names_before_priority(priority)
         visible_config_names = self._visible_config_names()
+        input_names = (
+            block._effective_expression_input_names(registration)
+            if block is not None and isinstance(registration, ExpressionRegistration)
+            else registration.input_names
+        )
         displayed = [
             name
-            for name in registration.input_names
+            for name in input_names
             if name in visible_output_names or name in visible_config_names
         ]
         var_pos_name = getattr(registration, "var_pos_name", None)

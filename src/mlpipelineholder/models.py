@@ -32,7 +32,7 @@ class FunctionRegistration:
     input_names: list[str]
     output_names: list[str]
     save_to_disk: set[str]
-    param_mapping: dict[str, str] = field(default_factory=dict)
+    param_mapping: dict[str, str | None] = field(default_factory=dict)
     var_pos_name: str | None = None
     var_kw_name: str | None = None
 
@@ -97,6 +97,21 @@ class RuntimeValueReference:
     type_name: str
     repr_text: str
     reason: str
+
+
+@dataclass(slots=True)
+class CallableValueReference:
+    """Reference to an importable callable stored as a pipeline value."""
+
+    callable_name: str
+    import_path: str
+
+
+@dataclass(slots=True)
+class RuntimeCallableReference:
+    """Registered callable supplied by the runtime that loads the pipeline."""
+
+    callable_name: str
 
 
 @dataclass(slots=True)
