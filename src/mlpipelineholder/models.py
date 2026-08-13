@@ -109,8 +109,6 @@ class CallableValueReference:
 
 @dataclass(slots=True)
 class RuntimeCallableReference:
-    """Registered callable supplied by the runtime that loads the pipeline."""
-
     callable_name: str
 
 

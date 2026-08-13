@@ -176,6 +176,105 @@ class SaveLoadTests(unittest.TestCase):
             elif hasattr(__main__, "partial"):
                 delattr(__main__, "partial")
 
+    def test_registered_partial_restores_main_callable_value_before_execution(self) -> None:
+        namespace: dict[str, object] = {}
+        exec(
+            "def runtime_increment(value: int) -> int:\n"
+            "    return value + 1\n",
+            __main__.__dict__,
+            namespace,
+        )
+        runtime_increment = namespace["runtime_increment"]
+        existing_partial = getattr(__main__, "partial", None)
+        had_existing_partial = hasattr(__main__, "partial")
+        setattr(__main__, "partial", partial)
+        setattr(__main__, "runtime_increment", runtime_increment)
+
+        try:
+            with TemporaryDirectory() as temp_dir:
+                tmp_path = Path(temp_dir)
+                pipeline = PipelineHandler(
+                    "persist-main-partial-value",
+                    SaveConfig(value=2),
+                    tmp_path / "project",
+                )
+                pipeline.set_value("target_callable", runtime_increment)
+                pipeline.create_atom_child_pipeline(
+                    child_name="bind_runtime_callable",
+                    execution_priority=1,
+                    target_function=partial,
+                    output_variable_names="bound_callable",
+                    param_mapping={"func": "target_callable"},
+                    kwargs_dct={"value": "value"},
+                )
+
+                save_dir = tmp_path / "bundle"
+                pipeline.save_pipeline(save_dir)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded.run_all()
+
+                self.assertIs(loaded.get_value("target_callable"), runtime_increment)
+                self.assertEqual(loaded.get_value("bound_callable")(), 3)
+        finally:
+            if had_existing_partial:
+                setattr(__main__, "partial", existing_partial)
+            elif hasattr(__main__, "partial"):
+                delattr(__main__, "partial")
+            if hasattr(__main__, "runtime_increment"):
+                delattr(__main__, "runtime_increment")
+
+    def test_registered_partial_restores_main_callable_config_before_execution(self) -> None:
+        namespace: dict[str, object] = {}
+        exec(
+            "def runtime_increment(value: int) -> int:\n"
+            "    return value + 1\n",
+            __main__.__dict__,
+            namespace,
+        )
+        runtime_increment = namespace["runtime_increment"]
+        existing_partial = getattr(__main__, "partial", None)
+        had_existing_partial = hasattr(__main__, "partial")
+        setattr(__main__, "partial", partial)
+        setattr(__main__, "runtime_increment", runtime_increment)
+
+        try:
+            with TemporaryDirectory() as temp_dir:
+                tmp_path = Path(temp_dir)
+                pipeline = PipelineHandler(
+                    "persist-main-partial-config",
+                    {
+                        "value": 2,
+                        "target_callable": runtime_increment,
+                    },
+                    tmp_path / "project",
+                )
+                pipeline.create_atom_child_pipeline(
+                    child_name="bind_runtime_callable",
+                    execution_priority=1,
+                    target_function=partial,
+                    output_variable_names="bound_callable",
+                    param_mapping={"func": "target_callable"},
+                    kwargs_dct={"value": "value"},
+                )
+
+                save_dir = tmp_path / "bundle"
+                pipeline.save_pipeline(save_dir)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded.run_all()
+
+                self.assertIs(
+                    loaded.get_config_value("target_callable"),
+                    runtime_increment,
+                )
+                self.assertEqual(loaded.get_value("bound_callable")(), 3)
+        finally:
+            if had_existing_partial:
+                setattr(__main__, "partial", existing_partial)
+            elif hasattr(__main__, "partial"):
+                delattr(__main__, "partial")
+            if hasattr(__main__, "runtime_increment"):
+                delattr(__main__, "runtime_increment")
+
     def test_mapping_metadata_round_trips_for_variadic_function(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -420,7 +519,7 @@ class SaveLoadTests(unittest.TestCase):
 
             self.assertIsInstance(loaded.get_value("callable_value"), RuntimeValueReference)
 
-    def test_main_callable_value_loads_as_reference_placeholder(self) -> None:
+    def test_main_callable_value_restores_from_loading_runtime(self) -> None:
         namespace: dict[str, object] = {}
         exec(
             "def main_increment(value: int) -> int:\n"
@@ -440,7 +539,39 @@ class SaveLoadTests(unittest.TestCase):
                 pipeline.save_project(save_dir)
                 loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-                self.assertIsInstance(loaded.get_value("callable_value"), RuntimeValueReference)
+                self.assertIs(loaded.get_value("callable_value"), namespace["main_increment"])
+        finally:
+            if hasattr(__main__, "main_increment"):
+                delattr(__main__, "main_increment")
+
+    def test_main_callable_value_must_be_available_during_load(self) -> None:
+        namespace: dict[str, object] = {}
+        exec(
+            "def main_increment(value: int) -> int:\n"
+            "    return value + 1\n",
+            __main__.__dict__,
+            namespace,
+        )
+        setattr(__main__, "main_increment", namespace["main_increment"])
+
+        try:
+            with TemporaryDirectory() as temp_dir:
+                tmp_path = Path(temp_dir)
+                pipeline = PipelineHandler(
+                    "persist-main-callable",
+                    SaveConfig(value=2),
+                    tmp_path / "project",
+                )
+                pipeline.set_value("callable_value", __main__.main_increment)
+                save_dir = tmp_path / "bundle"
+                pipeline.save_project(save_dir)
+                delattr(__main__, "main_increment")
+
+                with self.assertRaisesRegex(
+                    PersistenceError,
+                    "main_increment.*pipeline value 'callable_value'.*__main__.*before loading",
+                ):
+                    PipelineHandler.load_project(save_dir, forced_deleting=True)
         finally:
             if hasattr(__main__, "main_increment"):
                 delattr(__main__, "main_increment")

@@ -313,7 +313,7 @@ Saved projects contain:
 - disk-backed outputs under `artifacts/`
 - logs and configuration snapshots under `metadata/`
 
-Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables must be defined or imported under the same name before calling `load_pipeline(...)`. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
+Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_value(...)` or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
 

@@ -1124,10 +1124,25 @@ class PipelineHandler:
                 child.parent_pipeline = pipeline
                 child.logger = pipeline.logger
                 pipeline._register_node(child)
-        pipeline.producer_outputs = payload.get("producer_outputs", {})
-        pipeline.manual_values = payload.get("manual_values", {})
-        pipeline.para_value_dict = payload.get("para_value_dict", {})
-        pipeline.artifact_registry = payload.get("artifact_registry", {})
+        pipeline.producer_outputs = {
+            node_name: cls._restore_saved_runtime_mapping(
+                outputs,
+                owner_label=f"outputs from '{node_name}'",
+            )
+            for node_name, outputs in payload.get("producer_outputs", {}).items()
+        }
+        pipeline.manual_values = cls._restore_saved_runtime_mapping(
+            payload.get("manual_values", {}),
+            owner_label="pipeline value",
+        )
+        pipeline.para_value_dict = cls._restore_saved_runtime_mapping(
+            payload.get("para_value_dict", {}),
+            owner_label="pipeline state value",
+        )
+        pipeline.artifact_registry = cls._restore_saved_runtime_mapping(
+            payload.get("artifact_registry", {}),
+            owner_label="artifact registry value",
+        )
         pipeline.run_history = payload.get("run_history", [])
         saved_project_root = payload.get("saved_project_root")
         if saved_project_root is not None:
@@ -1337,11 +1352,9 @@ class PipelineHandler:
         except RegistrationError:
             import_path = None
             callable_name = getattr(value, "__name__", type(value).__name__)
-        if (
-            import_path is None
-            or import_path.startswith("__main__.")
-            or not self._callable_reference_round_trips(value, import_path)
-        ):
+        if import_path is not None and import_path.startswith("__main__."):
+            return RuntimeCallableReference(callable_name=callable_name)
+        if import_path is None or not self._callable_reference_round_trips(value, import_path):
             warnings.warn(
                 f"Callable runtime value '{node_name}.{output_name}' is not importable; saving a reference placeholder instead.",
                 stacklevel=2,
@@ -1369,10 +1382,29 @@ class PipelineHandler:
         callable_obj, _, _ = resolve_callable(reference.import_path)
         return callable_obj
 
+    @classmethod
+    def _restore_saved_runtime_mapping(
+        cls,
+        values: dict[str, Any],
+        owner_label: str,
+    ) -> dict[str, Any]:
+        restored: dict[str, Any] = {}
+        for value_name, value in values.items():
+            if isinstance(value, CallableValueReference):
+                restored[value_name] = cls._restore_callable_value(value)
+            elif isinstance(value, RuntimeCallableReference):
+                restored[value_name] = cls._restore_runtime_callable(
+                    value,
+                    f"{owner_label} '{value_name}'",
+                )
+            else:
+                restored[value_name] = value
+        return restored
+
     @staticmethod
-    def _restore_runtime_registered_callable(
+    def _restore_runtime_callable(
         reference: RuntimeCallableReference,
-        block_name: str,
+        owner_label: str,
     ) -> Any:
         main_module = sys.modules.get("__main__")
         callable_obj = (
@@ -1382,10 +1414,21 @@ class PipelineHandler:
         )
         if not callable(callable_obj):
             raise PersistenceError(
-                f"Required runtime callable '{reference.callable_name}' for block "
-                f"'{block_name}' is unavailable in __main__; import or define it before loading the pipeline"
+                f"Required runtime callable '{reference.callable_name}' for {owner_label} "
+                "is unavailable in __main__; import or define it before loading the pipeline"
             )
         return callable_obj
+
+    @classmethod
+    def _restore_runtime_registered_callable(
+        cls,
+        reference: RuntimeCallableReference,
+        block_name: str,
+    ) -> Any:
+        return cls._restore_runtime_callable(
+            reference,
+            f"block '{block_name}'",
+        )
 
     def _find_linked_model_artifact(
         self,
@@ -1462,6 +1505,31 @@ class PipelineHandler:
 
     @staticmethod
     def _serialize_config_value(value: Any) -> Any:
+        if callable(value):
+            try:
+                _, import_path, callable_name = resolve_callable(value)
+            except RegistrationError:
+                import_path = None
+                callable_name = getattr(value, "__name__", type(value).__name__)
+            if import_path is not None and import_path.startswith("__main__."):
+                return RuntimeCallableReference(callable_name=callable_name)
+            if (
+                import_path is not None
+                and PipelineHandler._callable_reference_round_trips(value, import_path)
+            ):
+                return CallableValueReference(
+                    callable_name=callable_name,
+                    import_path=import_path,
+                )
+            warnings.warn(
+                f"Callable config value '{callable_name}' is not importable; saving a reference placeholder instead.",
+                stacklevel=2,
+            )
+            return RuntimeValueReference(
+                type_name=type(value).__name__,
+                repr_text=repr(value),
+                reason="callable config value is not importable during save_pipeline",
+            )
         if isinstance(value, dict):
             return {
                 "__pipeline_serialized_config__": True,
@@ -1503,6 +1571,13 @@ class PipelineHandler:
 
     @staticmethod
     def _deserialize_config_value(value: Any) -> Any:
+        if isinstance(value, CallableValueReference):
+            return PipelineHandler._restore_callable_value(value)
+        if isinstance(value, RuntimeCallableReference):
+            return PipelineHandler._restore_runtime_callable(
+                value,
+                "configuration value",
+            )
         if not (
             isinstance(value, dict)
             and value.get("__pipeline_serialized_config__") is True

@@ -89,7 +89,7 @@ If a step uses a comprehension, you cannot register it via `register_expression`
 **Persistence Preflight**
 Registered stages with an import path are restored from that path. Registered stages without one are saved by callable name, and the loading notebook or script must import or define that callable under the same name in `__main__` before calling `load_pipeline(...)`.
 
-`target_function=functools.partial` supports save/load when `partial` is imported into the loading runtime first. Notebook-local functions, nested functions, lambdas, closures, and bound callables require an equivalent callable bound under the saved name. These references are runtime dependencies, not historical code snapshots. Callable values stored through `set_value(...)` retain their separate callable-value reference or inert placeholder behavior. Do not make unsupported claims about portability.
+`target_function=functools.partial` supports save/load when `partial` is imported into the loading runtime first. Notebook-local functions and runtime-only callable values stored through `set_value(...)` or produced upstream require an equivalent callable bound under the saved name before loading. Nested functions, lambdas, closures, and bound callables that have no reliable runtime name remain non-portable placeholders. These references are runtime dependencies, not historical code snapshots. Do not make unsupported claims about portability.
 
 When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading restores that backup into the canonical working directory. This copies project data, not Python source, installed packages, or the runtime environment.
 
