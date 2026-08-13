@@ -385,9 +385,15 @@ history = pipeline.get_result_history()
 pipeline.print_result_history()
 pipeline.clear_result_history()
 pipeline.set_print_capture_mode("tee")
+
+# Optional: pause and resume file logging.
+pipeline.logger.disable_file_logging()
+pipeline.logger.enable_file_logging()
 ```
 
 `clear_result_history()` only clears in-memory result history. It does not modify `metadata/pipeline.log`.
+
+Normal notebook use does not require manual logger cleanup. `disable_file_logging()` pauses writes to `metadata/pipeline.log` while console output and in-memory result history continue. `enable_file_logging()` resumes appending without clearing existing entries. Attached children share their parent logger and do not manage its lifetime.
 
 Print capture modes:
 

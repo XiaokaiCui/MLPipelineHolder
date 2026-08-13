@@ -140,10 +140,6 @@ class PipelineHandler:
 
     def __del__(self) -> None:
         try:
-            self.logger.close()
-        except Exception:
-            pass
-        try:
             self._cleanup_temporary_root_handle()
         except Exception:
             pass
@@ -955,7 +951,7 @@ class PipelineHandler:
             self._cleanup_temporary_root_handle()
             return
         self.logger.flush()
-        self.logger.close()
+        self.logger.disable_file_logging()
         new_root.mkdir(parents=True, exist_ok=True)
         for entry in old_root.iterdir():
             destination = new_root / entry.name

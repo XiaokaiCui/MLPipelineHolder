@@ -77,6 +77,19 @@ class PipelineLogger:
         with self._lock:
             self._close_file_handle()
 
+    def disable_file_logging(self) -> None:
+        with self._lock:
+            self._file_logging_enabled = False
+            self._close_file_handle()
+
+    def enable_file_logging(self) -> None:
+        with self._lock:
+            if self._file_handle is None or self._file_handle.closed:
+                self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+                self._file_handle = self.log_file_path.open("a", encoding="utf-8")
+            self._file_logging_enabled = True
+            self._file_logging_warning_printed = False
+
     def rebind_path(self, log_file_path: str | Path) -> None:
         with self._lock:
             self._close_file_handle()
@@ -123,6 +136,7 @@ class PipelineLogger:
     def _close_file_handle(self) -> None:
         if self._file_handle is not None and not self._file_handle.closed:
             self._file_handle.close()
+        self._file_handle = None
 
     def _colorize(self, level: str, entry: str) -> str:
         color_map = {
