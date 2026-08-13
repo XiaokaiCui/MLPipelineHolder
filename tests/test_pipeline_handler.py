@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import MagicMock
 from unittest.mock import patch
 import warnings
+import weakref
 
 from src import GateBlock as TopLevelGateBlock
 from src.mlpipelineholder import ExecutionError, GateBlock, PersistenceError, PipelineHandler, RegistrationError, ResolutionError
@@ -512,6 +514,66 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIsNotNone(first_handle)
             self.assertIs(first_handle, second_handle)
+
+    def test_logger_disable_keeps_console_and_result_history_active(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("before-disable")
+            pipeline.logger.disable_file_logging()
+
+            captured_stdout = StringIO()
+            with patch("src.mlpipelineholder.logger.sys_stdout", captured_stdout):
+                pipeline.logger.info("console-only")
+                pipeline.logger.result("history-only")
+
+            log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("before-disable", log_text)
+            self.assertNotIn("console-only", log_text)
+            self.assertNotIn("history-only", log_text)
+            self.assertIn("console-only", captured_stdout.getvalue())
+            self.assertTrue(
+                any("history-only" in line for line in pipeline.get_result_history())
+            )
+
+    def test_logger_enable_resumes_appending_to_existing_log(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("before-disable")
+            pipeline.logger.disable_file_logging()
+            pipeline.logger.disable_file_logging()
+            pipeline.logger.enable_file_logging()
+            pipeline.logger.enable_file_logging()
+
+            pipeline.logger.info("after-enable")
+
+            log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("before-disable", log_text)
+            self.assertIn("after-enable", log_text)
+
+    def test_garbage_collected_replaced_child_does_not_close_parent_logger(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=1), tmp_path / "parent")
+            stale_child = PipelineHandler("child", DemoConfig(base=1), tmp_path / "stale")
+            parent.add_child_pipeline(stale_child, 1)
+            self.assertIs(stale_child.logger, parent.logger)
+
+            replacement = PipelineHandler(
+                "child",
+                DemoConfig(base=1),
+                tmp_path / "replacement",
+            )
+            parent.add_child_pipeline(replacement, 1, forced=True)
+            stale_child_reference = weakref.ref(stale_child)
+            del stale_child
+            gc.collect()
+
+            self.assertIsNone(stale_child_reference())
+            parent.logger.info("parent-after-stale-child-gc")
+            self.assertIn(
+                "parent-after-stale-child-gc",
+                parent.logger.log_file_path.read_text(encoding="utf-8"),
+            )
 
     def test_logger_disables_file_logging_after_oserror(self) -> None:
         with TemporaryDirectory() as temp_dir:
