@@ -6,7 +6,10 @@ from io import StringIO
 from pathlib import Path
 import re
 import shutil
+import sys
 from tempfile import TemporaryDirectory
+import threading
+from typing import NoReturn
 import unittest
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -112,6 +115,12 @@ def print_step(seed: int) -> int:
 def another_print_step(seed: int) -> int:
     print(f"another-printed-seed={seed}")
     return seed + 1
+
+
+def interrupting_print_step(executed_thread_ids: list[int]) -> NoReturn:
+    executed_thread_ids.append(threading.get_ident())
+    print("interrupting-print-step")
+    raise KeyboardInterrupt("stop single-function block")
 
 
 def debug_and_info_step(seed: int, logger) -> int:
@@ -1512,6 +1521,31 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertNotIn("printed-seed=5", output.getvalue())
             self.assertIn(" PRINT printed-seed=5", log_text)
 
+    def test_single_function_print_capture_restores_stdout_after_keyboard_interrupt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("print", {}, tmp_path)
+            interrupting_block = pipeline.add_block("interrupting", 1)
+            interrupting_block.register_function(interrupting_print_step, ["never_written"])
+            executed_thread_ids: list[int] = []
+            pipeline.set_value("executed_thread_ids", executed_thread_ids)
+            caller_thread_id = threading.get_ident()
+
+            # Given: a patched stdout and a single-function block that prints then interrupts.
+            output = StringIO()
+
+            # When: the block runs under print capture.
+            with patch("sys.stdout", output):
+                self.assertIs(sys.stdout, output)
+                with self.assertRaises(KeyboardInterrupt):
+                    pipeline.run_block("interrupting")
+
+                # Then: patched stdout remains active for the caller after cleanup.
+                self.assertIs(sys.stdout, output)
+
+            # Then: execution should have happened on the caller thread.
+            self.assertEqual(executed_thread_ids, [caller_thread_id])
+
     def test_parallel_block_prints_are_not_redirect_logged(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1527,6 +1561,8 @@ class PipelineHandlerTests(unittest.TestCase):
                 pipeline.run_all()
 
             log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn("printed-seed=5", output.getvalue())
+            self.assertIn("another-printed-seed=5", output.getvalue())
             self.assertNotIn(" PRINT printed-seed=5", log_text)
             self.assertNotIn(" PRINT another-printed-seed=5", log_text)
 

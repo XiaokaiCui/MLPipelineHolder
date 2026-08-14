@@ -401,6 +401,8 @@ Print capture modes:
 - `logger_only`: capture `print(...)` output only into the pipeline log
 - `off`: leave normal `print(...)` behaviour unchanged
 
+Print capture applies to blocks with one registered function. These blocks run on the caller thread so manually interrupting them restores notebook stdout before returning control. Output buffered when the function is interrupted may not be added to the pipeline log. Blocks with multiple functions remain parallel and use normal stdout without adding their `print(...)` output to the pipeline log. Setting capture to `off` disables automatic print capture without disabling the pipeline logger.
+
 ### 13. Memory options
 
 You can enable optional runtime memory tools when creating a pipeline:
