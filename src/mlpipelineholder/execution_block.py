@@ -460,24 +460,39 @@ class ExecutionBlock:
                     f"which cannot be resolved during parallel execution: {sorted(same_block_dependencies)}"
                 )
 
-        futures = []
-        with ThreadPoolExecutor(max_workers=len(self.functions)) as executor:
-            for registration in self.functions:
-                futures.append(
-                    executor.submit(
-                        self._execute_function,
-                        registration,
-                        run_id,
-                        dict(visible_outputs),
-                        overrides or {},
-                        parent_config or {},
-                        len(self.functions) == 1,
-                    )
+        results: list[FunctionExecutionResult] = []
+        if len(self.functions) == 1:
+            registration = self.functions[0]
+            results.append(
+                self._execute_function(
+                    registration,
+                    run_id,
+                    dict(visible_outputs),
+                    overrides or {},
+                    parent_config or {},
+                    True,
                 )
+            )
+        else:
+            futures = []
+            with ThreadPoolExecutor(max_workers=len(self.functions)) as executor:
+                for registration in self.functions:
+                    futures.append(
+                        executor.submit(
+                            self._execute_function,
+                            registration,
+                            run_id,
+                            dict(visible_outputs),
+                            overrides or {},
+                            parent_config or {},
+                            False,
+                        )
+                    )
+            for future in futures:
+                results.append(future.result())
 
         produced_outputs: dict[str, Any] = {}
-        for future in futures:
-            result = future.result()
+        for result in results:
             for output_name, output_value in result.outputs.items():
                 if output_name in result.outputs and output_name in produced_outputs:
                     raise ExecutionError(
