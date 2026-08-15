@@ -317,6 +317,33 @@ Saved pipelines preserve callable references rather than historical source code.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
 
+### Recover one value or config field from backup
+
+A pipeline with a configured `pipeline_backup_directory` can restore one current item from its latest complete in-place backup:
+
+```python
+# Both methods update in place and return None.
+pipeline.recover_variable_from_backup(name="output_df")
+modeling_pipeline.recover_config_from_backup(name="learning_rate")
+```
+
+Recovery requires `pipeline_state.pkl`, `config.pkl`, and `pipeline_meta.pkl` plus every saved artifact referenced by the backup. The requested name must exist both in the live pipeline and in the matching saved pipeline state. The backup is inspected read-only; recovery never replaces the complete working tree.
+
+Variable recovery rules:
+
+- call `recover_variable_from_backup(...)` on the root pipeline only
+- if the same name is independently owned by multiple root/child pipelines, one prompt lists every affected pipeline; only `yes` or `y` applies the recovery to all of them
+- declining the prompt leaves all values unchanged and returns `None`
+- disk-backed values are copied into the live project, so they remain usable if the backup is later removed
+
+Config recovery rules:
+
+- call `recover_config_from_backup(...)` on the pipeline that locally owns the field
+- descendants inherit the restored field through normal config visibility unless they define their own local override
+- successful recovery preserves the config type and unrelated fields, but replaces the pipeline's config object with a staged copy
+
+Import or define runtime-only callables under their saved names before recovery, including functions used by `functools.partial`. Recovery resolves supported references to live objects and raises `PersistenceError` rather than installing an unresolved placeholder. Missing live or saved names raise `ResolutionError`; invalid, incomplete, unsafe, or unresolvable backup data raises `PersistenceError`. Failures leave current state unchanged. Recovery replaces only the requested item and does not invalidate or rerun derived outputs.
+
 ### 10. Print the pipeline chart
 
 ```python

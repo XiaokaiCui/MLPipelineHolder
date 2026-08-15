@@ -430,6 +430,11 @@ class PipelineHandler:
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
 
+    def recover_variable_from_backup(self, name: str) -> None:
+        from .backup_recovery_service import recover_variable_from_backup
+
+        recover_variable_from_backup(self, name)
+
     def get_full_config(self) -> dict[str, Any]:
         return dict(self._ancestor_config_values(), **self.config_as_dict())
 
@@ -438,6 +443,11 @@ class PipelineHandler:
         if field_name not in config:
             raise ResolutionError(f"Unknown config field: {field_name}")
         return config[field_name]
+
+    def recover_config_from_backup(self, name: str) -> None:
+        from .backup_recovery_service import recover_config_from_backup
+
+        recover_config_from_backup(self, name)
 
     def get_block(self, block_name: str) -> Any:
         node = self.nodes_by_name.get(block_name)

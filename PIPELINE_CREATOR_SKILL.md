@@ -93,6 +93,14 @@ Registered stages with an import path are restored from that path. Registered st
 
 When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading restores that backup into the canonical working directory. This copies project data, not Python source, installed packages, or the runtime environment.
 
+**Single-Item Backup Recovery**
+
+Use `root_pipeline.recover_variable_from_backup(name=...)` only when the root has a configured backup directory and a complete in-place save. The name must exist in both current and saved state. If independently owned same-name values exist across the attached tree, the method lists all affected pipeline paths and requires `yes` or `y`; refusal is a no-op. The method updates in place, returns `None`, clones disk-backed data into the live project, and does not rerun or invalidate derived outputs.
+
+Use `selected_pipeline.recover_config_from_backup(name=...)` only for a field locally owned by that selected pipeline in both current and saved state. Existing config inheritance applies to descendants, while descendant local overrides remain unchanged. The method returns `None` and swaps in a staged config copy after validation.
+
+Before either recovery call, import or define runtime-only callables under their saved names. This includes functions supplied to `functools.partial`. Never claim that recovery can reconstruct `RuntimeValueReference` or missing-class placeholders: unresolved selected objects raise `PersistenceError` and leave live state untouched. Recovery requires current-format `pipeline_state.pkl`, `config.pkl`, and `pipeline_meta.pkl`; it reads the backup without restoring the whole project tree.
+
 ## Final Checks and Output Contract
 
 Before returning code, verify:
