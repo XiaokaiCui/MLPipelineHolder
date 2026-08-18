@@ -10,7 +10,6 @@ from .models import ArtifactRecord
 if TYPE_CHECKING:
     from .pipeline_handler import PipelineHandler
 
-type StoredValue = Any
 SlotMapping: TypeAlias = dict[str, Any]
 YesInput: TypeAlias = Callable[[str], str]
 
