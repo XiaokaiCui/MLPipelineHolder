@@ -234,7 +234,10 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   forced: <span class="arg">bool</span> = False,
   memory_saving_mode: <span class="arg">bool</span> = False,
   memory_profile_logging: <span class="arg">bool</span> = False,
-  pipeline_backup_directory: <span class="arg">str | Path | None</span> = None
+  pipeline_backup_directory: <span class="arg">str | Path | None</span> = None,
+  log_traceback_to_file: <span class="arg">bool</span> = True,
+  show_traceback_locals: <span class="arg">bool</span> = False,
+  use_rich_traceback_console: <span class="arg">bool</span> = True
 ) -&gt; <span class="ret">None</span>
 </div>
 
@@ -249,6 +252,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>memory_saving_mode</code></td><td>bool</td><td>Best-effort cleanup of intermediate values after each block finishes.</td></tr>
   <tr><td><code>memory_profile_logging</code></td><td>bool</td><td>Log memory usage after computation and cleanup for each block.</td></tr>
   <tr><td><code>pipeline_backup_directory</code></td><td>str | Path | None</td><td>Optional backup directory used by backup-aware save/load and single-item recovery. Must not overlap the working directory.</td></tr>
+  <tr><td><code>log_traceback_to_file</code></td><td>bool</td><td>Append the plain stdlib traceback to <code>metadata/pipeline.log</code> when a run fails.</td></tr>
+  <tr><td><code>show_traceback_locals</code></td><td>bool</td><td>Show local variables in the Rich console traceback.</td></tr>
+  <tr><td><code>use_rich_traceback_console</code></td><td>bool</td><td>Render console tracebacks with Rich instead of plain stdlib text.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
@@ -359,6 +365,8 @@ rate = pipeline.get_constant_value("learning_rate")</pre>
 <div class="sig"><span class="kw">save_pipeline</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None) -&gt; <span class="ret">Path</span></div>
 <p>Saves the pipeline project tree. Without <code>path</code>, saves to the current <code>project_root</code>. Passing a different path creates a restart-safe copy of the current project tree (including nested children and disk-backed artifacts) before writing fresh state. The target must not overlap the current project tree.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, an in-place save also refreshes the backup copy.</p>
+<p>Every call also archives a timestamped copy of the current <code>pipeline.log</code> into <code>history_logs/</code> inside the project root (e.g. <code>history_logs/2026-08-18_16-38-14.857.log</code>, UTC, <code>yyyy-mm-dd_hh-mm-ss.mmm</code>), preserving the save-time log snapshot even though loading a pipeline starts a fresh <code>pipeline.log</code>.</p>
+<p>When a <code>pipeline_backup_directory</code> is configured, the refreshed backup copy also receives the updated <code>history_logs/</code> folder. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
 
 <h4 class="method-name" id="PipelineHandler.save_project">save_project()</h4>
 <div class="sig"><span class="kw">save_project</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None) -&gt; <span class="ret">Path</span></div>
@@ -618,7 +626,12 @@ block.register_function(
 <h3 class="class-name" id="PipelineLogger">PipelineLogger</h3>
 <p class="class-desc">Small UTC logger that writes to disk and keeps in-memory RESULT history.</p>
 <div class="sig">
-<span class="kw">class</span> mlpipelineholder.PipelineLogger(log_file_path: <span class="arg">str | Path</span>) -&gt; <span class="ret">None</span>
+<span class="kw">class</span> mlpipelineholder.PipelineLogger(
+  log_file_path: <span class="arg">str | Path</span>,
+  log_traceback_to_file: <span class="arg">bool</span> = True,
+  show_traceback_locals: <span class="arg">bool</span> = False,
+  use_rich_traceback_console: <span class="arg">bool</span> = True
+) -&gt; <span class="ret">None</span>
 </div>
 <p>Every pipeline owns one logger; attached children share their parent's logger and do not manage its lifetime. Every log line includes a UTC timestamp.</p>
 
@@ -626,6 +639,26 @@ block.register_function(
 <div class="sig"><span class="kw">debug</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">info</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">warning</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <div class="sig"><span class="kw">error</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">critical</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Log a message at the given level. All lines are appended to <code>metadata/pipeline.log</code> and forwarded to the parent logger when attached.</p>
+
+<h4 class="method-name" id="PipelineLogger.log_exception">log_exception()</h4>
+<div class="sig"><span class="kw">log_exception</span>(exc: <span class="arg">BaseException</span>, message: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
+<p>Logs an <code>ERROR</code> entry for an exception. The message defaults to <code>repr(exc)</code>. When <code>log_traceback_to_file</code> is enabled the plain stdlib traceback (never Rich formatting or ANSI codes) is appended to the log file. The console receives a Rich-rendered traceback by default (falling back to plain stdlib text when <code>use_rich_traceback_console</code> is disabled), subject to the current log level.</p>
+
+<h4 class="method-name" id="PipelineLogger.set_traceback_writing">set_traceback_writing()</h4>
+<div class="sig"><span class="kw">set_traceback_writing</span>(enable: <span class="arg">bool</span> = True) -&gt; <span class="ret">None</span></div>
+<p>Toggles appending the traceback body to the log file on <code>log_exception()</code>. The <code>ERROR</code> header line is always written.</p>
+
+<h4 class="method-name" id="PipelineLogger.set_show_traceback_locals">set_show_traceback_locals()</h4>
+<div class="sig"><span class="kw">set_show_traceback_locals</span>(enable: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
+<p>Toggles local-variable display in Rich console tracebacks.</p>
+
+<h4 class="method-name" id="PipelineLogger.set_traceback_console_render">set_traceback_console_render()</h4>
+<div class="sig"><span class="kw">set_traceback_console_render</span>(use_rich: <span class="arg">bool</span> = True) -&gt; <span class="ret">None</span></div>
+<p>Selects Rich (default) or plain stdlib text for console tracebacks.</p>
+
+<h4 class="method-name" id="PipelineLogger.get_traceback_settings">get_traceback_settings()</h4>
+<div class="sig"><span class="kw">get_traceback_settings</span>() -&gt; <span class="ret">dict[str, bool]</span></div>
+<p>Returns the current traceback settings: <code>log_traceback_to_file</code>, <code>show_traceback_locals</code>, and <code>use_rich_traceback_console</code>.</p>
 
 <h4 class="method-name" id="PipelineLogger.result">result()</h4>
 <div class="sig"><span class="kw">result</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
@@ -662,6 +695,18 @@ block.register_function(
 <h4 class="method-name" id="PipelineLogger.rebind_path">rebind_path()</h4>
 <div class="sig"><span class="kw">rebind_path</span>(log_file_path: <span class="arg">str | Path</span>) -&gt; <span class="ret">None</span></div>
 <p>Points the logger at a different log file path.</p>
+
+<h4 class="method-name" id="PipelineLogger.show_recent_logs">show_recent_logs()</h4>
+<div class="sig"><span class="kw">show_recent_logs</span>(lines: <span class="arg">int</span> = 5, log_level: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
+<p>Prints the latest <code>lines</code> entries of the current log file, resolved from the root pipeline. When <code>log_level</code> is given (<code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code>, <code>CRITICAL</code>, <code>RESULT</code>, or <code>PRINT</code>, case-insensitive), only entries at that level are shown and the <code>lines</code> limit applies after the level filter.</p>
+
+<h4 class="method-name" id="PipelineLogger.list_history_logs">list_history_logs()</h4>
+<div class="sig"><span class="kw">list_history_logs</span>() -&gt; <span class="ret">list[Path]</span></div>
+<p>Returns the log snapshots saved in the root pipeline's <code>history_logs/</code> folder, sorted by name.</p>
+
+<h4 class="method-name" id="PipelineLogger.show_history_log">show_history_log()</h4>
+<div class="sig"><span class="kw">show_history_log</span>(file_name: <span class="arg">str | Path</span>, line_starts: <span class="arg">int</span> = 0, line_ends: <span class="arg">int | None</span> = None, log_level: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
+<p>Prints lines <code>[line_starts, line_ends)</code> of a history log snapshot; <code>line_ends=None</code> prints to the end of the file. When <code>log_level</code> is given (<code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code>, <code>CRITICAL</code>, <code>RESULT</code>, or <code>PRINT</code>, case-insensitive), only entries at that level within the range are shown; the range always refers to file line numbers.</p>
 
 <h4 class="method-name" id="PipelineLogger.flush">flush()</h4>
 <div class="sig"><span class="kw">flush</span>() -&gt; <span class="ret">None</span></div>

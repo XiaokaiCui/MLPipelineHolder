@@ -276,6 +276,31 @@ class BackupSnapshotTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 snapshot.validate_selected_artifacts(missing)
 
+    def test_in_place_save_syncs_history_logs_into_backup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work_root = tmp_path / "work"
+            backup_root = tmp_path / "backup"
+            root = PipelineHandler(
+                "root",
+                SnapshotConfig(base=2),
+                work_root,
+                pipeline_backup_directory=backup_root,
+            )
+            setup = cast(BlockProtocol, root.add_block("setup", 1))
+            _ = setup.register_function(produce_seed, ["seed"])
+            _ = root.run_all()
+            _ = root.save_pipeline()
+            _ = root.save_pipeline()
+
+            work_snapshots = sorted(work_root.joinpath("history_logs").glob("*.log"))
+            backup_snapshots = sorted(backup_root.joinpath("history_logs").glob("*.log"))
+            self.assertEqual(len(work_snapshots), 2)
+            self.assertEqual(
+                [snapshot.name for snapshot in backup_snapshots],
+                [snapshot.name for snapshot in work_snapshots],
+            )
+
 
 if __name__ == "__main__":
     _ = unittest.main()
