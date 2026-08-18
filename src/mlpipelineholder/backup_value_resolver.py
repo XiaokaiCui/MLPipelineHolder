@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from types import SimpleNamespace
+import sys
+
+from .exceptions import PersistenceError, RegistrationError, ResolutionError
+from .function_registry import resolve_callable
+from .models import CallableValueReference, RuntimeCallableReference, RuntimeValueReference
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolutionContext:
+    selection_label: str
+    is_missing_main_placeholder: Callable[[object], bool]
+
+
+def resolve_saved_root_variable(
+    saved_root_payload: Mapping[str, object],
+    name: str,
+    *,
+    is_missing_main_placeholder: Callable[[object], bool],
+) -> object:
+    selected_value = _select_root_visible_value(saved_root_payload, name)
+    return _resolve_selected_value(
+        selected_value,
+        selection_label=f"saved pipeline value '{name}'",
+        is_missing_main_placeholder=is_missing_main_placeholder,
+    )
+
+
+def resolve_saved_config_field(
+    saved_pipeline_payload: Mapping[str, object],
+    name: str,
+    *,
+    is_missing_main_placeholder: Callable[[object], bool],
+) -> object:
+    selected_value = _select_local_config_field(saved_pipeline_payload, name)
+    return _resolve_selected_value(
+        selected_value,
+        selection_label=f"saved config field '{name}'",
+        is_missing_main_placeholder=is_missing_main_placeholder,
+    )
+
+
+def _resolve_selected_value(
+    selected_value: object,
+    *,
+    selection_label: str,
+    is_missing_main_placeholder: Callable[[object], bool],
+) -> object:
+    context = _ResolutionContext(
+        selection_label=selection_label,
+        is_missing_main_placeholder=is_missing_main_placeholder,
+    )
+    try:
+        return _resolve_selected_graph(selected_value, context, {})
+    except PersistenceError as exc:
+        raise PersistenceError(
+            f"Failed to resolve {selection_label} from backup"
+        ) from exc
+
+
+def _select_root_visible_value(saved_pipeline_payload: Mapping[str, object], name: str) -> object:
+    local_values = saved_pipeline_payload.get("para_value_dict")
+    if isinstance(local_values, Mapping) and name in local_values:
+        return local_values[name]
+    for child_payload in _child_pipeline_payloads(saved_pipeline_payload):
+        child_values = child_payload.get("para_value_dict")
+        if isinstance(child_values, Mapping) and name in child_values:
+            return child_values[name]
+        descendant_value = _select_descendant_visible_value(child_payload, name)
+        if descendant_value is not _MISSING:
+            return descendant_value
+    raise ResolutionError(f"Unknown pipeline value: {name}")
+
+
+def _select_descendant_visible_value(saved_pipeline_payload: Mapping[str, object], name: str) -> object:
+    for child_payload in _child_pipeline_payloads(saved_pipeline_payload):
+        child_values = child_payload.get("para_value_dict")
+        if isinstance(child_values, Mapping) and name in child_values:
+            return child_values[name]
+        descendant_value = _select_descendant_visible_value(child_payload, name)
+        if descendant_value is not _MISSING:
+            return descendant_value
+    return _MISSING
+
+
+def _child_pipeline_payloads(saved_pipeline_payload: Mapping[str, object]) -> list[Mapping[str, object]]:
+    child_payloads: list[Mapping[str, object]] = []
+    nodes = saved_pipeline_payload.get("nodes")
+    if not isinstance(nodes, list):
+        return child_payloads
+    for node in nodes:
+        match node:
+            case {"kind": "pipeline", "payload": dict() as payload}:
+                child_payloads.append({str(key): value for key, value in payload.items()})
+    return child_payloads
+
+
+def _select_local_config_field(saved_pipeline_payload: Mapping[str, object], name: str) -> object:
+    serialized_config = saved_pipeline_payload.get("config")
+    if not isinstance(serialized_config, Mapping):
+        raise ResolutionError(f"Unknown config field: {name}")
+    if serialized_config.get("__pipeline_serialized_config__") is not True:
+        raise ResolutionError(f"Unknown config field: {name}")
+    data = serialized_config.get("data")
+    if not isinstance(data, Mapping) or name not in data:
+        raise ResolutionError(f"Unknown config field: {name}")
+    return data[name]
+
+
+def _resolve_selected_graph(
+    value: object,
+    context: _ResolutionContext,
+    memo: dict[int, object],
+) -> object:
+    value_id = id(value)
+    cached = memo.get(value_id)
+    if cached is not None:
+        return cached
+
+    match value:
+        case CallableValueReference() as reference:
+            return _restore_callable_value(reference, context.selection_label)
+        case RuntimeCallableReference() as reference:
+            return _restore_runtime_callable(reference, context.selection_label)
+        case RuntimeValueReference() as reference:
+            raise PersistenceError(
+                f"Unsupported runtime placeholder '{reference.type_name}' found inside {context.selection_label}: {reference.reason}"
+            )
+        case dict() if value.get("__pipeline_serialized_config__") is True:
+            return _resolve_serialized_config_wrapper(value, context, memo)
+        case dict():
+            resolved_dict: dict[object, object] = {}
+            memo[value_id] = resolved_dict
+            for key, item in value.items():
+                resolved_key = _resolve_selected_graph(key, context, memo)
+                resolved_item = _resolve_selected_graph(item, context, memo)
+                resolved_dict[resolved_key] = resolved_item
+            return resolved_dict
+        case list():
+            resolved_list: list[object] = []
+            memo[value_id] = resolved_list
+            for item in value:
+                resolved_list.append(_resolve_selected_graph(item, context, memo))
+            return resolved_list
+        case tuple():
+            resolved_tuple = tuple(
+                _resolve_selected_graph(item, context, memo) for item in value
+            )
+            memo[value_id] = resolved_tuple
+            return resolved_tuple
+        case set():
+            resolved_set: set[object] = set()
+            memo[value_id] = resolved_set
+            for item in value:
+                resolved_set.add(_resolve_selected_graph(item, context, memo))
+            return resolved_set
+        case frozenset():
+            resolved_frozenset = frozenset(
+                _resolve_selected_graph(item, context, memo) for item in value
+            )
+            memo[value_id] = resolved_frozenset
+            return resolved_frozenset
+        case _ if context.is_missing_main_placeholder(value):
+            raise PersistenceError(
+                f"Missing __main__ class placeholder found inside {context.selection_label}"
+            )
+        case _ if callable(value):
+            return value
+        case _:
+            return value
+
+
+def _resolve_serialized_config_wrapper(
+    wrapper: dict[object, object],
+    context: _ResolutionContext,
+    memo: dict[int, object],
+) -> object:
+    wrapper_id = id(wrapper)
+    wrapper_kind = wrapper.get("kind")
+    wrapper_data = wrapper.get("data")
+    if not isinstance(wrapper_data, Mapping):
+        return wrapper
+    if wrapper_kind == "dict":
+        resolved_dict: dict[str, object] = {}
+        memo[wrapper_id] = resolved_dict
+        for key, item in wrapper_data.items():
+            resolved_dict[str(key)] = _resolve_selected_graph(item, context, memo)
+        return resolved_dict
+    if wrapper_kind == "namespace":
+        resolved_namespace = SimpleNamespace()
+        memo[wrapper_id] = resolved_namespace
+        for key, item in wrapper_data.items():
+            setattr(
+                resolved_namespace,
+                str(key),
+                _resolve_selected_graph(item, context, memo),
+            )
+        return resolved_namespace
+    return wrapper
+
+
+def _restore_callable_value(reference: CallableValueReference, selection_label: str) -> object:
+    try:
+        callable_obj, _, _ = resolve_callable(reference.import_path)
+    except (ImportError, RegistrationError) as exc:
+        raise PersistenceError(
+            f"Importable callable '{reference.import_path}' required for {selection_label} could not be restored"
+        ) from exc
+    return callable_obj
+
+
+def _restore_runtime_callable(
+    reference: RuntimeCallableReference,
+    selection_label: str,
+) -> object:
+    main_module = sys.modules.get("__main__")
+    callable_obj = (
+        None if main_module is None else getattr(main_module, reference.callable_name, None)
+    )
+    if not callable(callable_obj):
+        raise PersistenceError(
+            f"Required runtime callable '{reference.callable_name}' for {selection_label} is unavailable in __main__"
+        )
+    return callable_obj
+
+
+_MISSING = object()
