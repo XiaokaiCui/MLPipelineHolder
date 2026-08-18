@@ -90,7 +90,7 @@ I will now provide my notebook/code.
 
 **Large objects and disk backing**
 
-Large objects are usually large DataFrames, arrays, models, or expensive intermediates. Storing them on disk lowers the RAM retained during execution, but it adds serialisation and I/O cost. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_value`.
+Large objects are usually large DataFrames, arrays, models, or expensive intermediates. Storing them on disk lowers the RAM retained during execution, but it adds serialisation and I/O cost. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_constant_value`.
 
 **Memory saving and profiling**
 
