@@ -30,7 +30,7 @@ The core package requires Python 3.11 or later and includes `termcolor` and NumP
 
 ## At a glance
 
-### Typical Use Cases
+### Typical use cases
 
 - I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
 - I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work.
