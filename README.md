@@ -30,6 +30,16 @@ The core package requires Python 3.11 or later and includes `termcolor` and NumP
 
 ## At a glance
 
+### Typical Use Cases
+
+- I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
+- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work.
+- I use the same notebook across different days and do not want to rerun expensive steps every time I reopen it.
+- I have limited RAM and need a convenient way to load and offload DataFrames while exploring the data.
+- I want to focus on analysis and modelling, with logging and pipeline visualisation handled more simply.
+
+### Key features
+
 MLPipelineHolder organises workflows into explicit execution blocks and nested child pipelines while keeping their runtime structure easy to inspect and modify. It helps you:
 
 - Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes.
@@ -98,6 +108,21 @@ Large objects are usually large DataFrames, arrays, models, or expensive interme
 - `memory_profile_logging` logs memory usage after computation and cleanup for each block.
 
 Attached child pipelines inherit both settings from their parent, so configure the policy on the owning or root pipeline.
+
+## API reference
+
+The full public API is documented in a standalone, pandas/numpy-style reference page:
+
+- [`doc/api_reference.html`](doc/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
+
+It covers:
+
+- main classes: `PipelineHandler`, `ExecutionBlock`, `GateBlock`, `PipelineLogger`
+- functions and decorators: `rename_args`
+- exceptions: `PipelineError`, `RegistrationError`, `ResolutionError`, `ExecutionError`, `PersistenceError`
+- data models in `mlpipelineholder.models` (e.g. `ArtifactRecord`, `RunRecord`, function/expression/block registrations, runtime value and callable references)
+
+The sections below summarise the key behaviours and concepts; for signatures, parameters, and full details, open the HTML reference above.
 
 ## Core concepts
 
