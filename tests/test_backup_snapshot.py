@@ -254,7 +254,7 @@ class BackupSnapshotTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 snapshot.assert_unchanged()
 
-    def test_read_backup_snapshot_rejects_missing_unrelated_artifact(self) -> None:
+    def test_read_backup_snapshot_ignores_missing_unrelated_artifact(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root, work_root, backup_root = build_saved_root(temp_dir)
             artifact_path = work_root / "artifacts" / "block" / "missing.json"
@@ -271,8 +271,10 @@ class BackupSnapshotTests(unittest.TestCase):
             }
             write_pickle(backup_root / "pipeline_state.pkl", payload)
 
+            snapshot = read_backup_snapshot(root)
+            missing = payload["artifact_registry"]["unrelated"]
             with self.assertRaises(PersistenceError):
-                _ = read_backup_snapshot(root)
+                snapshot.validate_selected_artifacts(missing)
 
 
 if __name__ == "__main__":

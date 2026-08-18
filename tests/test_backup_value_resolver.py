@@ -141,7 +141,7 @@ class BackupValueResolverBaselineTests(unittest.TestCase):
                     SaveConfig(value=2),
                     tmp_path / "project",
                 )
-                pipeline.set_value("target_callable", runtime_increment)
+                pipeline.set_constant_value("target_callable", runtime_increment)
                 pipeline.create_atom_child_pipeline(
                     child_name="bind_runtime_callable",
                     execution_priority=1,
@@ -156,7 +156,7 @@ class BackupValueResolverBaselineTests(unittest.TestCase):
                 loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
                 _ = loaded.run_all()
 
-                restored_callable = loaded.get_value("target_callable")
+                restored_callable = loaded.get_constant_value("target_callable")
                 if restored_callable is not runtime_increment:
                     self.fail("loaded callable should match the current runtime binding")
                 bound_callable = loaded.get_value("bound_callable")

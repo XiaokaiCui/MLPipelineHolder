@@ -255,13 +255,20 @@ Behaviour:
 
 ### 8. Access values safely
 
+The pipeline keeps two separate value namespaces:
+
+- **produced values** — outputs produced by registered functions during execution
+- **pipeline constants** — fixed values you set directly on a pipeline
+
 ```python
-value = pipeline.get_value("model_blob")
+value = pipeline.get_value("model_blob")            # produced value
+pipeline.set_constant_value("learning_rate", 0.01)  # set a constant
+constant = pipeline.get_constant_value("learning_rate")
 ```
 
 If the value is disk-backed, the true object is loaded and returned.
 
-To modify values:
+To modify produced values:
 
 ```python
 pipeline.update_value("existing_name", 10)
@@ -270,9 +277,30 @@ pipeline.set_value("new_or_existing_name", 20)
 
 Behaviour:
 
-- `update_value(...)` updates existing visible values only
-- `set_value(...)` creates a new pipeline-owned value if it does not exist, otherwise it updates the existing value
-- values created with `set_value(...)` are visible to the pipeline, its descendants, and downstream siblings through the parent visibility model
+- `update_value(...)` updates an existing produced value only
+- `set_value(...)` updates an existing produced value, or injects a value for a declared-but-cleared produced name
+- both raise `ResolutionError` for unknown names
+- `get_value(...)` raises `ResolutionError` if the name is a pipeline constant — use `get_constant_value(...)` instead
+- `update_value(...)` and `set_value(...)` likewise refuse names owned by pipeline constants
+
+To set and read pipeline constants:
+
+```python
+pipeline.set_constant_value("learning_rate", 0.01)
+rate = pipeline.get_constant_value("learning_rate")
+```
+
+Constant behaviour:
+
+- `set_constant_value(...)` creates or replaces a constant; `get_constant_value(...)` raises `ResolutionError` for unknown names
+- constants are visible to the pipeline, its descendants, and downstream siblings through the parent visibility model
+- when multiple pipelines define the same constant name, the nearest definition wins: sibling (by priority) over parent, parent over grandparent
+- constants survive save/load and backup recovery, and may hold callables or `ArtifactRecord` values
+
+Name conflicts are prevented across the whole pipeline tree in both directions:
+
+- `set_constant_value(...)` raises `RegistrationError` if the name is already a declared output or produced value anywhere in the tree
+- registering an output whose name matches a constant anywhere in the tree is rejected or skipped with a warning, depending on the registration path
 
 ### 9. Save and load projects
 
@@ -313,7 +341,7 @@ Saved projects contain:
 - disk-backed outputs under `artifacts/`
 - logs and configuration snapshots under `metadata/`
 
-Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_value(...)` or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
+Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_constant_value(...)`, `set_value(...)`, or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
 

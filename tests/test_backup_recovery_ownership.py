@@ -69,12 +69,12 @@ def _slot_summary(inventory):
 
 
 class BackupRecoveryOwnershipBaselineTests(unittest.TestCase):
-    def test_update_value_rewrites_manual_and_visible_slots(self) -> None:
+    def test_set_constant_value_rewrites_manual_and_visible_slots(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
-            pipeline.set_value("manual_value", 5)
+            pipeline.set_constant_value("manual_value", 5)
 
-            pipeline.update_value("manual_value", 9)
+            pipeline.set_constant_value("manual_value", 9)
 
             self.assertEqual(pipeline.manual_values["manual_value"], 9)
             self.assertEqual(pipeline.para_value_dict["manual_value"], 9)
@@ -103,7 +103,7 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
     def test_discover_owned_variable_slots_for_manual_value_needs_no_prompt(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
-            root.set_value("manual_value", 5)
+            root.set_constant_value("manual_value", 5)
 
             inventory = discover_owned_variable_slots(root, "manual_value")
             confirmation = confirm_recovery_impact(
@@ -185,8 +185,8 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
             root.add_child_pipeline(child, 1)
             shared_value: list[str] = ["same-object"]
-            root.set_value("shared", shared_value)
-            child.set_value("shared", shared_value)
+            root.set_constant_value("shared", shared_value)
+            child.set_constant_value("shared", shared_value)
             inventory = discover_owned_variable_slots(root, "shared")
             prompts: list[str] = []
 
@@ -208,11 +208,9 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
-            block = child.add_block("shared", 1)
-            block.register_function(produce_shared_text, ["shared"])
             root.add_child_pipeline(child, 1)
-            root.set_value("shared", "shared")
-            _ = root.run_all()
+            root.set_constant_value("shared", "shared")
+            child.set_constant_value("shared", "shared")
 
             inventory = discover_owned_variable_slots(root, "shared")
             prompts: list[str] = []
@@ -259,8 +257,8 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
             root.add_child_pipeline(child, 1)
-            root.set_value("shared", 1)
-            child.set_value("shared", 2)
+            root.set_constant_value("shared", 1)
+            child.set_constant_value("shared", 2)
             inventory = discover_owned_variable_slots(root, "shared")
             warning = MagicMock()
             root.logger.warning = warning
@@ -283,8 +281,8 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
             root.add_child_pipeline(child, 1)
-            root.set_value("shared", 1)
-            child.set_value("shared", 2)
+            root.set_constant_value("shared", 1)
+            child.set_constant_value("shared", 2)
             inventory = discover_owned_variable_slots(root, "shared")
             warning = MagicMock()
             root.logger.warning = warning
@@ -307,8 +305,8 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
             root.add_child_pipeline(child, 1)
-            root.set_value("shared", 1)
-            child.set_value("shared", 2)
+            root.set_constant_value("shared", 1)
+            child.set_constant_value("shared", 2)
             inventory = discover_owned_variable_slots(root, "shared")
             warning = MagicMock()
             root.logger.warning = warning
@@ -327,8 +325,8 @@ class BackupRecoveryOwnershipTests(unittest.TestCase):
             root = PipelineHandler("root", DemoConfig(base=1), Path(temp_dir) / "root")
             child = PipelineHandler("child", DemoConfig(base=2), Path(temp_dir) / "child")
             root.add_child_pipeline(child, 1)
-            root.set_value("shared", 1)
-            child.set_value("shared", 2)
+            root.set_constant_value("shared", 1)
+            child.set_constant_value("shared", 2)
             inventory = discover_owned_variable_slots(root, "shared")
             warning = MagicMock()
             root.logger.warning = warning

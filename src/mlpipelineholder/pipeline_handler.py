@@ -239,7 +239,11 @@ class PipelineHandler:
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
         if child_pipeline.para_value_dict:
-            self.producer_outputs[child_pipeline.registration_name] = dict(child_pipeline.para_value_dict)
+            self.producer_outputs[child_pipeline.registration_name] = {
+                name: value
+                for name, value in child_pipeline.para_value_dict.items()
+                if name not in child_pipeline.manual_values
+            }
             self._rebuild_visible_state(self._incoming_parent_outputs())
         return child_pipeline
 
@@ -373,6 +377,10 @@ class PipelineHandler:
             self._set_config_value(field_name, value)
 
     def get_value(self, variable_name: str) -> Any:
+        if variable_name in self._tree_constant_names():
+            raise ResolutionError(
+                f"Cannot get value '{variable_name}': name is a pipeline constant; use get_constant_value instead"
+            )
         if variable_name in self.para_value_dict:
             value = self.para_value_dict[variable_name]
         else:
@@ -391,8 +399,45 @@ class PipelineHandler:
             return self.artifact_store.load(value)
         return value
 
+    def get_constant_value(self, variable_name: str) -> Any:
+        visible = dict(self._incoming_parent_manual_values())
+        visible.update(self.manual_values)
+        if variable_name not in visible:
+            raise ResolutionError(f"Unknown pipeline constant: {variable_name}")
+        value = visible[variable_name]
+        if isinstance(value, TorchStateArtifactRecord):
+            return value
+        if isinstance(value, CallableValueReference):
+            return self._restore_callable_value(value)
+        if isinstance(value, ArtifactRecord):
+            return self.artifact_store.load(value)
+        return value
+
+    def set_constant_value(self, variable_name: str, value: Any) -> None:
+        self._validate_builtin_name_conflict(variable_name, owner_label="pipeline constant")
+        if variable_name in self._tree_declared_output_names():
+            raise RegistrationError(
+                f"Constant name '{variable_name}' conflicts with a declared output name in the pipeline tree"
+            )
+        if variable_name in self._tree_produced_value_names():
+            raise RegistrationError(
+                f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
+            )
+        self.manual_values[variable_name] = value
+        self.para_value_dict[variable_name] = value
+        if isinstance(value, ArtifactRecord):
+            self.artifact_registry[variable_name] = value
+        else:
+            self.artifact_registry.pop(variable_name, None)
+        if self.parent_pipeline is not None:
+            self._sync_attached_outputs_to_parent()
+
     def update_value(self, variable_name: str, value: Any) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
+        if variable_name in self._tree_constant_names():
+            raise ResolutionError(
+                f"Cannot update value '{variable_name}': name is a pipeline constant; use set_constant_value instead"
+            )
         if variable_name not in self.para_value_dict:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
@@ -401,8 +446,6 @@ class PipelineHandler:
             self.artifact_store.delete(previous_value)
 
         self.para_value_dict[variable_name] = value
-        if variable_name in self.manual_values:
-            self.manual_values[variable_name] = value
         if isinstance(value, ArtifactRecord):
             self.artifact_registry[variable_name] = value
         else:
@@ -414,14 +457,94 @@ class PipelineHandler:
                 continue
             outputs[variable_name] = value
             break
+        self._sync_value_update_to_parent(variable_name, value)
 
     def set_value(self, variable_name: str, value: Any) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
+        if variable_name in self._tree_constant_names():
+            raise ResolutionError(
+                f"Cannot set value '{variable_name}': name is a pipeline constant; use set_constant_value instead"
+            )
         if variable_name in self.para_value_dict:
             self.update_value(variable_name, value)
             return
+        if variable_name in self._incoming_parent_outputs():
+            self._nearest_upstream_produced_owner(variable_name).update_value(variable_name, value)
+            return
+        owner = self._descendant_produced_owner(variable_name)
+        if owner is not None:
+            owner.update_value(variable_name, value)
+            return
+        if variable_name in self._tree_declared_output_names():
+            self._inject_produced_value(variable_name, value)
+            return
+        raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
-        self.manual_values[variable_name] = value
+    def _nearest_upstream_produced_owner(self, variable_name: str) -> "PipelineHandler":
+        current = self.parent_pipeline
+        while current is not None:
+            winning_child: PipelineHandler | None = None
+            for node in current._sorted_nodes():
+                if node.execution_priority >= self.execution_priority:
+                    break
+                if (
+                    isinstance(node, PipelineHandler)
+                    and variable_name in node.para_value_dict
+                    and variable_name not in node.manual_values
+                ):
+                    winning_child = node
+            if winning_child is not None:
+                deeper = winning_child._descendant_produced_owner(variable_name)
+                return deeper if deeper is not None else winning_child
+            if (
+                variable_name in current.para_value_dict
+                and variable_name not in current.manual_values
+            ):
+                deeper = current._descendant_produced_owner(variable_name)
+                return deeper if deeper is not None else current
+            current = current.parent_pipeline
+        raise ResolutionError(f"Unknown produced value owner for: {variable_name}")
+
+    def _descendant_produced_owner(self, variable_name: str) -> "PipelineHandler | None":
+        for node in reversed(self._sorted_nodes()):
+            if not isinstance(node, PipelineHandler):
+                continue
+            if variable_name in node.para_value_dict and variable_name not in node.manual_values:
+                deeper = node._descendant_produced_owner(variable_name)
+                return deeper if deeper is not None else node
+        return None
+
+    def _find_declaring_node(self, variable_name: str) -> Any | None:
+        for node in self._sorted_nodes():
+            if variable_name in self._node_declared_outputs(node):
+                return node
+        return None
+
+    def _find_declaring_pipeline(self, variable_name: str) -> "PipelineHandler | None":
+        if self._find_declaring_node(variable_name) is not None:
+            return self
+        current = self.parent_pipeline
+        while current is not None:
+            if current._find_declaring_node(variable_name) is not None:
+                return current
+            current = current.parent_pipeline
+        return None
+
+    def _inject_produced_value(self, variable_name: str, value: Any) -> None:
+        pipeline = self._find_declaring_pipeline(variable_name)
+        if pipeline is None:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        if pipeline is not self:
+            pipeline._inject_produced_value(variable_name, value)
+            return
+        node = self._find_declaring_node(variable_name)
+        if node is None:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        if isinstance(node, PipelineHandler):
+            node._inject_produced_value(variable_name, value)
+            return
+        outputs = self.producer_outputs.setdefault(node.registration_name, {})
+        outputs[variable_name] = value
         self.para_value_dict[variable_name] = value
         if isinstance(value, ArtifactRecord):
             self.artifact_registry[variable_name] = value
@@ -429,6 +552,27 @@ class PipelineHandler:
             self.artifact_registry.pop(variable_name, None)
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
+
+    def _sync_value_update_to_parent(self, variable_name: str, value: Any) -> None:
+        current = self
+        while current.parent_pipeline is not None:
+            parent = current.parent_pipeline
+            parent_outputs = parent.producer_outputs.get(current.registration_name)
+            if parent_outputs is None or variable_name not in parent_outputs:
+                return
+            cached_output = parent_outputs[variable_name]
+            parent_outputs[variable_name] = value
+            if (
+                variable_name in parent.para_value_dict
+                and variable_name not in parent.manual_values
+                and parent.para_value_dict[variable_name] is cached_output
+            ):
+                parent.para_value_dict[variable_name] = value
+                if isinstance(value, ArtifactRecord):
+                    parent.artifact_registry[variable_name] = value
+                else:
+                    parent.artifact_registry.pop(variable_name, None)
+            current = parent
 
     def recover_variable_from_backup(self, name: str) -> None:
         from .backup_recovery_service import recover_variable_from_backup
@@ -1833,6 +1977,11 @@ class PipelineHandler:
             raise RegistrationError(
                 f"Output names conflict with visible configuration fields: {sorted(conflicts)}"
             )
+        constant_conflicts = set(output_names).intersection(self._tree_constant_names())
+        if constant_conflicts:
+            raise RegistrationError(
+                f"Output names conflict with pipeline constants: {sorted(constant_conflicts)}"
+            )
 
     def _registration_conflicts(self, node: Any, execution_priority: float | None) -> list[Any]:
         conflicts: list[Any] = []
@@ -1955,6 +2104,28 @@ class PipelineHandler:
                     pipelines.append(pipeline)
         return pipelines
 
+    def _tree_constant_names(self) -> set[str]:
+        names: set[str] = set()
+        for pipeline in self._root_pipeline()._iter_attached_pipelines():
+            names.update(pipeline.manual_values)
+        return names
+
+    def _tree_declared_output_names(self) -> set[str]:
+        names: set[str] = set()
+        for pipeline in self._root_pipeline()._iter_attached_pipelines():
+            names.update(pipeline.list_declared_outputs())
+        return names
+
+    def _tree_produced_value_names(self) -> set[str]:
+        names: set[str] = set()
+        constants = self._tree_constant_names()
+        for pipeline in self._root_pipeline()._iter_attached_pipelines():
+            for outputs in pipeline.producer_outputs.values():
+                for name in outputs:
+                    if name not in constants:
+                        names.add(name)
+        return names
+
     def _get_node_or_raise(self, block_name: str) -> Any:
         node = self.nodes_by_name.get(block_name)
         if node is None:
@@ -2019,7 +2190,11 @@ class PipelineHandler:
         child_pipeline.producer_outputs[child_target.registration_name] = dict(child_previous_outputs)
         child_pipeline._rebuild_visible_state(child_pipeline._incoming_parent_outputs())
         child_run = child_pipeline.run_from(*path_parts[1:], overrides=overrides)
-        self.producer_outputs[child_pipeline.registration_name] = dict(child_pipeline.para_value_dict)
+        self.producer_outputs[child_pipeline.registration_name] = {
+            name: value
+            for name, value in child_pipeline.para_value_dict.items()
+            if name not in child_pipeline.manual_values
+        }
         self._rebuild_visible_state(self._incoming_parent_outputs())
         downstream_nodes = [
             candidate
@@ -2205,6 +2380,23 @@ class PipelineHandler:
             return {}
         return self.parent_pipeline._visible_outputs_before_priority(self.execution_priority)
 
+    def _incoming_parent_manual_values(self) -> dict[str, Any]:
+        if self.parent_pipeline is None or self.execution_priority is None:
+            return {}
+        return self.parent_pipeline._visible_manual_values_before_priority(self.execution_priority)
+
+    def _visible_manual_values_before_priority(self, priority: float | None) -> dict[str, Any]:
+        visible = dict(self._incoming_parent_manual_values())
+        visible.update(self.manual_values)
+        if priority is None:
+            return visible
+        for node in self._sorted_nodes():
+            if node.execution_priority >= priority:
+                break
+            if isinstance(node, PipelineHandler):
+                visible.update(node.manual_values)
+        return visible
+
     def _descendant_visible_value(self, variable_name: str) -> Any | None:
         for node in self._sorted_nodes():
             if not isinstance(node, PipelineHandler):
@@ -2254,8 +2446,7 @@ class PipelineHandler:
         names = set(self._visible_config_names())
         names.update(self.list_declared_outputs())
         names.update(self._incoming_parent_output_names())
-        names.update(self.manual_values)
-        names.update(self._ancestor_manual_values())
+        names.update(self._tree_constant_names())
         return names
 
     def _registration_disk_backed_names(self) -> set[str]:
@@ -2664,7 +2855,11 @@ class PipelineHandler:
     def _sync_attached_outputs_to_parent(self) -> None:
         if self.parent_pipeline is None or self.execution_priority is None:
             return
-        self.parent_pipeline.producer_outputs[self.registration_name] = dict(self.para_value_dict)
+        self.parent_pipeline.producer_outputs[self.registration_name] = {
+            name: value
+            for name, value in self.para_value_dict.items()
+            if name not in self.manual_values
+        }
         self.parent_pipeline._invalidate_from_priority(self.execution_priority, include_target=False)
 
     def _rewrite_artifact_paths(self, old_root: Path, new_root: Path) -> None:
