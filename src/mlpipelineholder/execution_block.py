@@ -505,6 +505,7 @@ class ExecutionBlock:
                         block_name=self.parent.qualified_node_name(self.registration_name),
                         function_name=result.function_name,
                         run_id=run_id,
+                        torch_load_weights_only=self.parent.torch_load_weights_only,
                     )
                 produced_outputs[output_name] = output_value
         return produced_outputs

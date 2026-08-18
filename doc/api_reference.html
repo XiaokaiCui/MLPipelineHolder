@@ -237,7 +237,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   pipeline_backup_directory: <span class="arg">str | Path | None</span> = None,
   log_traceback_to_file: <span class="arg">bool</span> = True,
   show_traceback_locals: <span class="arg">bool</span> = False,
-  use_rich_traceback_console: <span class="arg">bool</span> = True
+  use_rich_traceback_console: <span class="arg">bool</span> = True,
+  torch_load_weights_only: <span class="arg">bool</span> = False
 ) -&gt; <span class="ret">None</span>
 </div>
 
@@ -255,6 +256,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>log_traceback_to_file</code></td><td>bool</td><td>Append the plain stdlib traceback to <code>metadata/pipeline.log</code> when a run fails.</td></tr>
   <tr><td><code>show_traceback_locals</code></td><td>bool</td><td>Show local variables in the Rich console traceback.</td></tr>
   <tr><td><code>use_rich_traceback_console</code></td><td>bool</td><td>Render console tracebacks with Rich instead of plain stdlib text.</td></tr>
+  <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
@@ -474,6 +476,10 @@ rate = pipeline.get_constant_value("learning_rate")</pre>
 <h4 class="method-name" id="PipelineHandler.set_print_capture_mode">set_print_capture_mode()</h4>
 <div class="sig"><span class="kw">set_print_capture_mode</span>(mode: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Sets print capture for single-function blocks: <code>"tee"</code> (default) sends <code>print()</code> output to both stdout and the log; <code>"logger_only"</code> captures only into the log; <code>"off"</code> leaves normal behaviour unchanged.</p>
+
+<h4 class="method-name" id="PipelineHandler.set_torch_load_weights_only">set_torch_load_weights_only()</h4>
+<div class="sig"><span class="kw">set_torch_load_weights_only</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
+<p>Sets whether torch artifacts saved by this pipeline load with <code>torch.load(weights_only=True)</code>. The setting is stamped onto each artifact record at save time, persisted with the pipeline, and never inherited from a parent pipeline.</p>
 
 <h4 class="method-name" id="PipelineHandler.get_result_history">get_result_history()</h4>
 <div class="sig"><span class="kw">get_result_history</span>() -&gt; <span class="ret">list[str]</span></div>

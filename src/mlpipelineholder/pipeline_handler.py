@@ -4,6 +4,7 @@ import ast
 import builtins
 import gc
 import inspect
+import os
 import pickle
 import platform
 import shutil
@@ -85,6 +86,7 @@ class PipelineHandler:
         log_traceback_to_file: bool = True,
         show_traceback_locals: bool = False,
         use_rich_traceback_console: bool = True,
+        torch_load_weights_only: bool = False,
         _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
@@ -123,6 +125,7 @@ class PipelineHandler:
             self.print_capture_mode = "tee"
             self.memory_saving_mode = memory_saving_mode
             self.memory_profile_logging = memory_profile_logging
+            self.torch_load_weights_only = bool(torch_load_weights_only)
             self.suppress_registration_advisories = False
             self.historical_result_log_path: str | None = None
             self._attached_result_history_override: list[str] | None = None
@@ -135,6 +138,8 @@ class PipelineHandler:
             self.blocks: list[Any] = []
             self.blocks_by_name: dict[str, Any] = {}
             self.gate_block: GateBlock | None = None
+            self.gate_cleanup_confirmation: bool = False
+            self._gate_cleanup_predecided: bool | None = None
 
             self.manual_values: dict[str, Any] = {}
             self.para_value_dict: dict[str, Any] = {}
@@ -663,6 +668,10 @@ class PipelineHandler:
         except ValueError as exc:
             raise RegistrationError(str(exc)) from exc
 
+    def set_torch_load_weights_only(self, enabled: bool) -> None:
+        """Set whether torch artifacts saved by this pipeline load with weights_only=True."""
+        self.torch_load_weights_only = bool(enabled)
+
     def define_expression_runtime(self, code: str) -> None:
         code = self._normalize_expression_runtime_code(code)
         self._validate_expression_runtime_code(code)
@@ -747,6 +756,13 @@ class PipelineHandler:
         self._invalidate_from_priority(block.execution_priority)
 
     def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
+        if self._gate_skip_without_cleanup(
+            "run_all",
+            overrides,
+            self._incoming_parent_outputs(),
+            self._ancestor_config_values(),
+        ):
+            return self._build_skipped_run_record("run_all")
         (
             self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             if self.nodes
@@ -764,6 +780,13 @@ class PipelineHandler:
         if len(path_parts) > 1:
             return self._run_nested_until_path(path_parts, overrides=overrides)
         pipeline, node = self._resolve_target_path(path_parts)
+        if self._gate_skip_without_cleanup(
+            f"run_until:{node.registration_name}",
+            overrides,
+            self._incoming_parent_outputs(),
+            self._ancestor_config_values(),
+        ):
+            return self._build_skipped_run_record(f"run_until:{node.registration_name}")
         (
             self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             if self.nodes
@@ -786,6 +809,13 @@ class PipelineHandler:
         if len(path_parts) > 1:
             return self._run_nested_from_path(path_parts, overrides=overrides)
         pipeline, node = self._resolve_target_path(path_parts)
+        if self._gate_skip_without_cleanup(
+            f"run_from:{node.registration_name}",
+            overrides,
+            self._visible_outputs_before_priority(node.execution_priority),
+            self._ancestor_config_values(),
+        ):
+            return self._build_skipped_run_record(f"run_from:{node.registration_name}")
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
         self._invalidate_from_priority(node.execution_priority)
@@ -806,6 +836,13 @@ class PipelineHandler:
         if len(path_parts) > 1:
             return self._run_nested_block_path(path_parts, overrides=overrides)
         pipeline, node = self._resolve_target_path(path_parts)
+        if self._gate_skip_without_cleanup(
+            f"run_block:{node.registration_name}",
+            overrides,
+            self._visible_outputs_before_priority(node.execution_priority),
+            self._ancestor_config_values(),
+        ):
+            return self._build_skipped_run_record(f"run_block:{node.registration_name}")
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
         self._invalidate_from_priority(node.execution_priority)
@@ -839,10 +876,8 @@ class PipelineHandler:
             payload = self._serialize_payload_for_save(target)
         except RegistrationError as exc:
             raise PersistenceError(str(exc)) from exc
-        with (target / "pipeline_state.pkl").open("wb") as handle:
-            pickle.dump(payload, handle)
-        with (target / "config.pkl").open("wb") as handle:
-            pickle.dump(self._serialize_config_for_save(self.config), handle)
+        self._atomic_pickle_dump(payload, target / "pipeline_state.pkl")
+        self._atomic_pickle_dump(self._serialize_config_for_save(self.config), target / "config.pkl")
         self._write_pipeline_metadata(target)
         self.logger.info(f"Pipeline has been saved to project root: {target}")
         if save_log_to_file is not None:
@@ -1230,6 +1265,7 @@ class PipelineHandler:
             log_traceback_to_file=payload.get("log_traceback_to_file", True),
             show_traceback_locals=payload.get("show_traceback_locals", False),
             use_rich_traceback_console=payload.get("use_rich_traceback_console", True),
+            torch_load_weights_only=payload.get("torch_load_weights_only", False),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
         )
@@ -1376,6 +1412,7 @@ class PipelineHandler:
             "log_traceback_to_file": traceback_settings["log_traceback_to_file"],
             "show_traceback_locals": traceback_settings["show_traceback_locals"],
             "use_rich_traceback_console": traceback_settings["use_rich_traceback_console"],
+            "torch_load_weights_only": self.torch_load_weights_only,
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
@@ -1491,6 +1528,7 @@ class PipelineHandler:
                     block_name=self.qualified_node_name(node_name),
                     function_name="save_pipeline_runtime",
                     run_id="save_pipeline",
+                    torch_load_weights_only=self.torch_load_weights_only,
                 )
             if isinstance(value, torch.optim.Optimizer):
                 linked_model_record = self._find_linked_model_artifact(
@@ -1917,22 +1955,36 @@ class PipelineHandler:
                     for output_name in self.list_declared_outputs()
                     if output_name not in base_visible
                 }
-                removed_outputs: list[dict[str, Any]] = []
-                for node in nodes:
-                    removed_outputs.append(
-                        self.producer_outputs.pop(node.registration_name, {})
+                if self._gate_cleanup_predecided is not None:
+                    cleanup = self._gate_cleanup_predecided
+                    self._gate_cleanup_predecided = None
+                elif self.gate_cleanup_confirmation and (
+                    self.producer_outputs or self.artifact_registry
+                ):
+                    cleanup = self._confirm_gate_cleanup(mode)
+                else:
+                    cleanup = True
+                if cleanup:
+                    removed_outputs: list[dict[str, Any]] = []
+                    for node in nodes:
+                        removed_outputs.append(
+                            self.producer_outputs.pop(node.registration_name, {})
+                        )
+                        if isinstance(node, PipelineHandler):
+                            node._invalidate_all_outputs()
+                    self.para_value_dict = skipped_outputs
+                    self.artifact_registry = {}
+                    for outputs in removed_outputs:
+                        self._delete_artifacts_from_outputs(outputs)
+                    self.logger.warning(f"Skipped {mode} with run_id={run_id}")
+                else:
+                    self.logger.warning(
+                        f"Skipped {mode} with run_id={run_id} without cleanup (cleanup declined)"
                     )
-                    if isinstance(node, PipelineHandler):
-                        node._invalidate_all_outputs()
-                self.para_value_dict = skipped_outputs
-                self.artifact_registry = {}
-                for outputs in removed_outputs:
-                    self._delete_artifacts_from_outputs(outputs)
                 run_record.status = "skipped"
                 run_record.produced_outputs.extend(sorted(skipped_outputs))
                 if sync_parent_on_completion:
                     self._sync_attached_outputs_to_parent()
-                self.logger.warning(f"Skipped {mode} with run_id={run_id}")
                 return run_record, skipped_outputs
 
             for node in nodes:
@@ -1994,15 +2046,85 @@ class PipelineHandler:
                 self._sync_attached_outputs_to_parent()
             self.logger.info(f"Completed {mode} with run_id={run_id}")
             return run_record, dict(self.para_value_dict)
-        except Exception as exc:
+        except BaseException as exc:
             run_record.status = "failed"
             run_record.error_message = str(exc)
             self.logger.log_exception(exc, f"Failed {mode} with run_id={run_id}: {exc}")
-            if isinstance(exc, (ExecutionError, ResolutionError, RegistrationError)):
+            if isinstance(
+                exc,
+                (ExecutionError, ResolutionError, RegistrationError, KeyboardInterrupt, SystemExit),
+            ):
                 raise
             raise ExecutionError("Pipeline execution failed") from exc
         finally:
             run_record.finished_at = datetime.now(UTC).isoformat()
+
+    def _confirm_gate_cleanup(self, mode: str) -> bool:
+        gate_label = (
+            self.gate_block.config_field_name
+            if self.gate_block is not None and self.gate_block.config_field_name is not None
+            else (
+                self.gate_block.registration.function_name
+                if self.gate_block is not None
+                else "?"
+            )
+        )
+        affected = sorted(
+            {
+                output_name
+                for outputs in self.producer_outputs.values()
+                for output_name in outputs
+            }
+            | set(self.artifact_registry)
+        )
+        reason = (
+            f"Gate '{gate_label}' did not pass for {mode}, so the run is skipped. "
+            f"Cleaning up would invalidate {len(affected)} produced value(s) "
+            f"({', '.join(affected) if affected else 'none'}) and delete their disk artifacts; "
+            "downstream blocks and child pipelines consuming them would then receive None. "
+            "Type 'yes' or 'y' to clean up, anything else keeps the current values (non-destructive): "
+        )
+        answer = input(reason).strip().lower()
+        return answer in {"yes", "y"}
+
+    def _gate_skip_without_cleanup(
+        self,
+        mode: str,
+        overrides: dict[str, Any] | None,
+        base_visible: dict[str, Any],
+        parent_config: Any | None,
+    ) -> bool:
+        """Return True when the gate fails and cleanup was declined.
+
+        Runs before any output invalidation so a declined confirmation leaves the
+        current values and artifacts untouched.
+        """
+        if not self.gate_cleanup_confirmation:
+            return False
+        if self.gate_block is None:
+            return False
+        if not (self.producer_outputs or self.artifact_registry):
+            return False
+        if self.gate_block.evaluate(overrides or {}, base_visible, parent_config):
+            return False
+        self._gate_cleanup_predecided = self._confirm_gate_cleanup(mode)
+        return not self._gate_cleanup_predecided
+
+    def _build_skipped_run_record(self, mode: str) -> RunRecord:
+        run_id = uuid4().hex
+        run_record = RunRecord(
+            run_id=run_id,
+            mode=mode,
+            executed_blocks=[],
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        run_record.status = "skipped"
+        run_record.finished_at = datetime.now(UTC).isoformat()
+        self.run_history.append(run_record)
+        self.logger.warning(
+            f"Skipped {mode} with run_id={run_id} without cleanup (cleanup declined)"
+        )
+        return run_record
 
     def _register_node(self, node: Any) -> None:
         if self.nodes_by_name.get(node.registration_name) is node:
@@ -2860,8 +2982,26 @@ class PipelineHandler:
         return paths
 
     def _persist_config_snapshot(self, path: Path) -> None:
-        with path.open("wb") as handle:
-            pickle.dump(self._serialize_config_for_save(self.config), handle)
+        self._atomic_pickle_dump(self._serialize_config_for_save(self.config), path)
+
+    @staticmethod
+    def _atomic_pickle_dump(obj: Any, path: Path) -> None:
+        """Write a pickle payload to `path` atomically.
+
+        The payload is written to a sibling ``*.tmp`` file, fsynced, then renamed
+        over `path`, so a crash mid-write never corrupts the previous file. The
+        temporary file is removed on any failure.
+        """
+        tmp_path = path.with_name(path.name + ".tmp")
+        try:
+            with tmp_path.open("wb") as handle:
+                pickle.dump(obj, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def _attach_to_parent(self, parent: "PipelineHandler", execution_priority: float) -> None:
         # Registration moves the child's working tree underneath the parent project root.
@@ -3173,9 +3313,13 @@ class PipelineHandler:
         stdout_target: Any = (
             _TeeStdout(sys.stdout, buffer) if self.print_capture_mode == "tee" else buffer
         )
-        with redirect_stdout(stdout_target):
-            result = func(*args, **kwargs)
-        self._flush_captured_prints(buffer)
+        try:
+            with redirect_stdout(stdout_target):
+                result = func(*args, **kwargs)
+        finally:
+            # Flush even when the function raises, so prints made before the
+            # exception are still recorded in the pipeline log.
+            self._flush_captured_prints(buffer)
         return result
 
     def _flush_captured_prints(self, buffer: StringIO) -> None:

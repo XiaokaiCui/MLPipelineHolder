@@ -1,10 +1,12 @@
 # MLPipelineHolder
 
-MLPipelineHolder is a lightweight Python library for building, running, tracking, and modifying experiment-driven machine-learning pipelines, particularly in Jupyter and Google Colab notebooks.
+**MLPipelineHolder is a lightweight Python framework for managing machine-learning and data-science pipelines.**
+
+It helps you persist intermediate results, organise modelling workflows, run reproducible experiments, manage large DataFrames, and track pipeline structure without turning an exploratory project into a full MLOps system.
 
 ## Installation
 
-Install from PyPI:
+Install from [PyPI](https://pypi.org/project/mlpipelineholder/):
 
 ```bash
 pip install mlpipelineholder
@@ -202,6 +204,15 @@ Current serialisation behaviour:
 - pandas DataFrames with more than 3 million rows use a single Parquet file
 - Dask DataFrames use Parquet directories and remain Dask on reload
 - everything else falls back to `pickle`
+
+Torch artifact loading can be hardened per pipeline. By default torch artifacts are loaded with `weights_only=False` (required for modules saved with full state). Enable the safer `weights_only=True` mode per pipeline:
+
+```python
+pipeline = PipelineHandler(..., torch_load_weights_only=True)   # at creation
+pipeline.set_torch_load_weights_only(True)                      # or at runtime
+```
+
+The setting is applied to every torch artifact produced by that pipeline (stamped on the artifact record at save time) and survives save/load. Each pipeline keeps its own setting — children do not inherit it from their parent, and artifacts always load with the setting of the pipeline that produced them, regardless of who reads them later. Note that `weights_only=True` cannot load torch modules saved with full state; it is intended for pure tensor artifacts.
 
 ### 5. Rename function inputs and use variadics safely
 
@@ -424,6 +435,21 @@ Additional chart behaviour:
 - the root pipeline is never greyed out this way
 
 Gate lines do not show `-> bool`, and chart symbols such as `()` and `->` use the same colour family as priority markers for readability.
+
+Gate skip cleanup confirmation:
+
+When a gate does not pass, the run is skipped. By default the pipeline also invalidates the produced values of the skipped run and deletes their disk artifacts. If you want to be asked before that cleanup happens, enable confirmation on the pipeline:
+
+```python
+pipeline.gate_cleanup_confirmation = True
+```
+
+With confirmation enabled, a skipped run first asks (via `input()`):
+
+- `yes` / `y` → invalidate the produced values and delete their disk artifacts (the default behaviour)
+- anything else → keep the current values and artifact files; the run is skipped non-destructively
+
+The prompt lists the gate, the run mode, the number of affected produced values, and notes that downstream blocks and child pipelines consuming them would receive `None` after cleanup. No prompt is shown when there is nothing to clean up. This setting is per pipeline and is not persisted by `save_pipeline`.
 
 ### 11. Output conflicts and overrides
 

@@ -122,7 +122,12 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
     raise ValueError(f"Unsupported serializer: {serializer}")
 
 
-def load_value(serializer: str, path: Path) -> Any:
+def load_value(
+    serializer: str,
+    path: Path,
+    *,
+    torch_weights_only: bool = False,
+) -> Any:
     """Load a value from disk using the recorded serializer."""
 
     if serializer == "json":
@@ -138,7 +143,7 @@ def load_value(serializer: str, path: Path) -> Any:
     if serializer == "torch":
         import torch  # type: ignore
 
-        return torch.load(path, weights_only=False)
+        return torch.load(path, weights_only=torch_weights_only)
     if serializer == "feather":
         import pyarrow.ipc as ipc  # type: ignore
 
