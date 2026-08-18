@@ -46,6 +46,12 @@ class _BackupSnapshot:
                 f"Backup snapshot at '{self.backup_root}' changed during recovery preflight"
             )
 
+    def validate_selected_artifacts(self, value: object) -> None:
+        saved_root = self.state_payload.get("saved_project_root")
+        if not isinstance(saved_root, str):
+            raise PersistenceError("Backup payload has no valid saved project root")
+        _validate_artifact_sources(value, Path(saved_root), self.backup_root)
+
 
 def read_backup_snapshot(root_pipeline: PipelineHandler) -> _BackupSnapshot:
     root = root_pipeline
@@ -72,11 +78,6 @@ def read_backup_snapshot(root_pipeline: PipelineHandler) -> _BackupSnapshot:
     _validate_root_payload(state_payload, root, backup_root)
     _validate_metadata(metadata, root, backup_root)
     _validate_nested_payloads(state_payload)
-    _validate_artifact_sources(
-        state_payload,
-        Path(str(state_payload["saved_project_root"])),
-        backup_root,
-    )
     return _BackupSnapshot(
         backup_root=backup_root,
         root_registration_name=root.registration_name,

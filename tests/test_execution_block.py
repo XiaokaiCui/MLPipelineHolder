@@ -426,7 +426,7 @@ class ExecutionBlockTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("expr-astype", {}, tmp_path)
-            pipeline.set_value("series", pd.Series([1, 2, 3]))
+            pipeline.set_constant_value("series", pd.Series([1, 2, 3]))
             block = pipeline.add_block("block", 1)
 
             registration = block.register_expression("result = series.astype(str)")
@@ -472,7 +472,7 @@ class ExecutionBlockTests(unittest.TestCase):
             pipeline.define_expression_runtime(
                 "from xml.etree.ElementTree import fromstring, tostring"
             )
-            pipeline.set_value("xml_text", "<root><child /></root>")
+            pipeline.set_constant_value("xml_text", "<root><child /></root>")
             block = pipeline.add_block("block", 1)
 
             registration = block.register_expression("result = fromstring(xml_text).tag")

@@ -51,6 +51,7 @@ def recover_variable_from_backup(pipeline: PipelineHandler, name: str) -> None:
         name,
         is_missing_main_placeholder=pipeline._contains_missing_main_placeholder,
     )
+    snapshot.validate_selected_artifacts(resolved)
     confirmation = confirm_recovery_impact(inventory, pipeline.logger)
     if not confirmation.authorized:
         return
@@ -88,6 +89,7 @@ def recover_config_from_backup(pipeline: PipelineHandler, name: str) -> None:
         name,
         is_missing_main_placeholder=pipeline._contains_missing_main_placeholder,
     )
+    snapshot.validate_selected_artifacts(resolved)
     transaction = _artifact_transaction(snapshot, pipeline.project_root)
     prepared = transaction.clone_value(resolved)
     staged_config = _staged_config(pipeline.config, name, prepared)

@@ -140,7 +140,7 @@ class SaveLoadTests(unittest.TestCase):
                     SaveConfig(value=2),
                     tmp_path / "project",
                 )
-                pipeline.set_value("target_callable", importable)
+                pipeline.set_constant_value("target_callable", importable)
                 pipeline.create_atom_child_pipeline(
                     child_name="bind_runtime_callable",
                     execution_priority=1,
@@ -198,7 +198,7 @@ class SaveLoadTests(unittest.TestCase):
                     SaveConfig(value=2),
                     tmp_path / "project",
                 )
-                pipeline.set_value("target_callable", runtime_increment)
+                pipeline.set_constant_value("target_callable", runtime_increment)
                 pipeline.create_atom_child_pipeline(
                     child_name="bind_runtime_callable",
                     execution_priority=1,
@@ -213,7 +213,7 @@ class SaveLoadTests(unittest.TestCase):
                 loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
                 loaded.run_all()
 
-                self.assertIs(loaded.get_value("target_callable"), runtime_increment)
+                self.assertIs(loaded.get_constant_value("target_callable"), runtime_increment)
                 self.assertEqual(loaded.get_value("bound_callable")(), 3)
         finally:
             if had_existing_partial:
@@ -441,7 +441,7 @@ class SaveLoadTests(unittest.TestCase):
                 )
                 block = pipeline.add_block("block", 1)
                 block.register_function(importable, ["result"])
-                pipeline.set_value("runtime_helper", LegacyMainRuntimeHelper(name="helper"))
+                pipeline.set_constant_value("runtime_helper", LegacyMainRuntimeHelper(name="helper"))
 
                 save_dir = tmp_path / "bundle"
                 save_dir.mkdir(parents=True, exist_ok=True)
@@ -485,7 +485,7 @@ class SaveLoadTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist-callable-value", SaveConfig(value=2), tmp_path / "project")
-            pipeline.set_value("callable_value", importable)
+            pipeline.set_constant_value("callable_value", importable)
             block = pipeline.add_block("block", 1)
             block.register_function(
                 call_with_value,
@@ -500,7 +500,7 @@ class SaveLoadTests(unittest.TestCase):
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
-            loaded_callable = loaded.get_value("callable_value")
+            loaded_callable = loaded.get_constant_value("callable_value")
             loaded.run_all()
 
             self.assertTrue(callable(loaded_callable))
@@ -511,13 +511,13 @@ class SaveLoadTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist-nonimportable-callable", SaveConfig(value=2), tmp_path / "project")
-            pipeline.set_value("callable_value", self.local_callable)
+            pipeline.set_constant_value("callable_value", self.local_callable)
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-            self.assertIsInstance(loaded.get_value("callable_value"), RuntimeValueReference)
+            self.assertIsInstance(loaded.get_constant_value("callable_value"), RuntimeValueReference)
 
     def test_main_callable_value_restores_from_loading_runtime(self) -> None:
         namespace: dict[str, object] = {}
@@ -533,13 +533,13 @@ class SaveLoadTests(unittest.TestCase):
             with TemporaryDirectory() as temp_dir:
                 tmp_path = Path(temp_dir)
                 pipeline = PipelineHandler("persist-main-callable", SaveConfig(value=2), tmp_path / "project")
-                pipeline.set_value("callable_value", __main__.main_increment)
+                pipeline.set_constant_value("callable_value", __main__.main_increment)
 
                 save_dir = tmp_path / "bundle"
                 pipeline.save_project(save_dir)
                 loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-                self.assertIs(loaded.get_value("callable_value"), namespace["main_increment"])
+                self.assertIs(loaded.get_constant_value("callable_value"), namespace["main_increment"])
         finally:
             if hasattr(__main__, "main_increment"):
                 delattr(__main__, "main_increment")
@@ -562,7 +562,7 @@ class SaveLoadTests(unittest.TestCase):
                     SaveConfig(value=2),
                     tmp_path / "project",
                 )
-                pipeline.set_value("callable_value", __main__.main_increment)
+                pipeline.set_constant_value("callable_value", __main__.main_increment)
                 save_dir = tmp_path / "bundle"
                 pipeline.save_project(save_dir)
                 delattr(__main__, "main_increment")
@@ -580,10 +580,10 @@ class SaveLoadTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist-static-callable", SaveConfig(value=2), tmp_path / "project")
-            pipeline.set_value("callable_value", CallableContainer.static_increment)
+            pipeline.set_constant_value("callable_value", CallableContainer.static_increment)
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-            self.assertIsInstance(loaded.get_value("callable_value"), RuntimeValueReference)
+            self.assertIsInstance(loaded.get_constant_value("callable_value"), RuntimeValueReference)
