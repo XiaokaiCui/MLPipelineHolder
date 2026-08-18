@@ -26,7 +26,7 @@ Each extra adds:
 - `memory`: `psutil`-based memory profiling logs
 - `all`: all optional features listed above
 
-The core package requires Python 3.11 or later and includes `termcolor` and NumPy.
+The core package requires Python 3.11 or later and includes `termcolor`, NumPy, and Rich.
 
 ## At a glance
 
@@ -366,6 +366,8 @@ Saved projects contain:
 - disk-backed outputs under `artifacts/`
 - logs and configuration snapshots under `metadata/`
 
+Every `save_pipeline(...)` call also archives a timestamped copy of the current `pipeline.log` into `history_logs/` inside the project root, named `yyyy-mm-dd_hh-mm-ss.mmm.log` (UTC, e.g. `history_logs/2026-08-18_16-38-14.857.log`). This preserves each save-time log snapshot even though loading a pipeline starts a fresh `pipeline.log`. When a `pipeline_backup_directory` is configured, the refreshed backup copy also receives the updated `history_logs/` folder, and loading a saved project restores its `history_logs/` folder into the project root.
+
 Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_constant_value(...)`, `set_value(...)`, or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
@@ -469,11 +471,26 @@ pipeline.set_print_capture_mode("tee")
 # Optional: pause and resume file logging.
 pipeline.logger.disable_file_logging()
 pipeline.logger.enable_file_logging()
+
+# View the current log and archived snapshots (all resolved from the root pipeline).
+pipeline.logger.show_recent_logs(20)                      # last 20 lines of metadata/pipeline.log
+pipeline.logger.show_recent_logs(10, "ERROR")             # last 10 ERROR lines only
+snapshots = pipeline.logger.list_history_logs()           # snapshot files in history_logs/
+pipeline.logger.show_history_log(snapshots[0].name)       # print one snapshot (full or a line range)
+pipeline.logger.show_history_log(snapshots[0].name, log_level="result")  # only RESULT lines
 ```
 
 `clear_result_history()` only clears in-memory result history. It does not modify `metadata/pipeline.log`.
 
 Normal notebook use does not require manual logger cleanup. `disable_file_logging()` pauses writes to `metadata/pipeline.log` while console output and in-memory result history continue. `enable_file_logging()` resumes appending without clearing existing entries. Attached children share their parent logger and do not manage its lifetime.
+
+Log viewing helpers (resolved from the root pipeline):
+
+- `show_recent_logs(lines=5, log_level=None)` prints the latest `lines` entries of the current `metadata/pipeline.log`; with `log_level` set, only entries at that level are shown and the limit applies after the filter
+- `list_history_logs()` returns the timestamped snapshots saved in `history_logs/`, sorted by name
+- `show_history_log(file_name, line_starts=0, line_ends=None, log_level=None)` prints lines `[line_starts, line_ends)` of one snapshot; `line_ends=None` prints to the end of the file, and with `log_level` set only entries at that level within the range are shown
+
+`log_level` accepts the normal levels (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) plus `RESULT` and `PRINT`, case-insensitive; unknown levels raise `ValueError`.
 
 Print capture modes:
 
@@ -482,6 +499,35 @@ Print capture modes:
 - `off`: leave normal `print(...)` behaviour unchanged
 
 Print capture applies to blocks with one registered function. These blocks run on the caller thread so manually interrupting them restores notebook stdout before returning control. Output buffered when the function is interrupted may not be added to the pipeline log. Blocks with multiple functions remain parallel and use normal stdout without adding their `print(...)` output to the pipeline log. Setting capture to `off` disables automatic print capture without disabling the pipeline logger.
+
+Traceback logging:
+
+When a run fails, the logger writes an `ERROR` entry for the exception plus a rendered traceback.
+
+- the log file always receives the plain stdlib traceback (never Rich formatting or ANSI codes)
+- the console receives a Rich-rendered traceback by default (box-drawing guides, optional local variables), falling back to the plain stdlib traceback when Rich console rendering is disabled
+- `show_traceback_locals` (default `False`) controls whether local variables appear in the Rich console traceback
+
+Configure at pipeline creation or directly on the logger:
+
+```python
+pipeline = PipelineHandler(
+    ...,
+    log_traceback_to_file=True,       # append the stdlib traceback to pipeline.log (default)
+    show_traceback_locals=False,      # show locals in the Rich console traceback (default)
+    use_rich_traceback_console=True,  # render console tracebacks with Rich (default)
+)
+
+# Or adjust at runtime on the logger:
+pipeline.logger.set_traceback_writing(False)        # stop appending the traceback to the file
+pipeline.logger.set_show_traceback_locals(True)     # include locals in Rich console tracebacks
+pipeline.logger.set_traceback_console_render(False) # use plain stdlib text on the console
+```
+
+- `set_traceback_writing(enable=True)` controls whether the traceback body is appended to the log file; the `ERROR` header line is always written
+- `set_show_traceback_locals(enable=False)` controls local-variable display in Rich console tracebacks
+- `set_traceback_console_render(use_rich=True)` selects Rich (default) or plain stdlib text for console tracebacks
+- the three settings are saved and restored with the pipeline
 
 ### 13. Memory options
 

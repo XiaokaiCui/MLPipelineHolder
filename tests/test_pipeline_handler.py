@@ -59,6 +59,16 @@ def memory_text(seed: int) -> str:
     return f"memory={seed}"
 
 
+def boom_function() -> int:
+    secret_value = 40 + 2
+    raise ValueError("traceback boom")
+    return secret_value
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 def save_json(seed: int) -> dict[str, int]:
     return {"seed": seed, "double": seed * 2}
 
@@ -559,6 +569,220 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("before-disable", log_text)
             self.assertIn("after-enable", log_text)
 
+    def test_show_recent_logs_prints_latest_lines_from_root_log(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("first-message")
+            pipeline.logger.info("second-message")
+            pipeline.logger.info("third-message")
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(2)
+            output = captured.getvalue()
+            self.assertIn("second-message", output)
+            self.assertIn("third-message", output)
+            self.assertNotIn("first-message", output)
+
+    def test_show_recent_logs_defaults_to_five_and_validates_count(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("only-message")
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs()
+            self.assertIn("only-message", captured.getvalue())
+
+            with self.assertRaisesRegex(ValueError, "lines"):
+                pipeline.logger.show_recent_logs(0)
+
+    def test_list_history_logs_returns_saved_snapshots_sorted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), project_dir)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+            pipeline.save_pipeline()
+
+            snapshots = pipeline.logger.list_history_logs()
+            self.assertEqual(len(snapshots), 2)
+            names = [snapshot.name for snapshot in snapshots]
+            self.assertEqual(names, sorted(names))
+            for snapshot in snapshots:
+                self.assertRegex(
+                    snapshot.name,
+                    r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}(_\d+)?\.log$",
+                )
+                self.assertTrue(snapshot.is_file())
+            self.assertTrue(project_dir.joinpath("history_logs").is_dir())
+
+    def test_list_history_logs_empty_when_no_snapshots_exist(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            self.assertEqual(pipeline.logger.list_history_logs(), [])
+
+    def test_show_history_log_prints_requested_line_range(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), project_dir)
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            snapshot = pipeline.logger.list_history_logs()[0]
+            all_lines = snapshot.read_text(encoding="utf-8").splitlines()
+            self.assertGreaterEqual(len(all_lines), 3)
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, 0, 2)
+            self.assertEqual(captured.getvalue().splitlines(), all_lines[:2])
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, 1)
+            self.assertEqual(captured.getvalue().splitlines(), all_lines[1:])
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name)
+            self.assertEqual(captured.getvalue().splitlines(), all_lines)
+
+    def test_show_history_log_raises_for_missing_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            with self.assertRaises(FileNotFoundError):
+                pipeline.logger.show_history_log("does-not-exist.log")
+
+    def test_show_recent_logs_filters_by_level_case_insensitive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("info-1")
+            pipeline.logger.error("error-1")
+            pipeline.logger.info("info-2")
+            pipeline.logger.result("result-1")
+            pipeline.logger.error("error-2")
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(10, "error")
+            output = captured.getvalue()
+            self.assertIn("error-1", output)
+            self.assertIn("error-2", output)
+            self.assertNotIn("info-", output)
+            self.assertNotIn("result-", output)
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(10, "RESULT")
+            self.assertIn("result-1", captured.getvalue())
+            self.assertNotIn("error-", captured.getvalue())
+            self.assertNotIn("info-", captured.getvalue())
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(10, "Result")
+            self.assertIn("result-1", captured.getvalue())
+
+    def test_show_recent_logs_applies_limit_after_level_filter(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            pipeline.logger.info("info-1")
+            pipeline.logger.error("error-1")
+            pipeline.logger.info("info-2")
+            pipeline.logger.error("error-2")
+            pipeline.logger.info("info-3")
+            pipeline.logger.error("error-3")
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(1, "ERROR")
+            output = captured.getvalue()
+            self.assertIn("error-3", output)
+            self.assertNotIn("error-1", output)
+            self.assertNotIn("error-2", output)
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_recent_logs(2, "ERROR")
+            output = captured.getvalue()
+            self.assertIn("error-2", output)
+            self.assertIn("error-3", output)
+            self.assertNotIn("error-1", output)
+
+    def test_show_recent_logs_invalid_level_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), Path(temp_dir))
+            with self.assertRaisesRegex(ValueError, "Unknown log level"):
+                pipeline.logger.show_recent_logs(5, "TRACE")
+
+    def test_show_history_log_filters_by_level_and_range(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("logging", DemoConfig(base=1), project_dir)
+            history_root = project_dir / "history_logs"
+            history_root.mkdir(parents=True, exist_ok=True)
+            snapshot = history_root / "2026-08-18_10-00-00.000.log"
+            snapshot.write_text(
+                "\n".join(
+                    [
+                        "10:00:00.000 INFO alpha",
+                        "10:00:01.000 ERROR beta",
+                        "10:00:02.000 PRINT gamma",
+                        "10:00:03.000 RESULT delta",
+                        "10:00:04.000 INFO epsilon",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, log_level="error")
+            self.assertEqual(
+                captured.getvalue().splitlines(),
+                ["10:00:01.000 ERROR beta"],
+            )
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, log_level="Result")
+            self.assertEqual(
+                captured.getvalue().splitlines(),
+                ["10:00:03.000 RESULT delta"],
+            )
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, 0, 2, "INFO")
+            self.assertEqual(
+                captured.getvalue().splitlines(),
+                ["10:00:00.000 INFO alpha"],
+            )
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name, log_level="PRINT")
+            self.assertEqual(
+                captured.getvalue().splitlines(),
+                ["10:00:02.000 PRINT gamma"],
+            )
+
+            captured = StringIO()
+            with patch("sys.stdout", captured):
+                pipeline.logger.show_history_log(snapshot.name)
+            self.assertEqual(len(captured.getvalue().splitlines()), 5)
+
+            with self.assertRaisesRegex(ValueError, "Unknown log level"):
+                pipeline.logger.show_history_log(snapshot.name, log_level="TRACE")
+
     def test_garbage_collected_replaced_child_does_not_close_parent_logger(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -612,6 +836,179 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.save_pipeline(save_log_to_file=export_log)
 
             self.assertIn("before export", export_log.read_text(encoding="utf-8"))
+
+    def test_log_exception_writes_stdlib_traceback_to_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+
+            with self.assertRaises(ExecutionError):
+                pipeline.run_all()
+
+            log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("Failed run_all with run_id=", log_text)
+            self.assertIn("Traceback (most recent call last)", log_text)
+            self.assertIn("boom_function", log_text)
+            self.assertIn("ValueError: traceback boom", log_text)
+            self.assertNotIn("\x1b[", log_text)
+
+    def test_log_exception_console_uses_rich_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+
+            captured_stdout = StringIO()
+            with patch("src.mlpipelineholder.logger.sys_stdout", captured_stdout):
+                with self.assertRaises(ExecutionError):
+                    pipeline.run_all()
+
+            console_out = captured_stdout.getvalue()
+            self.assertIn("\x1b[", console_out)
+            self.assertTrue("╭" in console_out or "│" in console_out)
+
+    def test_set_traceback_writing_disables_and_reenables_file_traceback(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+            pipeline.logger.set_traceback_writing(False)
+
+            with self.assertRaises(ExecutionError):
+                pipeline.run_all()
+            log_off = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("Failed run_all with run_id=", log_off)
+            self.assertNotIn("Traceback (most recent call last)", log_off)
+
+            pipeline.logger.set_traceback_writing()
+            with self.assertRaises(ExecutionError):
+                pipeline.run_all()
+            log_on = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("Traceback (most recent call last)", log_on)
+
+    def test_set_traceback_console_render_falls_back_to_plain(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+            pipeline.logger.set_traceback_console_render(False)
+
+            captured_stdout = StringIO()
+            with patch("src.mlpipelineholder.logger.sys_stdout", captured_stdout):
+                with self.assertRaises(ExecutionError):
+                    pipeline.run_all()
+
+            console_out = captured_stdout.getvalue()
+            self.assertIn("Traceback (most recent call last)", console_out)
+            self.assertNotIn("╭", console_out)
+            self.assertNotIn("│", console_out)
+
+    def test_show_traceback_locals_toggles_locals_panel(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+            pipeline.logger.set_show_traceback_locals(True)
+
+            captured_stdout = StringIO()
+            with patch("src.mlpipelineholder.logger.sys_stdout", captured_stdout):
+                with self.assertRaises(ExecutionError):
+                    pipeline.run_all()
+            self.assertIn("secret_value = 42", strip_ansi(captured_stdout.getvalue()))
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+
+            captured_stdout = StringIO()
+            with patch("src.mlpipelineholder.logger.sys_stdout", captured_stdout):
+                with self.assertRaises(ExecutionError):
+                    pipeline.run_all()
+            self.assertNotIn("secret_value = 42", strip_ansi(captured_stdout.getvalue()))
+
+    def test_traceback_settings_defaults_and_setters(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
+            self.assertEqual(
+                pipeline.logger.get_traceback_settings(),
+                {
+                    "log_traceback_to_file": True,
+                    "show_traceback_locals": False,
+                    "use_rich_traceback_console": True,
+                },
+            )
+
+            pipeline.logger.set_traceback_writing(False)
+            pipeline.logger.set_show_traceback_locals(True)
+            pipeline.logger.set_traceback_console_render(False)
+            self.assertEqual(
+                pipeline.logger.get_traceback_settings(),
+                {
+                    "log_traceback_to_file": False,
+                    "show_traceback_locals": True,
+                    "use_rich_traceback_console": False,
+                },
+            )
+
+    def test_traceback_settings_persist_through_save_load(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "traceback-flags",
+                DemoConfig(base=1),
+                tmp_path / "project",
+                log_traceback_to_file=False,
+                show_traceback_locals=True,
+                use_rich_traceback_console=False,
+            )
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+
+            self.assertEqual(
+                loaded.logger.get_traceback_settings(),
+                {
+                    "log_traceback_to_file": False,
+                    "show_traceback_locals": True,
+                    "use_rich_traceback_console": False,
+                },
+            )
+
+    def test_traceback_settings_legacy_payload_uses_defaults(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path / "project")
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            payload_path = save_dir / "pipeline_state.pkl"
+            import pickle
+
+            with payload_path.open("rb") as handle:
+                payload = pickle.load(handle)
+            for key in ("log_traceback_to_file", "show_traceback_locals", "use_rich_traceback_console"):
+                payload.pop(key, None)
+            with payload_path.open("wb") as handle:
+                pickle.dump(payload, handle)
+
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            self.assertEqual(
+                loaded.logger.get_traceback_settings(),
+                {
+                    "log_traceback_to_file": True,
+                    "show_traceback_locals": False,
+                    "use_rich_traceback_console": True,
+                },
+            )
 
     def test_duplicate_outputs_override_later_and_are_reported(self) -> None:
         with TemporaryDirectory() as temp_dir:

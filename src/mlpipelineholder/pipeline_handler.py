@@ -82,6 +82,9 @@ class PipelineHandler:
         memory_saving_mode: bool = False,
         memory_profile_logging: bool = False,
         pipeline_backup_directory: str | Path | None = None,
+        log_traceback_to_file: bool = True,
+        show_traceback_locals: bool = False,
+        use_rich_traceback_console: bool = True,
         _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
@@ -110,7 +113,13 @@ class PipelineHandler:
             self.project_root.mkdir(parents=True, exist_ok=True)
             self.metadata_root = self.project_root / "metadata"
             self.metadata_root.mkdir(parents=True, exist_ok=True)
-            self.logger = PipelineLogger(self.metadata_root / "pipeline.log")
+            self.logger = PipelineLogger(
+                self.metadata_root / "pipeline.log",
+                log_traceback_to_file=log_traceback_to_file,
+                show_traceback_locals=show_traceback_locals,
+                use_rich_traceback_console=use_rich_traceback_console,
+            )
+            self.logger._pipeline = self
             self.print_capture_mode = "tee"
             self.memory_saving_mode = memory_saving_mode
             self.memory_profile_logging = memory_profile_logging
@@ -841,13 +850,19 @@ class PipelineHandler:
             log_target = Path(save_log_to_file)
             log_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.logger.log_file_path, log_target)
-        if self._should_refresh_backup_on_save(target):
+        refresh_backup = self._should_refresh_backup_on_save(target)
+        if refresh_backup:
             backup_root = self.pipeline_backup_root
             if backup_root is not None:
                 self._refresh_backup_copy(target, backup_root)
                 self.logger.info(
                     f"Pipeline has been saved to project backup path: {backup_root}"
                 )
+        self._archive_current_log_to_history()
+        if refresh_backup:
+            backup_root = self.pipeline_backup_root
+            if backup_root is not None:
+                self._sync_history_logs_to_backup(backup_root)
         return target
 
     def save_project(
@@ -856,6 +871,20 @@ class PipelineHandler:
         save_log_to_file: str | Path | None = None,
     ) -> Path:
         return self.save_pipeline(path, save_log_to_file=save_log_to_file)
+
+    def _archive_current_log_to_history(self) -> None:
+        """Copy the current pipeline.log into history_logs/ with a timestamped name."""
+        self.logger.flush()
+        history_root = self.project_root / "history_logs"
+        history_root.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(UTC)
+        stamp = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}.{now.microsecond // 1000:03d}"
+        target = history_root / f"{stamp}.log"
+        counter = 1
+        while target.exists():
+            target = history_root / f"{stamp}_{counter}.log"
+            counter += 1
+        shutil.copy2(self.logger.log_file_path, target)
 
     @classmethod
     def load_pipeline(
@@ -923,6 +952,19 @@ class PipelineHandler:
             else:
                 backup_root.unlink()
         shutil.copytree(source, backup_root)
+
+    def _sync_history_logs_to_backup(self, backup_root: Path) -> None:
+        """Copy the project history_logs folder into the backup after a save snapshot."""
+        history_root = self.project_root / "history_logs"
+        if not history_root.is_dir():
+            return
+        backup_history = backup_root / "history_logs"
+        if backup_history.exists():
+            if backup_history.is_dir():
+                shutil.rmtree(backup_history)
+            else:
+                backup_history.unlink()
+        shutil.copytree(history_root, backup_history)
 
     def _materialize_project_tree_for_save(self, target: Path) -> None:
         if self._paths_overlap(self.project_root, target):
@@ -1185,6 +1227,9 @@ class PipelineHandler:
             execution_priority=payload.get("execution_priority"),
             memory_saving_mode=payload.get("memory_saving_mode", False),
             memory_profile_logging=payload.get("memory_profile_logging", False),
+            log_traceback_to_file=payload.get("log_traceback_to_file", True),
+            show_traceback_locals=payload.get("show_traceback_locals", False),
+            use_rich_traceback_console=payload.get("use_rich_traceback_console", True),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
         )
@@ -1314,6 +1359,7 @@ class PipelineHandler:
         cache: dict[int, Any] | None = None,
     ) -> dict[str, Any]:
         cache = {} if cache is None else cache
+        traceback_settings = self.logger.get_traceback_settings()
         return {
             "registration_name": self.registration_name,
             "config": self._serialize_config_for_save(self.config),
@@ -1327,6 +1373,9 @@ class PipelineHandler:
             "expression_runtime_code": self.expression_runtime_code,
             "memory_saving_mode": self.memory_saving_mode,
             "memory_profile_logging": self.memory_profile_logging,
+            "log_traceback_to_file": traceback_settings["log_traceback_to_file"],
+            "show_traceback_locals": traceback_settings["show_traceback_locals"],
+            "use_rich_traceback_console": traceback_settings["use_rich_traceback_console"],
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
@@ -1948,7 +1997,7 @@ class PipelineHandler:
         except Exception as exc:
             run_record.status = "failed"
             run_record.error_message = str(exc)
-            self.logger.error(f"Failed {mode} with run_id={run_id}: {exc}")
+            self.logger.log_exception(exc, f"Failed {mode} with run_id={run_id}: {exc}")
             if isinstance(exc, (ExecutionError, ResolutionError, RegistrationError)):
                 raise
             raise ExecutionError("Pipeline execution failed") from exc

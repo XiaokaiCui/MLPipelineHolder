@@ -74,6 +74,8 @@ Classify each notebook step into one of these categories:
 **Direct Function Rules**
 Inspect the real signatures of functions. Apply actual keyword parameter names in `param_mapping`. Do not guess. Mapping to a literal `None` is supported. Use wrappers only for hidden globals or unrepresentable setup.
 
+If a user-defined function declares a parameter named `logger`, the pipeline injects its own logger automatically when executing that function. Do not pass the logger through `param_mapping`, do not wrap the function to supply it, and do not register it as an input. Just leave the `logger` parameter in the signature and let the pipeline fill it.
+
 **Expression Rules**
 Expressions must represent exactly one statement. Multiline formatting is allowed.
 Restrictions:
@@ -107,6 +109,7 @@ Before returning code, verify:
 - The operational preflight files were read.
 - Prefixes are applied consistently.
 - Direct functions use real parameter names from `inspect.signature`.
+- Functions that need the pipeline logger declare a `logger` parameter and are not wired to it through `param_mapping` or wrappers.
 - Imports needed by expressions are in `define_expression_runtime`.
 - Data and parameter tables are stored with `set_constant_value`.
 - No dependent expressions share a block.

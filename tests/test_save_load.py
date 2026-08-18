@@ -587,3 +587,79 @@ class SaveLoadTests(unittest.TestCase):
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
             self.assertIsInstance(loaded.get_constant_value("callable_value"), RuntimeValueReference)
+
+    def test_save_pipeline_archives_timestamped_log_snapshot_in_history_logs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persist", SaveConfig(value=2), project_dir)
+            block = pipeline.add_block("block", 1)
+            block.register_function(importable, ["result"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            history_root = project_dir / "history_logs"
+            self.assertTrue(history_root.is_dir())
+            snapshots = list(history_root.glob("*.log"))
+            self.assertEqual(len(snapshots), 1)
+            self.assertRegex(
+                snapshots[0].name,
+                r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.\d{3}\.log$",
+            )
+            content = snapshots[0].read_text(encoding="utf-8")
+            self.assertIn(" INFO ", content)
+            self.assertIn("Pipeline has been saved to project root", content)
+
+    def test_save_pipeline_archives_one_snapshot_per_save(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persist", SaveConfig(value=2), project_dir)
+            block = pipeline.add_block("block", 1)
+            block.register_function(importable, ["result"])
+            pipeline.run_all()
+
+            pipeline.save_pipeline()
+            pipeline.save_pipeline()
+
+            snapshots = list((project_dir / "history_logs").glob("*.log"))
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual(len({snapshot.name for snapshot in snapshots}), 2)
+
+    def test_save_pipeline_to_new_path_archives_snapshot_in_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persist", SaveConfig(value=2), project_dir)
+            block = pipeline.add_block("block", 1)
+            block.register_function(importable, ["result"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            snapshots = list((project_dir / "history_logs").glob("*.log"))
+            self.assertEqual(len(snapshots), 1)
+
+    def test_load_restores_history_logs_from_saved_bundle(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_dir = tmp_path / "project"
+            pipeline = PipelineHandler("persist", SaveConfig(value=2), project_dir)
+            block = pipeline.add_block("block", 1)
+            block.register_function(importable, ["result"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            bundle_snapshots = sorted((save_dir / "history_logs").glob("*.log"))
+            self.assertTrue(bundle_snapshots)
+
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded_snapshots = sorted((loaded.project_root / "history_logs").glob("*.log"))
+            self.assertEqual(
+                [snapshot.name for snapshot in loaded_snapshots],
+                [snapshot.name for snapshot in bundle_snapshots],
+            )
