@@ -58,14 +58,14 @@ Organize variables and configurations by their scope:
 ## Disk and Memory Intake
 
 Handle large objects and memory settings based on these rules:
-- **Large Objects**: Use a proposal and confirmation workflow for disk backing. Identify likely candidates based on object type, estimated size, reuse frequency, and recomputation cost. Explain the RAM-vs-I/O trade-off and ask the user to confirm. Never infer actual size without evidence. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_value`.
+- **Large Objects**: Use a proposal and confirmation workflow for disk backing. Identify likely candidates based on object type, estimated size, reuse frequency, and recomputation cost. Explain the RAM-vs-I/O trade-off and ask the user to confirm. Never infer actual size without evidence. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_constant_value`.
 - **Memory Settings**: An attached child pipeline's settings are overwritten by and inherit the existing parent settings. Changing the root parent affects the attached tree, so do not silently enable memory settings. Ask the user first. If the user is not sure, recommend a default based on the observed workload and disclose it.
 - **Implicit Promotion**: Do not silently promote memory flags, disk-backed outputs, exact priorities, comments, or logger output to requirements unless they are explicitly requested or delegated.
 
 ## Expression and Persistence Constraints
 
 Classify each notebook step into one of these categories:
-- **Direct Value**: Stored using `set_value`.
+- **Direct Value**: Stored using `set_constant_value`. Read back with `get_constant_value`, not `get_value`. Large objects that should be disk-backed must be produced by a function stage instead, because `save_to_disk` applies only to declared produced outputs.
 - **Expression**: Registered using `register_expression`.
 - **Direct Function / Atom Child**: Registered using `register_function` or `create_atom_child_pipeline`.
 - **Wrapper-Required**: Needs a wrapper function due to hidden globals or unrepresentable setup.
@@ -89,7 +89,7 @@ If a step uses a comprehension, you cannot register it via `register_expression`
 **Persistence Preflight**
 Registered stages with an import path are restored from that path. Registered stages without one are saved by callable name, and the loading notebook or script must import or define that callable under the same name in `__main__` before calling `load_pipeline(...)`.
 
-`target_function=functools.partial` supports save/load when `partial` is imported into the loading runtime first. Notebook-local functions and runtime-only callable values stored through `set_value(...)` or produced upstream require an equivalent callable bound under the saved name before loading. Nested functions, lambdas, closures, and bound callables that have no reliable runtime name remain non-portable placeholders. These references are runtime dependencies, not historical code snapshots. Do not make unsupported claims about portability.
+`target_function=functools.partial` supports save/load when `partial` is imported into the loading runtime first. Notebook-local functions and runtime-only callable values stored through `set_constant_value(...)`, `set_value(...)`, or produced upstream require an equivalent callable bound under the saved name before loading. Nested functions, lambdas, closures, and bound callables that have no reliable runtime name remain non-portable placeholders. These references are runtime dependencies, not historical code snapshots. Do not make unsupported claims about portability.
 
 When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading restores that backup into the canonical working directory. This copies project data, not Python source, installed packages, or the runtime environment.
 
@@ -108,7 +108,7 @@ Before returning code, verify:
 - Prefixes are applied consistently.
 - Direct functions use real parameter names from `inspect.signature`.
 - Imports needed by expressions are in `define_expression_runtime`.
-- Data and parameter tables are stored with `set_value`.
+- Data and parameter tables are stored with `set_constant_value`.
 - No dependent expressions share a block.
 - `None` arguments use `param_mapping={...: None}`.
 - Long expressions use triple-quoted strings.
