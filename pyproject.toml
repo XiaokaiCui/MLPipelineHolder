@@ -1,12 +1,12 @@
 [project]
 name = "mlpipelineholder"
 version = "0.2.8"
-description = "Lightweight machine learning pipeline handler"
+description = "A lightweight Python framework for reproducible machine-learning pipelines in Jupyter notebook."
 authors = []
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11,<4.0"
-keywords = ["machine-learning", "pipeline", "experimentation", "orchestration", "notebook", "Jupyter", "Colab"]
+keywords = ["workflow", "pipeline", "experimentation", "mlops", "notebook", "Jupyter", "Colab", "machine-learning"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
