@@ -17,6 +17,7 @@ class ArtifactRecord:
     produced_by_function: str
     run_id: str
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    torch_load_weights_only: bool = False
 
     def path(self) -> Path:
         return Path(self.file_path)

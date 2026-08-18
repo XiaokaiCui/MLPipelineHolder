@@ -4,6 +4,7 @@ import gc
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+import pickle
 import re
 import shutil
 import sys
@@ -131,6 +132,11 @@ def interrupting_print_step(executed_thread_ids: list[int]) -> NoReturn:
     executed_thread_ids.append(threading.get_ident())
     print("interrupting-print-step")
     raise KeyboardInterrupt("stop single-function block")
+
+
+def print_then_fail() -> int:
+    print("printed-before-failure")
+    raise ValueError("failure after print")
 
 
 def debug_and_info_step(seed: int, logger) -> int:
@@ -3294,3 +3300,200 @@ class PipelineHandlerTests(unittest.TestCase):
             artifact_dir = tmp_path / "artifacts"
             artifact_files = list(artifact_dir.rglob("*")) if artifact_dir.exists() else []
             self.assertFalse(any(path.is_file() for path in artifact_files))
+
+    def test_print_capture_flushes_captured_prints_on_exception(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("print-fail", {}, tmp_path)
+            failing = pipeline.add_block("failing", 1)
+            failing.register_function(print_then_fail, ["never_written"])
+
+            with self.assertRaises(ExecutionError):
+                pipeline.run_block("failing")
+
+            log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertIn(" PRINT printed-before-failure", log_text)
+
+    def test_keyboard_interrupt_marks_run_record_failed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ki", {}, tmp_path)
+            interrupting = pipeline.add_block("interrupting", 1)
+            interrupting.register_function(interrupting_print_step, ["never_written"])
+            executed_thread_ids: list[int] = []
+            pipeline.set_constant_value("executed_thread_ids", executed_thread_ids)
+
+            with self.assertRaises(KeyboardInterrupt):
+                pipeline.run_block("interrupting")
+
+            self.assertEqual(pipeline.run_history[-1].status, "failed")
+            self.assertIsNotNone(pipeline.run_history[-1].finished_at)
+
+    def test_save_pipeline_leaves_no_tmp_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("atomic-save", DemoConfig(base=1), tmp_path / "project")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            self.assertTrue((save_dir / "pipeline_state.pkl").exists())
+            self.assertTrue((save_dir / "config.pkl").exists())
+            self.assertFalse(list(save_dir.glob("*.tmp")))
+
+    def test_save_pipeline_removes_tmp_file_on_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("atomic-fail", DemoConfig(base=1), tmp_path / "project")
+            block = pipeline.add_block("setup", 1)
+            block.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+
+            def fail_dump(*args: object, **kwargs: object) -> None:
+                raise OSError("simulated disk full")
+
+            with patch("src.mlpipelineholder.pipeline_handler.pickle.dump", side_effect=fail_dump):
+                with self.assertRaises(OSError):
+                    pipeline.save_pipeline(save_dir)
+
+            self.assertFalse(list(save_dir.glob("*.tmp")))
+
+    def test_gate_cleanup_confirmation_default_does_not_prompt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate-default", DemoConfig(base=2), tmp_path)
+            pipeline.set_gate_block("base", expected_value=2)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("seed"), 3)
+            pipeline.set_config({"base": 99})
+
+            with patch("builtins.input", side_effect=AssertionError("should not prompt")):
+                run_record = pipeline.run_all()
+
+            self.assertEqual(run_record.status, "skipped")
+            self.assertIsNone(pipeline.get_value("seed"))
+
+    def test_gate_cleanup_confirmation_yes_is_destructive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate-yes", DemoConfig(base=2), tmp_path)
+            pipeline.set_gate_block("base", expected_value=2)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            save = pipeline.add_block("save", 2)
+            save.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            pipeline.run_all()
+            artifact_dir = tmp_path / "artifacts"
+            self.assertTrue(any(path.is_file() for path in artifact_dir.rglob("*")))
+            pipeline.set_config({"base": 99})
+            pipeline.gate_cleanup_confirmation = True
+
+            with patch("builtins.input", return_value="y"):
+                run_record = pipeline.run_all()
+
+            self.assertEqual(run_record.status, "skipped")
+            self.assertIsNone(pipeline.get_value("saved_blob"))
+            self.assertFalse(any(path.is_file() for path in artifact_dir.rglob("*")))
+
+    def test_gate_cleanup_confirmation_no_is_non_destructive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate-no", DemoConfig(base=2), tmp_path)
+            pipeline.set_gate_block("base", expected_value=2)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            save = pipeline.add_block("save", 2)
+            save.register_function(save_text, ["saved_blob"], save_to_disk=["saved_blob"])
+            pipeline.run_all()
+            artifact_dir = tmp_path / "artifacts"
+            self.assertTrue(any(path.is_file() for path in artifact_dir.rglob("*")))
+            pipeline.set_config({"base": 99})
+            pipeline.gate_cleanup_confirmation = True
+
+            with patch("builtins.input", return_value="n"):
+                run_record = pipeline.run_all()
+
+            self.assertEqual(run_record.status, "skipped")
+            self.assertEqual(pipeline.get_value("saved_blob"), "value=3")
+            self.assertTrue(any(path.is_file() for path in artifact_dir.rglob("*")))
+
+    def test_gate_cleanup_confirmation_no_prompt_when_nothing_produced(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("gate-empty", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.gate_cleanup_confirmation = True
+            pipeline.set_gate_block(always_skip)
+
+            with patch("builtins.input", side_effect=AssertionError("should not prompt")):
+                run_record = pipeline.run_all()
+
+            self.assertEqual(run_record.status, "skipped")
+
+    def test_torch_load_weights_only_stamped_and_persisted_per_pipeline(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", {}, tmp_path / "project")
+            child_a = PipelineHandler(
+                "child_a",
+                {},
+                tmp_path / "children" / "child_a",
+                torch_load_weights_only=True,
+            )
+            child_b = PipelineHandler(
+                "child_b",
+                {},
+                tmp_path / "children" / "child_b",
+                torch_load_weights_only=False,
+            )
+            parent.add_child_pipeline(child_a, 10.0)
+            parent.add_child_pipeline(child_b, 20.0)
+            block_a = child_a.add_block("torch_a", 1)
+            block_a.register_function(build_torch_model, ["model_a"], save_to_disk=["model_a"])
+            block_b = child_b.add_block("torch_b", 1)
+            block_b.register_function(build_torch_model, ["model_b"], save_to_disk=["model_b"])
+            parent.run_all()
+
+            record_a = child_a.artifact_registry["model_a"]
+            record_b = child_b.artifact_registry["model_b"]
+            self.assertTrue(record_a.torch_load_weights_only)
+            self.assertFalse(record_b.torch_load_weights_only)
+
+            save_dir = tmp_path / "bundle"
+            parent.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded_a = loaded.get_child_pipeline("child_a")
+            loaded_b = loaded.get_child_pipeline("child_b")
+
+            self.assertTrue(loaded_a.torch_load_weights_only)
+            self.assertFalse(loaded_b.torch_load_weights_only)
+            self.assertTrue(loaded_a.artifact_registry["model_a"].torch_load_weights_only)
+            self.assertFalse(loaded_b.artifact_registry["model_b"].torch_load_weights_only)
+
+    def test_torch_artifact_load_honors_stamped_weights_only(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "torch-stamp",
+                {},
+                tmp_path / "project",
+                torch_load_weights_only=True,
+            )
+            block = pipeline.add_block("torch", 1)
+            block.register_function(build_torch_model, ["model"], save_to_disk=["model"])
+            pipeline.run_all()
+
+            with patch("torch.load") as mocked_load:
+                mocked_load.return_value = "loaded-tensor"
+                value = pipeline.get_value("model")
+
+            self.assertEqual(value, "loaded-tensor")
+            self.assertEqual(mocked_load.call_args.kwargs["weights_only"], True)

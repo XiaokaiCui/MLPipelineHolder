@@ -24,6 +24,7 @@ class ArtifactStore:
         block_name: str,
         function_name: str,
         run_id: str,
+        torch_load_weights_only: bool = False,
     ) -> ArtifactRecord:
         serializer = choose_serializer(value)
         suffix = extension_for(serializer)
@@ -43,10 +44,15 @@ class ArtifactStore:
             produced_by_block=block_name,
             produced_by_function=function_name,
             run_id=run_id,
+            torch_load_weights_only=torch_load_weights_only,
         )
 
     def load(self, artifact: ArtifactRecord) -> Any:
-        return load_value(artifact.serializer, Path(artifact.file_path))
+        return load_value(
+            artifact.serializer,
+            Path(artifact.file_path),
+            torch_weights_only=getattr(artifact, "torch_load_weights_only", False),
+        )
 
     def delete(self, artifact: ArtifactRecord) -> None:
         path = Path(artifact.file_path)
