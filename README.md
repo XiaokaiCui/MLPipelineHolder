@@ -115,7 +115,7 @@ Attached child pipelines inherit both settings from their parent, so configure t
 
 The full public API is documented in a standalone, pandas/numpy-style reference page:
 
-- [`doc/api_reference.html`](doc/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
+- [`docs/api_reference.html`](docs/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
 
 It covers:
 
