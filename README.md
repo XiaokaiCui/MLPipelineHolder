@@ -1,6 +1,6 @@
 # MLPipelineHolder
 
-**MLPipelineHolder is a lightweight Python framework for managing machine-learning and data-science pipelines.**
+**MLPipelineHolder is a lightweight Python framework for reproducible machine-learning pipelines in Jupyter notebooks.**
 
 It helps you persist intermediate results, organise modelling workflows, run reproducible experiments, manage large DataFrames, and track pipeline structure without turning an exploratory project into a full MLOps system.
 
@@ -115,7 +115,7 @@ Attached child pipelines inherit both settings from their parent, so configure t
 
 The full public API is documented in a standalone, pandas/numpy-style reference page:
 
-- [`doc/api_reference.html`](doc/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
+- [`docs/api_reference.html`](docs/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
 
 It covers:
 
