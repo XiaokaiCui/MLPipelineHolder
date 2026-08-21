@@ -2336,9 +2336,14 @@ class PipelineHandler:
                 )
 
         for pipeline in child_pipelines:
+            pipeline_effective_priority = (
+                pipeline.execution_priority
+                if pipeline.execution_priority is not None
+                else execution_priority
+            )
             pipeline_upstream_declared = set(
                 pipeline._declared_output_names_before_priority(
-                    pipeline.execution_priority
+                    pipeline_effective_priority
                 )
             )
             if pipeline.gate_block is not None and pipeline.gate_block.config_field_name is not None:
