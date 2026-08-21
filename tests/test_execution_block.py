@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import ExecutionError, PipelineHandler, RegistrationError
+from src.mlpipelineholder import ExecutionError, PipelineHandler, RegistrationError, ResolutionError
 
 
 @dataclass
@@ -319,7 +319,7 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("train_divider"), 7)
             self.assertEqual(pipeline.get_value("eval_divider"), 7)
 
-    def test_first_run_uses_none_for_unassigned_declared_outputs(self) -> None:
+    def test_first_run_rejects_unassigned_declared_output_inputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("optional-recorders", {}, tmp_path)
@@ -329,10 +329,8 @@ class ExecutionBlockTests(unittest.TestCase):
                 ["train_recorder", "eval_recorder"],
             )
 
-            pipeline.run_all()
-
-            self.assertEqual(pipeline.get_value("train_recorder"), [1])
-            self.assertEqual(pipeline.get_value("eval_recorder"), [2])
+            with self.assertRaises(ResolutionError):
+                pipeline.run_all()
 
     def test_expression_assignment_executes_with_visible_pipeline_names(self) -> None:
         with TemporaryDirectory() as temp_dir:

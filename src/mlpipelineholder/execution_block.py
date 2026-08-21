@@ -273,6 +273,8 @@ class ExecutionBlock:
                 forced=forced,
             )
         except RegistrationError as exc:
+            if self.parent.strict_mode:
+                raise
             self.parent.logger.warning(
                 f"Skipped function registration in block '{self.registration_name}': {exc}"
             )
@@ -349,6 +351,7 @@ class ExecutionBlock:
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
         )
+        self._strict_validate_registration(registration)
         self._warn_on_unmapped_resolvable_inputs(callable_obj, registration)
         self._warn_on_disk_backed_input_persistence_pitfall(registration)
         self.functions.append(registration)
@@ -362,7 +365,12 @@ class ExecutionBlock:
     ) -> None:
         try:
             signature = callable_signature(callable_obj)
-            visible_names = set(self.parent._registration_visible_names())
+            visible_names = (
+                set(self.parent._visible_config_names())
+                | set(self.parent._visible_outputs_before_priority(self.execution_priority))
+                | set(self.parent.manual_values)
+                | set(self.parent._ancestor_manual_values())
+            )
             suspicious: list[str] = []
             for parameter in signature.parameters.values():
                 if parameter.kind in (
@@ -378,8 +386,8 @@ class ExecutionBlock:
                     suspicious.append(parameter.name)
             if suspicious:
                 if not getattr(self.parent, "suppress_registration_advisories", False):
-                    self.parent.logger.info(
-                        f"Function '{registration.function_name}' in block '{self.registration_name}' has unmapped input(s) {sorted(suspicious)} that match visible pipeline/config names and may be resolved implicitly"
+                    self.parent.logger.warning(
+                        f"Function '{registration.function_name}' in block '{self.registration_name}' has unmapped input(s) {sorted(suspicious)} that match visible config, output, or manual value names and may be resolved implicitly"
                     )
         except Exception:
             return
@@ -408,6 +416,112 @@ class ExecutionBlock:
                     )
         except Exception:
             return
+
+    def _strict_validate_registration(
+        self,
+        registration: FunctionRegistration,
+        *,
+        force_strict: bool = False,
+        visible_names: set[str] | None = None,
+    ) -> None:
+        """Run strict-mode checks 7, 8, 10, 11, 12 for a function registration.
+
+        In strict mode (or when force_strict is set) a violation raises
+        RegistrationError; otherwise it is logged as a warning. Checks are
+        skipped while loading a saved pipeline. When visible_names is given
+        (attach-time revalidation) it is used instead of this pipeline's own
+        visible names, so the new parent's objects are taken into account.
+        """
+        if self.parent._suppress_strict_validation:
+            return
+        strict = self.parent.strict_mode or force_strict
+        signature = callable_signature(registration.callable_obj)
+        explicit_params = {
+            parameter.name
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        }
+        has_var_keyword = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+
+        # Check 7: kwargs_dct used but the function has no **kwargs parameter.
+        if registration.var_kw_name is not None and not has_var_keyword:
+            self._strict_violation(
+                f"kwargs_dct is used (var_kw_name='{registration.var_kw_name}') but function "
+                f"'{registration.function_name}' has no **kwargs parameter",
+                strict,
+            )
+
+        # Check 8: a kwargs_dct key conflicts with an explicit function argument.
+        kwargs_registration = None
+        if registration.var_kw_name is not None:
+            kwargs_registration = self.registered_kwargs.get(registration.var_kw_name)
+        if kwargs_registration is not None:
+            for key in kwargs_registration.mapping_dct:
+                if key in explicit_params:
+                    self._strict_violation(
+                        f"kwargs_dct key '{key}' conflicts with explicit parameter '{key}' "
+                        f"of function '{registration.function_name}'",
+                        strict,
+                    )
+
+        # Check 12: a param_mapping key is not a function argument.
+        for key in registration.param_mapping:
+            if key not in explicit_params:
+                self._strict_violation(
+                    f"param_mapping key '{key}' is not a parameter of function "
+                    f"'{registration.function_name}'",
+                    strict,
+                )
+
+        # Check 10: a param_mapping value is not found in config, visible
+        # output values, or visible manual values. Literal None mapping and
+        # 'logger' are always resolvable.
+        if visible_names is None:
+            visible_names = self._registration_visible_names()
+        for key, value in registration.param_mapping.items():
+            if value is None or value == "logger":
+                continue
+            if value not in visible_names:
+                self._strict_violation(
+                    f"param_mapping value '{value}' for parameter '{key}' of function "
+                    f"'{registration.function_name}' is not found in config, visible output values, or visible manual values",
+                    strict,
+                )
+
+        # Check 11: a kwargs_dct value is not found in config, visible output
+        # values, or visible manual values.
+        if kwargs_registration is not None:
+            for key, value in kwargs_registration.mapping_dct.items():
+                if value == "logger":
+                    continue
+                if value not in visible_names:
+                    self._strict_violation(
+                        f"kwargs_dct value '{value}' for key '{key}' of function "
+                        f"'{registration.function_name}' is not found in config, visible output values, or visible manual values",
+                        strict,
+                    )
+
+    def _registration_visible_names(self) -> set[str]:
+        return (
+            set(self.parent._visible_config_names())
+            | set(self.parent._visible_outputs_before_priority(self.execution_priority))
+            | set(
+                self.parent._declared_output_names_before_priority(
+                    self.execution_priority
+                )
+            )
+            | set(self.parent.manual_values)
+            | set(self.parent._ancestor_manual_values())
+        )
+
+    def _strict_violation(self, message: str, strict: bool) -> None:
+        if strict:
+            raise RegistrationError(message)
+        self.parent.logger.warning(message)
 
     def remove_function(self, function_name: str) -> None:
         matches = [

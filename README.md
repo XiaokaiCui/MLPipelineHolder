@@ -26,7 +26,7 @@ Each extra adds:
 - `dataframe`: pandas, PyArrow, and Dask DataFrame support
 - `torch`: PyTorch model, tensor, and optimiser persistence
 - `memory`: `psutil`-based memory profiling logs
-- `all`: all optional features listed above
+- `all`: all optional features listed above (**recommended**)
 
 The core package requires Python 3.11 or later and includes `termcolor`, NumPy, and Rich.
 
@@ -35,7 +35,7 @@ The core package requires Python 3.11 or later and includes `termcolor`, NumPy, 
 ### Typical use cases
 
 - I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
-- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work.
+- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (see [strict mode](#81-strict-mode)).
 - I use the same notebook across different days and do not want to rerun expensive steps every time I reopen it.
 - I have limited RAM and need a convenient way to load and offload DataFrames while exploring the data.
 - I want to focus on analysis and modelling, with logging and pipeline visualisation handled more simply.
@@ -175,9 +175,11 @@ Parent-level execution can also use float priorities for branch groups. For exam
 When executing a registered function, inputs are resolved in this order:
 
 1. explicit runtime overrides
-2. `para_value_dict`
-3. config fields
-4. function defaults
+2. visible output values (upstream parent outputs and earlier-priority block outputs)
+3. manual values (`set_constant_value`), own then ancestors'
+4. config fields, own then ancestors'
+5. function defaults
+6. otherwise a `ResolutionError` is raised
 
 Special cases:
 
@@ -185,6 +187,7 @@ Special cases:
 - child pipelines can use upstream parent outputs from earlier parent-level nodes
 - child config values override same-named parent config values
 - child config values are not exposed to parent blocks
+- an input name that matches a declared-but-not-yet-produced output is **not** auto-resolved to `None`; it raises `ResolutionError` until that output is actually produced
 
 ### 4. Outputs
 
@@ -274,7 +277,8 @@ Rules:
 - the pipeline may be created with `configuration=None`, which is treated as an empty config
 - `set_config(...)` adds new fields or updates existing ones
 - `update_config(...)` updates existing fields only
-- config writes that would conflict with declared output names are rejected or skipped depending on the method used
+- config writes that conflict with declared output names or manual values are skipped with a warning
+- `set_constant_value(...)` raises if the name collides with a visible config field
 
 ```python
 full_config = pipeline.get_full_config()
@@ -335,8 +339,34 @@ Constant behaviour:
 
 Name conflicts are prevented across the whole pipeline tree in both directions:
 
-- `set_constant_value(...)` raises `RegistrationError` if the name is already a declared output or produced value anywhere in the tree
+- `set_constant_value(...)` raises `RegistrationError` if the name is already a declared output or produced value anywhere in the tree, or if it collides with a visible config field
 - registering an output whose name matches a constant anywhere in the tree is rejected or skipped with a warning, depending on the registration path
+
+### 8.1 Strict mode
+
+Strict mode enables fail-fast registration validation. Create the root pipeline with `strict_mode=True`:
+
+```python
+pipeline = PipelineHandler(..., strict_mode=True)
+pipeline.set_strict_mode(True)   # or at runtime; applies to the whole attached tree
+```
+
+All attached children inherit strict mode from the root pipeline. The setting is saved and restored with the pipeline.
+
+At registration time, strict mode raises `RegistrationError` (instead of logging a warning) for:
+
+- `kwargs_dct` used but the function has no `**kwargs` parameter
+- a `kwargs_dct` key that conflicts with an explicit function argument
+- a `gate_config` name not found in config, visible output values, or visible manual values
+- a `param_mapping` value not found in config, visible output values, or visible manual values (a literal `None` mapping and `logger` are exempt)
+- a `kwargs_dct` value not found in config, visible output values, or visible manual values
+- a `param_mapping` key that is not a parameter of the function
+
+Visible output values for these checks are the upstream parent outputs plus the pipeline's own earlier-priority outputs — declared-but-unproduced outputs and downstream outputs do not count.
+
+Attaching a child pipeline to a strict parent revalidates the child's whole subtree and raises on the first failing check. Cross-boundary name collisions also raise: a child's config field, manual value, or declared output may not collide with a parent's object of a different kind (config vs manual, config vs visible output, manual vs visible output, output vs config, output vs manual). Same-kind collisions (config vs config, manual vs manual, output vs visible output) remain allowed because the child's definition overrides deterministically.
+
+When `strict_mode=False` (the default), the same checks only log warnings, preserving backward-compatible registration behaviour.
 
 ### 9. Save and load projects
 
@@ -378,6 +408,15 @@ Saved projects contain:
 - logs and configuration snapshots under `metadata/`
 
 Every `save_pipeline(...)` call also archives a timestamped copy of the current `pipeline.log` into `history_logs/` inside the project root, named `yyyy-mm-dd_hh-mm-ss.mmm.log` (UTC, e.g. `history_logs/2026-08-18_16-38-14.857.log`). This preserves each save-time log snapshot even though loading a pipeline starts a fresh `pipeline.log`. When a `pipeline_backup_directory` is configured, the refreshed backup copy also receives the updated `history_logs/` folder, and loading a saved project restores its `history_logs/` folder into the project root.
+
+`save_pipeline(..., verbose=False)` (the default) suppresses the advisory warnings emitted during saving — e.g. the "preserve callable references" notice and per-value placeholder warnings for unserialisable or non-importable values. Pass `verbose=True` to see them:
+
+```python
+pipeline.save_pipeline()               # quiet by default
+pipeline.save_pipeline(verbose=True)   # show save advisory warnings
+```
+
+Warnings unrelated to saving (registration, load, logger) are never suppressed.
 
 Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_constant_value(...)`, `set_value(...)`, or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 

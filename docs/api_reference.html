@@ -238,7 +238,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   log_traceback_to_file: <span class="arg">bool</span> = True,
   show_traceback_locals: <span class="arg">bool</span> = False,
   use_rich_traceback_console: <span class="arg">bool</span> = True,
-  torch_load_weights_only: <span class="arg">bool</span> = False
+  torch_load_weights_only: <span class="arg">bool</span> = False,
+  strict_mode: <span class="arg">bool</span> = False
 ) -&gt; <span class="ret">None</span>
 </div>
 
@@ -257,6 +258,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>show_traceback_locals</code></td><td>bool</td><td>Show local variables in the Rich console traceback.</td></tr>
   <tr><td><code>use_rich_traceback_console</code></td><td>bool</td><td>Render console tracebacks with Rich instead of plain stdlib text.</td></tr>
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
+  <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation: violations of the strict checks raise <code>RegistrationError</code> instead of logging warnings. Attached children inherit strict mode from the root pipeline; the setting is persisted with the pipeline.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
@@ -364,14 +366,15 @@ rate = pipeline.get_constant_value("learning_rate")</pre>
 <p>Returns the local configuration as a plain dictionary (without parent inheritance).</p>
 
 <h4 class="method-name" id="PipelineHandler.save_pipeline">save_pipeline()</h4>
-<div class="sig"><span class="kw">save_pipeline</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None) -&gt; <span class="ret">Path</span></div>
+<div class="sig"><span class="kw">save_pipeline</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None, *, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">Path</span></div>
 <p>Saves the pipeline project tree. Without <code>path</code>, saves to the current <code>project_root</code>. Passing a different path creates a restart-safe copy of the current project tree (including nested children and disk-backed artifacts) before writing fresh state. The target must not overlap the current project tree.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, an in-place save also refreshes the backup copy.</p>
 <p>Every call also archives a timestamped copy of the current <code>pipeline.log</code> into <code>history_logs/</code> inside the project root (e.g. <code>history_logs/2026-08-18_16-38-14.857.log</code>, UTC, <code>yyyy-mm-dd_hh-mm-ss.mmm</code>), preserving the save-time log snapshot even though loading a pipeline starts a fresh <code>pipeline.log</code>.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, the refreshed backup copy also receives the updated <code>history_logs/</code> folder. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
+<p>With <code>verbose=False</code> (the default) the advisory warnings emitted during saving are suppressed: the callable-reference notice and per-value placeholder warnings for unserialisable or non-importable values. Pass <code>verbose=True</code> to show them. Warnings unrelated to saving (registration, load, logger) are never suppressed.</p>
 
 <h4 class="method-name" id="PipelineHandler.save_project">save_project()</h4>
-<div class="sig"><span class="kw">save_project</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None) -&gt; <span class="ret">Path</span></div>
+<div class="sig"><span class="kw">save_project</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None, *, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">Path</span></div>
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
@@ -480,6 +483,10 @@ rate = pipeline.get_constant_value("learning_rate")</pre>
 <h4 class="method-name" id="PipelineHandler.set_torch_load_weights_only">set_torch_load_weights_only()</h4>
 <div class="sig"><span class="kw">set_torch_load_weights_only</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
 <p>Sets whether torch artifacts saved by this pipeline load with <code>torch.load(weights_only=True)</code>. The setting is stamped onto each artifact record at save time, persisted with the pipeline, and never inherited from a parent pipeline.</p>
+
+<h4 class="method-name" id="PipelineHandler.set_strict_mode">set_strict_mode()</h4>
+<div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
+<p>Enables or disables strict-mode registration validation for this pipeline and all attached descendants. In strict mode, violations of the strict registration checks (kwargs usage, gate config resolution, param_mapping and kwargs_dct value/key validation) raise <code>RegistrationError</code> instead of logging warnings. The setting is persisted with the pipeline.</p>
 
 <h4 class="method-name" id="PipelineHandler.get_result_history">get_result_history()</h4>
 <div class="sig"><span class="kw">get_result_history</span>() -&gt; <span class="ret">list[str]</span></div>
