@@ -189,6 +189,14 @@ def produce_two() -> tuple[str, str]:
     return "beta-value", "max-error-weight-value"
 
 
+def read_feather(df_path: str) -> str:
+    return f"df:{df_path}"
+
+
+def pre_process_etfs(etfs_df: str, **extra_kwargs: Any) -> str:
+    return etfs_df
+
+
 def build_torch_model():
     from importlib import import_module
 
@@ -3773,6 +3781,34 @@ class StrictModeTests(unittest.TestCase):
             with self.assertRaises(RegistrationError):
                 parent.add_child_pipeline(child, 20.0)
             self.assertIsNone(child.parent_pipeline)
+
+    def test_strict_mode_attach_two_level_sibling_declared_output_visible(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            dr = PipelineHandler("dr_pipeline", {}, tmp / "dr")
+            reader = PipelineHandler("read_etfs_df", {}, tmp / "dr" / "read_etfs_df")
+            reader_block = reader.add_block("read_etfs_df_block", 10.0)
+            reader_block.register_function(
+                read_feather, ["etfs_df"], save_to_disk=["etfs_df"]
+            )
+            dr.add_child_pipeline(reader, 13.0)
+
+            proc = PipelineHandler("pre_process_etfs", {}, tmp / "dr" / "pre_process_etfs")
+            proc_block = proc.add_block("pre_process_etfs_block", 10.0)
+            proc_block.register_kwargs("default_kwargs", {})
+            proc_block.register_function(
+                pre_process_etfs,
+                ["etfs_df"],
+                param_mapping={"etfs_df": "etfs_df"},
+                var_kw_name="default_kwargs",
+            )
+            dr.add_child_pipeline(proc, 30.0)
+
+            quant = PipelineHandler(
+                "quant_pipeline", {}, tmp / "quant", strict_mode=True
+            )
+            quant.add_child_pipeline(dr, dr.execution_priority, forced=True)
+            self.assertEqual(dr.parent_pipeline, quant)
 
     def test_strict_mode_attach_child_manual_vs_parent_declared_output_raises(self) -> None:
         with TemporaryDirectory() as temp_dir:
