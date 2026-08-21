@@ -2336,12 +2336,23 @@ class PipelineHandler:
                 )
 
         for pipeline in child_pipelines:
+            pipeline_effective_priority = (
+                pipeline.execution_priority
+                if pipeline.execution_priority is not None
+                else execution_priority
+            )
+            pipeline_upstream_declared = set(
+                pipeline._declared_output_names_before_priority(
+                    pipeline_effective_priority
+                )
+            )
             if pipeline.gate_block is not None and pipeline.gate_block.config_field_name is not None:
                 gate_visible = (
                     set(pipeline.get_full_config())
                     | set(pipeline._incoming_parent_outputs())
                     | set(pipeline.manual_values)
                     | set(pipeline._ancestor_manual_values())
+                    | pipeline_upstream_declared
                     | parent_config_names
                     | parent_manual_names
                     | parent_output_names
@@ -2356,6 +2367,11 @@ class PipelineHandler:
                     set(pipeline._visible_config_names())
                     | set(
                         pipeline._visible_outputs_before_priority(
+                            block.execution_priority
+                        )
+                    )
+                    | set(
+                        pipeline._declared_output_names_before_priority(
                             block.execution_priority
                         )
                     )

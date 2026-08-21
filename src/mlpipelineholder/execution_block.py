@@ -368,6 +368,11 @@ class ExecutionBlock:
             visible_names = (
                 set(self.parent._visible_config_names())
                 | set(self.parent._visible_outputs_before_priority(self.execution_priority))
+                | set(
+                    self.parent._declared_output_names_before_priority(
+                        self.execution_priority
+                    )
+                )
                 | set(self.parent.manual_values)
                 | set(self.parent._ancestor_manual_values())
             )
