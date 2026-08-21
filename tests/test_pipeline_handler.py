@@ -177,6 +177,18 @@ def local_variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_i
     return (base + sum(extra_values) + sum(extra_items.values())) * factor
 
 
+def strict_target(output_df: str, target_col: str, **extra_kwargs: Any) -> str:
+    return output_df
+
+
+def strict_target_no_kwargs(output_df: str, target_col: str) -> str:
+    return output_df
+
+
+def produce_two() -> tuple[str, str]:
+    return "beta-value", "max-error-weight-value"
+
+
 def build_torch_model():
     from importlib import import_module
 
@@ -460,7 +472,7 @@ class PipelineHandlerTests(unittest.TestCase):
             save_dir = tmp_path / "bundle"
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                pipeline.save_pipeline(save_dir)
+                pipeline.save_pipeline(save_dir, verbose=True)
             loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
 
             self.assertTrue(
@@ -510,6 +522,62 @@ class PipelineHandlerTests(unittest.TestCase):
                 "predictor_model",
             )
 
+    def test_save_pipeline_default_silences_save_warnings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ref-save-silent", {}, tmp_path / "project")
+            block = pipeline.add_block("weird", 1)
+            block.register_function(build_unserializable_object, ["weird_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                pipeline.save_pipeline(save_dir)
+
+            self.assertFalse(
+                any("reference placeholder" in str(item.message) for item in caught)
+            )
+
+    def test_save_pipeline_verbose_keeps_save_warnings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ref-save-verbose", {}, tmp_path / "project")
+            block = pipeline.add_block("weird", 1)
+            block.register_function(build_unserializable_object, ["weird_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                pipeline.save_pipeline(save_dir, verbose=True)
+
+            self.assertTrue(
+                any("reference placeholder" in str(item.message) for item in caught)
+            )
+
+    def test_save_pipeline_verbose_false_keeps_non_save_warnings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("keep-other-warnings", {}, tmp_path / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(build_unserializable_object, ["weird_obj"])
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("always")
+                pipeline.save_pipeline(save_dir, verbose=False)
+
+            # load_pipeline warnings are unrelated to save and must still appear.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+
+            self.assertTrue(
+                any("historical function snapshots" in str(item.message) for item in caught)
+            )
+
     def test_save_pipeline_warns_when_optimizer_has_no_linked_model(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -521,7 +589,7 @@ class PipelineHandlerTests(unittest.TestCase):
             save_dir = tmp_path / "bundle"
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                pipeline.save_pipeline(save_dir)
+                pipeline.save_pipeline(save_dir, verbose=True)
 
             self.assertTrue(
                 any("without a linked model artifact" in str(item.message) for item in caught)
@@ -2213,7 +2281,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                saved_path = pipeline.save_project()
+                saved_path = pipeline.save_project(verbose=True)
 
             self.assertEqual(saved_path, tmp_path)
             self.assertTrue((tmp_path / "pipeline_state.pkl").exists())
@@ -2265,7 +2333,7 @@ class PipelineHandlerTests(unittest.TestCase):
             save_dir = tmp_path / "save_bundle"
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
-                pipeline.save_project(save_dir)
+                pipeline.save_project(save_dir, verbose=True)
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
@@ -3497,3 +3565,298 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(value, "loaded-tensor")
             self.assertEqual(mocked_load.call_args.kwargs["weights_only"], True)
+
+
+class StrictModeTests(unittest.TestCase):
+    def _strict_pipeline(self, tmp_path: Path, config: Any = None) -> PipelineHandler:
+        return PipelineHandler(
+            "strict-root",
+            {} if config is None else config,
+            tmp_path,
+            strict_mode=True,
+        )
+
+    def _log_text(self, tmp_path: Path) -> str:
+        log_file = tmp_path / "metadata" / "pipeline.log"
+        return log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+
+    def test_strict_mode_registration_check7_kwargs_without_kwargs_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_kwargs("default_kwargs", {"neg_exp": "src_col"})
+            with self.assertRaises(RegistrationError):
+                block.register_function(
+                    strict_target_no_kwargs,
+                    ["out"],
+                    var_kw_name="default_kwargs",
+                    param_mapping={"output_df": "src_col"},
+                )
+
+    def test_non_strict_mode_registration_check7_kwargs_without_kwargs_warns(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("loose", {}, tmp_path)
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_kwargs("default_kwargs", {"neg_exp": "src_col"})
+            block.register_function(
+                strict_target_no_kwargs,
+                ["out"],
+                var_kw_name="default_kwargs",
+                param_mapping={"output_df": "src_col"},
+            )
+            self.assertIn("no **kwargs parameter", self._log_text(tmp_path))
+
+    def test_strict_mode_registration_check8_kwargs_key_conflicts_with_explicit_param(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_kwargs("default_kwargs", {"target_col": "src_col"})
+            with self.assertRaises(RegistrationError):
+                block.register_function(
+                    strict_target,
+                    ["out"],
+                    var_kw_name="default_kwargs",
+                    param_mapping={"output_df": "src_col"},
+                )
+
+    def test_strict_mode_registration_check9_gate_config_not_found_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            with self.assertRaises(RegistrationError):
+                pipeline.create_atom_child_pipeline(
+                    child_name="g",
+                    execution_priority=10.0,
+                    target_function=strict_target,
+                    gate_config="missing_gate_field",
+                    expected_value=None,
+                    output_variable_names="out",
+                    param_mapping={"output_df": "other", "target_col": "other2"},
+                )
+
+    def test_non_strict_mode_registration_check9_gate_config_not_found_autocreates(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("loose", {}, Path(temp_dir))
+            pipeline.create_atom_child_pipeline(
+                child_name="g",
+                execution_priority=10.0,
+                target_function=strict_target,
+                gate_config="missing_gate_field",
+                expected_value=None,
+                output_variable_names="out",
+                param_mapping={"output_df": "other", "target_col": "other2"},
+            )
+            child = pipeline.get_child_pipeline("g")
+            self.assertIn("missing_gate_field", child.get_full_config())
+
+    def test_strict_mode_registration_check10_param_mapping_value_not_found_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            block = pipeline.add_block("b", 1)
+            with self.assertRaises(RegistrationError):
+                block.register_function(
+                    strict_target,
+                    ["out"],
+                    param_mapping={"output_df": "other", "target_col": "nonexistent_value"},
+                )
+
+    def test_strict_mode_registration_check10_none_mapping_exempt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_function(
+                strict_target,
+                ["out"],
+                param_mapping={"output_df": "src_col", "target_col": None},
+            )
+
+    def test_strict_mode_registration_check11_kwargs_value_not_found_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_kwargs("default_kwargs", {"neg_exp": "nonexistent_kwarg_value"})
+            with self.assertRaises(RegistrationError):
+                block.register_function(
+                    strict_target,
+                    ["out"],
+                    var_kw_name="default_kwargs",
+                    param_mapping={"output_df": "src_col"},
+                )
+
+    def test_strict_mode_registration_check12_param_mapping_key_not_in_function_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            with self.assertRaises(RegistrationError):
+                block.register_function(
+                    strict_target,
+                    ["out"],
+                    param_mapping={"output_df": "src_col", "not_a_real_param": "src_col"},
+                )
+
+    def test_non_strict_mode_registration_check12_param_mapping_key_not_in_function_warns(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("loose", {}, tmp_path)
+            pipeline.set_config({"src_col": "x"})
+            block = pipeline.add_block("b", 1)
+            block.register_function(
+                strict_target,
+                ["out"],
+                param_mapping={"output_df": "src_col", "not_a_real_param": "src_col"},
+            )
+            self.assertIn("not a parameter", self._log_text(tmp_path))
+
+    def test_strict_mode_inherited_by_attached_children(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = self._strict_pipeline(Path(temp_dir))
+            child = PipelineHandler("child", {}, Path(temp_dir) / "children" / "child")
+            pipeline.add_child_pipeline(child, 10.0)
+            self.assertTrue(child.strict_mode)
+            child_block = child.add_block("cb", 1)
+            with self.assertRaises(RegistrationError):
+                child_block.register_function(
+                    strict_target,
+                    ["out"],
+                    param_mapping={"output_df": "other", "target_col": "missing_value"},
+                )
+
+    def test_strict_mode_saved_and_loaded(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = self._strict_pipeline(tmp / "project")
+            pipeline.set_config({"src_col": "x", "real_col": "y"})
+            block = pipeline.add_block("b", 1)
+            block.register_function(
+                strict_target,
+                ["out"],
+                param_mapping={"output_df": "src_col", "target_col": "real_col"},
+            )
+            save_dir = tmp / "bundle"
+            pipeline.save_pipeline(save_dir)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            self.assertTrue(loaded.strict_mode)
+
+    def test_strict_mode_attach_cross_boundary_conflict_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            parent.set_config({"shared_name": 1})
+            child = PipelineHandler("child", {}, tmp / "children" / "child")
+            child.set_constant_value("shared_name", 2)
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 10.0)
+            self.assertIsNone(child.parent_pipeline)
+
+    def test_strict_mode_attach_same_type_conflicts_allowed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            parent.set_config({"shared": 1})
+            child = PipelineHandler("child", {"shared": 2}, tmp / "children" / "child")
+            parent.add_child_pipeline(child, 10.0)
+            self.assertEqual(child.parent_pipeline, parent)
+
+    def test_strict_mode_attach_child_config_vs_parent_declared_output_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            upstream = parent.add_block("upstream", 10.0)
+            upstream.register_function(produce_two, ["beta", "max_error_weight"])
+            child = PipelineHandler("child", {"beta": 2}, tmp / "children" / "child")
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 20.0)
+            self.assertIsNone(child.parent_pipeline)
+
+    def test_strict_mode_attach_child_manual_vs_parent_declared_output_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            upstream = parent.add_block("upstream", 10.0)
+            upstream.register_function(produce_two, ["beta", "max_error_weight"])
+            child = PipelineHandler("child", {}, tmp / "children" / "child")
+            child.set_constant_value("beta", 2)
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 20.0)
+            self.assertIsNone(child.parent_pipeline)
+
+    def test_strict_mode_attach_allows_parent_declared_upstream_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            upstream = parent.add_block("upstream", 10.0)
+            upstream.register_function(
+                produce_two, ["beta", "max_error_weight"]
+            )
+            # The upstream block has declared beta/max_error_weight but has not
+            # run yet; the child may still reference them when attaching.
+            child = PipelineHandler("child", {}, tmp / "children" / "child")
+            child_block = child.add_block("cb", 10.0)
+            child_block.register_kwargs("default_kwargs", {"neg_exp": "beta"})
+            child_block.register_function(
+                strict_target,
+                ["out"],
+                var_kw_name="default_kwargs",
+                param_mapping={"output_df": "max_error_weight"},
+            )
+            parent.add_child_pipeline(child, 20.0)
+            self.assertEqual(child.parent_pipeline, parent)
+
+    def test_strict_mode_attach_revalidates_child_registrations(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            child = PipelineHandler("child", {}, tmp / "children" / "child")
+            block = child.add_block("cb", 1)
+            block.register_function(
+                strict_target,
+                ["out"],
+                param_mapping={"output_df": "other", "target_col": "missing_value"},
+            )
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 10.0)
+            self.assertIsNone(child.parent_pipeline)
+
+    def test_strict_mode_attach_allows_gate_resolving_from_parent_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = self._strict_pipeline(tmp / "parent")
+            parent.set_constant_value("gate_flag", True)
+            child = PipelineHandler("child", {}, tmp / "children" / "child")
+            block = child.add_block("cb", 1)
+            block.register_function(
+                strict_target, ["out"], param_mapping={"output_df": "gate_flag"}
+            )
+            child.set_gate_block("gate_flag", expected_value=True)
+            parent.add_child_pipeline(child, 10.0)
+            self.assertEqual(child.parent_pipeline, parent)
+
+    def test_set_config_warns_and_skips_on_manual_value_collision(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("cfg", {}, tmp_path)
+            pipeline.set_constant_value("manual_name", 1)
+            pipeline.set_config({"manual_name": 2})
+            self.assertIn("manual value", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))
+            self.assertEqual(pipeline.get_constant_value("manual_name"), 1)
+
+    def test_set_constant_value_raises_on_visible_config_collision(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("cfg", {"cfg_name": 1}, Path(temp_dir))
+            with self.assertRaises(RegistrationError):
+                pipeline.set_constant_value("cfg_name", 2)
+
+    def test_unmapped_input_matching_manual_value_warns(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("cfg", {}, tmp_path)
+            pipeline.set_constant_value("base", 5)
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_seed, ["out"])
+            self.assertIn("unmapped input", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))

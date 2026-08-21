@@ -51,6 +51,14 @@ _RESERVED_BUILTIN_NAMES = {
 }
 
 
+_SAVE_WARNING_PATTERNS = (
+    r"Saved pipelines preserve callable references",
+    r".*was saved without a linked model artifact",
+    r".*could not be serialized directly; saving a reference placeholder instead",
+    r".*is not importable; saving a reference placeholder instead",
+)
+
+
 class _MissingClassUnpickler(pickle.Unpickler):
     def __init__(self, file_obj: BytesIO) -> None:
         super().__init__(file_obj)
@@ -87,6 +95,7 @@ class PipelineHandler:
         show_traceback_locals: bool = False,
         use_rich_traceback_console: bool = True,
         torch_load_weights_only: bool = False,
+        strict_mode: bool = False,
         _allow_existing_root: bool = False,
     ) -> None:
         self.registration_name = registration_name
@@ -126,6 +135,8 @@ class PipelineHandler:
             self.memory_saving_mode = memory_saving_mode
             self.memory_profile_logging = memory_profile_logging
             self.torch_load_weights_only = bool(torch_load_weights_only)
+            self.strict_mode = bool(strict_mode)
+            self._suppress_strict_validation = False
             self.suppress_registration_advisories = False
             self.historical_result_log_path: str | None = None
             self._attached_result_history_override: list[str] | None = None
@@ -250,6 +261,7 @@ class PipelineHandler:
         self._validate_node_registration(child_pipeline, execution_priority)
         self._validate_related_pipeline_names(child_pipeline)
         self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
+        self._validate_strict_attach(child_pipeline, execution_priority)
         child_pipeline._attach_to_parent(self, execution_priority)
         self._register_node(child_pipeline)
         if child_pipeline.para_value_dict:
@@ -307,12 +319,28 @@ class PipelineHandler:
             local_folder_path=child_root,
             execution_priority=execution_priority,
             forced=forced,
+            strict_mode=self._root_pipeline().strict_mode,
             _allow_existing_root=allow_existing_root,
         )
         temp_pipeline.logger = self.logger
         temp_pipeline.parent_pipeline = self
         if gate_config is not None:
-            if gate_config not in temp_pipeline.get_full_config():
+            gate_visible = (
+                set(temp_pipeline.get_full_config())
+                | set(temp_pipeline._incoming_parent_outputs())
+                | set(temp_pipeline.manual_values)
+                | set(temp_pipeline._ancestor_manual_values())
+                | set(self._declared_output_names_before_priority(execution_priority))
+            )
+            if gate_config not in gate_visible:
+                if temp_pipeline.strict_mode and not temp_pipeline._suppress_strict_validation:
+                    raise RegistrationError(
+                        f"Gate config '{gate_config}' is not found in config, visible output values, or visible manual values"
+                    )
+                if not temp_pipeline._suppress_strict_validation:
+                    temp_pipeline.logger.warning(
+                        f"Gate config '{gate_config}' is not found in config, visible output values, or visible manual values; auto-creating config field with default value"
+                    )
                 temp_pipeline.set_config({gate_config: default_config_value})
             temp_pipeline.set_gate_block(
                 gate_config,
@@ -369,6 +397,7 @@ class PipelineHandler:
 
     def set_config(self, overrides: dict[str, Any]) -> None:
         declared_outputs = self.list_declared_outputs()
+        manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
         for field_name, value in overrides.items():
             self._validate_builtin_name_conflict(field_name, owner_label="configuration")
             if field_name in declared_outputs:
@@ -376,18 +405,31 @@ class PipelineHandler:
                     f"Skipped config update for '{field_name}' because it conflicts with a declared output"
                 )
                 continue
+            if field_name in manual_names:
+                self.logger.warning(
+                    f"Skipped config update for '{field_name}' because it conflicts with a manual value"
+                )
+                continue
             self._set_config_value(field_name, value)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         config_names = self.get_full_config()
+        declared_outputs = self.list_declared_outputs()
+        manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
         for field_name, value in overrides.items():
             self._validate_builtin_name_conflict(field_name, owner_label="configuration")
             if field_name not in config_names:
                 raise ResolutionError(f"Unknown config field: {field_name}")
-            if field_name in self.list_declared_outputs():
-                raise ResolutionError(
-                    f"Cannot update config field '{field_name}' because it conflicts with a declared output"
+            if field_name in declared_outputs:
+                self.logger.warning(
+                    f"Skipped config update for '{field_name}' because it conflicts with a declared output"
                 )
+                continue
+            if field_name in manual_names:
+                self.logger.warning(
+                    f"Skipped config update for '{field_name}' because it conflicts with a manual value"
+                )
+                continue
             self._set_config_value(field_name, value)
 
     def get_value(self, variable_name: str) -> Any:
@@ -429,6 +471,10 @@ class PipelineHandler:
 
     def set_constant_value(self, variable_name: str, value: Any) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline constant")
+        if variable_name in self._visible_config_names():
+            raise RegistrationError(
+                f"Constant name '{variable_name}' conflicts with a visible configuration field"
+            )
         if variable_name in self._tree_declared_output_names():
             raise RegistrationError(
                 f"Constant name '{variable_name}' conflicts with a declared output name in the pipeline tree"
@@ -672,6 +718,11 @@ class PipelineHandler:
         """Set whether torch artifacts saved by this pipeline load with weights_only=True."""
         self.torch_load_weights_only = bool(enabled)
 
+    def set_strict_mode(self, enabled: bool) -> None:
+        """Enable or disable strict-mode registration validation for this pipeline and all attached descendants."""
+        for pipeline in self._iter_attached_pipelines():
+            pipeline.strict_mode = bool(enabled)
+
     def define_expression_runtime(self, code: str) -> None:
         code = self._normalize_expression_runtime_code(code)
         self._validate_expression_runtime_code(code)
@@ -859,11 +910,24 @@ class PipelineHandler:
         self,
         path: str | Path | None = None,
         save_log_to_file: str | Path | None = None,
+        *,
+        verbose: bool = False,
     ) -> Path:
-        warnings.warn(
-            "Saved pipelines preserve callable references, not historical function behavior; later source changes may affect reloaded pipelines.",
-            stacklevel=2,
-        )
+        with warnings.catch_warnings():
+            if not verbose:
+                for pattern in _SAVE_WARNING_PATTERNS:
+                    warnings.filterwarnings("ignore", message=pattern)
+            warnings.warn(
+                "Saved pipelines preserve callable references, not historical function behavior; later source changes may affect reloaded pipelines.",
+                stacklevel=2,
+            )
+            return self._save_pipeline_impl(path, save_log_to_file)
+
+    def _save_pipeline_impl(
+        self,
+        path: str | Path | None,
+        save_log_to_file: str | Path | None,
+    ) -> Path:
         target = self.project_root if path is None else Path(path)
         if self._temporary_root_handle is not None and self._normalized_path(target) != self._normalized_path(self.project_root):
             self._relocate_project_root(target)
@@ -904,8 +968,10 @@ class PipelineHandler:
         self,
         path: str | Path | None = None,
         save_log_to_file: str | Path | None = None,
+        *,
+        verbose: bool = False,
     ) -> Path:
-        return self.save_pipeline(path, save_log_to_file=save_log_to_file)
+        return self.save_pipeline(path, save_log_to_file=save_log_to_file, verbose=verbose)
 
     def _archive_current_log_to_history(self) -> None:
         """Copy the current pipeline.log into history_logs/ with a timestamped name."""
@@ -1266,6 +1332,7 @@ class PipelineHandler:
             show_traceback_locals=payload.get("show_traceback_locals", False),
             use_rich_traceback_console=payload.get("use_rich_traceback_console", True),
             torch_load_weights_only=payload.get("torch_load_weights_only", False),
+            strict_mode=payload.get("strict_mode", False),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
         )
@@ -1273,6 +1340,7 @@ class PipelineHandler:
             pipeline.define_expression_runtime(payload["expression_runtime_code"])
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
         pipeline.suppress_registration_advisories = True
+        pipeline._suppress_strict_validation = True
         if payload.get("gate") is not None:
             gate_payload = payload["gate"]
             if gate_payload.get("kind") == "config_field":
@@ -1384,6 +1452,7 @@ class PipelineHandler:
             pipeline._rewrite_artifact_paths(Path(saved_project_root), project_root)
             pipeline._rewrite_run_history_paths(Path(saved_project_root), project_root)
         pipeline.suppress_registration_advisories = False
+        pipeline._suppress_strict_validation = False
         if parent is not None:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
@@ -1413,6 +1482,7 @@ class PipelineHandler:
             "show_traceback_locals": traceback_settings["show_traceback_locals"],
             "use_rich_traceback_console": traceback_settings["use_rich_traceback_console"],
             "torch_load_weights_only": self.torch_load_weights_only,
+            "strict_mode": self.strict_mode,
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
@@ -2215,6 +2285,94 @@ class PipelineHandler:
             self._remove_registered_node(node)
         self._invalidate_from_priority(earliest_priority)
 
+    def _validate_strict_attach(
+        self,
+        child: "PipelineHandler",
+        execution_priority: float,
+    ) -> None:
+        """Validate attaching `child` when this pipeline is in strict mode.
+
+        Runs before any mutation so a failed check leaves the child unattached
+        and this pipeline untouched. Raises RegistrationError on the first
+        cross-boundary name conflict or the first failing per-registration
+        strict check.
+        """
+        if not self.strict_mode or self._suppress_strict_validation:
+            return
+
+        child_pipelines = child._iter_attached_pipelines()
+        child_config_names: set[str] = set()
+        child_manual_names: set[str] = set()
+        child_output_names: set[str] = set()
+        for pipeline in child_pipelines:
+            child_config_names.update(pipeline.config_as_dict())
+            child_manual_names.update(pipeline.manual_values)
+            child_output_names.update(pipeline.list_declared_outputs())
+
+        parent_config_names = set(self._visible_config_names())
+        parent_manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
+        parent_output_names = set(
+            self._visible_outputs_before_priority(execution_priority)
+        )
+        # Outputs declared by earlier-priority nodes are guaranteed to exist
+        # before the child runs, so they count as visible at attach time even
+        # before the upstream blocks have executed.
+        parent_output_names.update(
+            self._declared_output_names_before_priority(execution_priority)
+        )
+
+        cross_conflicts: list[tuple[str, set[str]]] = [
+            ("child config field collides with parent manual value", child_config_names & parent_manual_names),
+            ("child config field collides with parent visible output", child_config_names & parent_output_names),
+            ("child manual value collides with parent config field", child_manual_names & parent_config_names),
+            ("child manual value collides with parent visible output", child_manual_names & parent_output_names),
+            ("child output collides with parent config field", child_output_names & parent_config_names),
+            ("child output collides with parent manual value", child_output_names & parent_manual_names),
+        ]
+        for message, names in cross_conflicts:
+            if names:
+                raise RegistrationError(
+                    f"Attach conflict while attaching '{child.registration_name}': {message}(s) {sorted(names)}"
+                )
+
+        for pipeline in child_pipelines:
+            if pipeline.gate_block is not None and pipeline.gate_block.config_field_name is not None:
+                gate_visible = (
+                    set(pipeline.get_full_config())
+                    | set(pipeline._incoming_parent_outputs())
+                    | set(pipeline.manual_values)
+                    | set(pipeline._ancestor_manual_values())
+                    | parent_config_names
+                    | parent_manual_names
+                    | parent_output_names
+                )
+                if pipeline.gate_block.config_field_name not in gate_visible:
+                    raise RegistrationError(
+                        f"Gate config '{pipeline.gate_block.config_field_name}' in child pipeline "
+                        f"'{pipeline.registration_name}' is not found in config, visible output values, or visible manual values"
+                    )
+            for block in pipeline.blocks:
+                block_visible_names = (
+                    set(pipeline._visible_config_names())
+                    | set(
+                        pipeline._visible_outputs_before_priority(
+                            block.execution_priority
+                        )
+                    )
+                    | set(pipeline.manual_values)
+                    | set(pipeline._ancestor_manual_values())
+                    | parent_config_names
+                    | parent_manual_names
+                    | parent_output_names
+                )
+                for registration in block.functions:
+                    if isinstance(registration, FunctionRegistration):
+                        block._strict_validate_registration(
+                            registration,
+                            force_strict=True,
+                            visible_names=block_visible_names,
+                        )
+
     def _remove_registered_node(self, node: Any) -> None:
         self.nodes = [candidate for candidate in self.nodes if candidate is not node]
         self.nodes_by_name.pop(node.registration_name, None)
@@ -2858,10 +3016,6 @@ class PipelineHandler:
             value = parent_config[input_name]
         elif input_name in defaults:
             value = defaults[input_name]
-        elif input_name in declared_output_names:
-            value = None
-        elif (ancestor_descendant := self._ancestor_descendant_visible_value(input_name)) is not None:
-            value = ancestor_descendant
         elif allow_missing:
             value = missing_value
         else:
@@ -3036,6 +3190,7 @@ class PipelineHandler:
         self.logger = parent.logger
         self.memory_saving_mode = parent.memory_saving_mode
         self.memory_profile_logging = parent.memory_profile_logging
+        self.strict_mode = parent._root_pipeline().strict_mode
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)

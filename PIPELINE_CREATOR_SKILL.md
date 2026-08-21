@@ -22,6 +22,31 @@ Verify that you understand:
 - Expressions are restricted one-statement Python code.
 - `define_expression_runtime(...)` provides import-only helpers for expressions.
 
+## Strict Mode Requirement
+
+**Always create the root pipeline with `strict_mode=True`.** This is mandatory for
+every converted pipeline:
+
+```python
+pipeline = PipelineHandler(..., strict_mode=True)
+```
+
+Strict mode enforces fail-fast registration validation that catches mistakes early
+instead of surfacing them as confusing run-time failures:
+
+- `kwargs_dct` used without a `**kwargs` parameter in the target function raises at registration.
+- A `kwargs_dct` key that conflicts with an explicit function argument raises at registration.
+- A `gate_config` name not found in config, visible output values, or visible manual values raises at registration.
+- A `param_mapping` value not found in config, visible output values, or visible manual values raises at registration.
+- A `kwargs_dct` value not found in config, visible output values, or visible manual values raises at registration.
+- A `param_mapping` key that is not a function parameter raises at registration.
+- Attaching a child whose config/manual values/outputs cross-collide with the parent's objects raises, as does attaching a child whose registrations violate any of the checks above.
+
+Consequences to account for when converting with strict mode:
+- Input names must be resolvable at registration time: use config fields, manual values (`set_constant_value`), or already-visible output values. Do not rely on forward references to outputs that will only be produced later.
+- Since strict mode validates values against the current visible state, register functions after the values they consume are defined (config set, constants set, producing blocks registered and run).
+- All attached children inherit strict mode from the root pipeline, so the same rules apply throughout the tree.
+
 ## Classification and Clarification Policy
 
 Classify all input requirements into four categories:
