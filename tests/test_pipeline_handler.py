@@ -3725,6 +3725,34 @@ class StrictModeTests(unittest.TestCase):
             )
             self.assertIn("not a parameter", self._log_text(tmp_path))
 
+    def test_strict_mode_cascades_to_pre_attached_descendants(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            grandparent = PipelineHandler("gp", {}, tmp / "gp", strict_mode=True)
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            child = PipelineHandler("child", {}, tmp / "parent" / "child")
+            parent.add_child_pipeline(child, 10.0)
+            self.assertFalse(child.strict_mode)
+            grandparent.add_child_pipeline(parent, 20.0)
+            self.assertTrue(parent.strict_mode)
+            self.assertTrue(child.strict_mode)
+
+    def test_strict_mode_cascades_through_two_levels(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            grandparent = PipelineHandler("gp", {}, tmp / "gp", strict_mode=True)
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            child = PipelineHandler("child", {}, tmp / "parent" / "child")
+            grandchild = PipelineHandler(
+                "grandchild", {}, tmp / "parent" / "child" / "grandchild"
+            )
+            child.add_child_pipeline(grandchild, 10.0)
+            parent.add_child_pipeline(child, 10.0)
+            grandparent.add_child_pipeline(parent, 20.0)
+            self.assertTrue(parent.strict_mode)
+            self.assertTrue(child.strict_mode)
+            self.assertTrue(grandchild.strict_mode)
+
     def test_strict_mode_inherited_by_attached_children(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
