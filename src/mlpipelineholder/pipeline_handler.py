@@ -3206,7 +3206,9 @@ class PipelineHandler:
         self.logger = parent.logger
         self.memory_saving_mode = parent.memory_saving_mode
         self.memory_profile_logging = parent.memory_profile_logging
-        self.strict_mode = parent._root_pipeline().strict_mode
+        inherited_strict_mode = parent._root_pipeline().strict_mode
+        for pipeline in self._iter_attached_pipelines():
+            pipeline.strict_mode = inherited_strict_mode
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)
