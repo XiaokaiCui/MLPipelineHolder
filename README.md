@@ -47,7 +47,7 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes.
 - Persist intermediate and final outputs to disk, then reload them quickly and easily after a kernel restart.
 - Automatically run independent functions in parallel within the same execution block, while keeping cross-block execution explicit and ordered by priority.
-- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed.
+- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed(more effective when used together with [save_to_disk](#4-outputs)).
 - Track logs, results, and pipeline state with minimal effort.
 - Improve the stability and reproducibility of modelling and analysis outputs while retaining full flexibility over the pipeline structure.
 
