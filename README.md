@@ -61,7 +61,7 @@ If you already have a data modelling or analysis notebook, the fastest way to ge
 
 This repository includes a notebook-oriented guide for the LLM agent:
 
-- [`PIPELINE_CREATOR_SKILL.md`](PIPELINE_CREATOR_SKILL.md)
+- [`PIPELINE_CREATOR_SKILL.md`](https://github.com/XiaokaiCui/MLPipelineHolder/blob/master/PIPELINE_CREATOR_SKILL.md)
 
 The guide explains how to inspect your notebook, design pipeline scopes, identify persistence and memory requirements, and produce the converted code.
 
