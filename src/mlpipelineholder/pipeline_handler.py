@@ -3483,6 +3483,11 @@ class PipelineHandler:
     ) -> list[str]:
         lines: list[str] = []
         symbol_color = "blue"
+        # Arguments use pure black normally and dark grey when skipped.
+        # termcolor's light_grey is SGR 37 (white), which is nearly invisible
+        # on the white notebook background in Colab; dark_grey (SGR 90)
+        # renders as a readable grey in both Jupyter and Colab.
+        arg_color = "grey" if not muted else "dark_grey"
         muted = muted or (as_child and self._should_grey_in_chart())
         if as_child:
             line = f"{self._line_style(indent, muted)}{self._chart_color('pipeline', 'magenta', muted)} {self._chart_color(f'[{self.execution_priority}]', 'cyan', muted)} {self._chart_color(self.registration_name, 'blue', muted)}"
@@ -3494,7 +3499,7 @@ class PipelineHandler:
         if self.gate_block is not None:
             gate_args = self._chart_color(
                 ", ".join(self._displayed_argument_names(self.gate_block.registration, None, None)),
-                "yellow",
+                arg_color,
                 muted,
             )
             gate_line = (
@@ -3537,7 +3542,7 @@ class PipelineHandler:
                             node,
                         )
                     ),
-                    "yellow",
+                    arg_color,
                     muted,
                 )
                 function_line = (
