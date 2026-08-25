@@ -304,11 +304,13 @@ class BackupRecoveryTests(unittest.TestCase):
 
             child.update_value("blob", {"current": 9})
 
-            self.assertNotIsInstance(root.para_value_dict["blob"], ArtifactRecord)
-            self.assertNotIsInstance(
+            # Disk-backed outputs stay disk-backed when updated: the new value
+            # is saved as an ArtifactRecord and propagates through the tree.
+            self.assertIsInstance(root.para_value_dict["blob"], ArtifactRecord)
+            self.assertIsInstance(
                 root.producer_outputs["child"]["blob"], ArtifactRecord
             )
-            self.assertNotIn("blob", root.artifact_registry)
+            self.assertIn("blob", root.artifact_registry)
 
             root.save_pipeline()
             root.recover_variable_from_backup(name="unrelated")

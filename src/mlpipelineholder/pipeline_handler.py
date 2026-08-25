@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import copy
 import gc
 import inspect
 import os
@@ -57,6 +58,8 @@ _SAVE_WARNING_PATTERNS = (
     r".*could not be serialized directly; saving a reference placeholder instead",
     r".*is not importable; saving a reference placeholder instead",
 )
+
+_IMMUTABLE_TYPES = (int, float, complex, bool, str, bytes, type(None))
 
 
 class _MissingClassUnpickler(pickle.Unpickler):
@@ -469,7 +472,114 @@ class PipelineHandler:
             return self.artifact_store.load(value)
         return value
 
-    def set_constant_value(self, variable_name: str, value: Any) -> None:
+    @staticmethod
+    def _is_mutable_value(value: Any) -> bool:
+        if isinstance(value, _IMMUTABLE_TYPES):
+            return False
+        if isinstance(value, (tuple, frozenset)):
+            return any(
+                PipelineHandler._is_mutable_value(item) for item in value
+            )
+        return True
+
+    @staticmethod
+    def _copy_value(value: Any) -> Any:
+        try:
+            import pandas as pd  # type: ignore
+
+            if isinstance(value, (pd.DataFrame, pd.Series)):
+                return value.copy(deep=True)
+        except Exception:
+            pass
+        try:
+            import numpy as np  # type: ignore
+
+            if isinstance(value, np.ndarray):
+                return value.copy()
+        except Exception:
+            pass
+        try:
+            import dask.dataframe as dd  # type: ignore
+
+            if isinstance(value, dd.DataFrame):
+                return value.copy()
+        except Exception:
+            pass
+        try:
+            import torch  # type: ignore
+
+            if isinstance(value, torch.Tensor):
+                return value.detach().clone()
+        except Exception:
+            pass
+        return copy.deepcopy(value)
+
+    def _snapshot_value(self, variable_name: str, value: Any, *, verbose: bool) -> Any:
+        """Return a deep copy of a mutable value so later in-place mutation
+        outside the pipeline cannot affect the stored value. Values that
+        cannot be deep-copied are stored by reference with a warning;
+        metadata records and callables always pass through unchanged.
+        """
+        if isinstance(
+            value,
+            (
+                ArtifactRecord,
+                TorchStateArtifactRecord,
+                CallableValueReference,
+                RuntimeValueReference,
+                RuntimeCallableReference,
+            ),
+        ) or callable(value):
+            return value
+        if not self._is_mutable_value(value):
+            return value
+        try:
+            snapshot = self._copy_value(value)
+        except Exception:
+            self.logger.warning(
+                f"Value '{variable_name}' is not deep-copyable; stored by reference"
+            )
+            return value
+        if verbose:
+            self.logger.info(f"Value '{variable_name}' deeply copied")
+        return snapshot
+
+    def _save_value_to_disk(
+        self,
+        variable_name: str,
+        value: Any,
+        *,
+        function_name: str,
+        verbose: bool,
+    ) -> ArtifactRecord:
+        try:
+            record = self.artifact_store.save(
+                variable_name=variable_name,
+                value=value,
+                block_name=self.registration_name,
+                function_name=function_name,
+                run_id=uuid4().hex,
+                torch_load_weights_only=self.torch_load_weights_only,
+            )
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to save value '{variable_name}' to disk: {type(exc).__name__}: {exc}"
+            ) from exc
+        if verbose:
+            self.logger.info(
+                f"Value '{variable_name}' saved to disk; protected from in-place changes"
+            )
+        return record
+
+    def set_constant_value(
+        self,
+        variable_name: str,
+        value: Any,
+        *,
+        copy: bool = True,
+        verbose: bool = False,
+        to_disk: bool = False,
+    ) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline constant")
         if variable_name in self._visible_config_names():
             raise RegistrationError(
@@ -483,6 +593,23 @@ class PipelineHandler:
             raise RegistrationError(
                 f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
             )
+        previous_value = self.manual_values.get(variable_name)
+        if isinstance(previous_value, ArtifactRecord):
+            self.artifact_store.delete(previous_value)
+        if isinstance(
+            value,
+            (ArtifactRecord, TorchStateArtifactRecord),
+        ):
+            pass
+        elif to_disk:
+            value = self._save_value_to_disk(
+                variable_name,
+                value,
+                function_name="set_constant_value",
+                verbose=verbose,
+            )
+        elif copy:
+            value = self._snapshot_value(variable_name, value, verbose=verbose)
         self.manual_values[variable_name] = value
         self.para_value_dict[variable_name] = value
         if isinstance(value, ArtifactRecord):
@@ -492,7 +619,14 @@ class PipelineHandler:
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
 
-    def update_value(self, variable_name: str, value: Any) -> None:
+    def update_value(
+        self,
+        variable_name: str,
+        value: Any,
+        *,
+        copy: bool = True,
+        verbose: bool = False,
+    ) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
         if variable_name in self._tree_constant_names():
             raise ResolutionError(
@@ -504,6 +638,21 @@ class PipelineHandler:
         previous_value = self.para_value_dict.get(variable_name)
         if isinstance(previous_value, ArtifactRecord):
             self.artifact_store.delete(previous_value)
+
+        if isinstance(
+            value,
+            (ArtifactRecord, TorchStateArtifactRecord),
+        ):
+            pass
+        elif isinstance(previous_value, ArtifactRecord):
+            value = self._save_value_to_disk(
+                variable_name,
+                value,
+                function_name="update_value",
+                verbose=verbose,
+            )
+        elif copy:
+            value = self._snapshot_value(variable_name, value, verbose=verbose)
 
         self.para_value_dict[variable_name] = value
         if isinstance(value, ArtifactRecord):
@@ -519,24 +668,33 @@ class PipelineHandler:
             break
         self._sync_value_update_to_parent(variable_name, value)
 
-    def set_value(self, variable_name: str, value: Any) -> None:
+    def set_value(
+        self,
+        variable_name: str,
+        value: Any,
+        *,
+        copy: bool = True,
+        verbose: bool = False,
+    ) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline value")
         if variable_name in self._tree_constant_names():
             raise ResolutionError(
                 f"Cannot set value '{variable_name}': name is a pipeline constant; use set_constant_value instead"
             )
         if variable_name in self.para_value_dict:
-            self.update_value(variable_name, value)
+            self.update_value(variable_name, value, copy=copy, verbose=verbose)
             return
         if variable_name in self._incoming_parent_outputs():
-            self._nearest_upstream_produced_owner(variable_name).update_value(variable_name, value)
+            self._nearest_upstream_produced_owner(variable_name).update_value(
+                variable_name, value, copy=copy, verbose=verbose
+            )
             return
         owner = self._descendant_produced_owner(variable_name)
         if owner is not None:
-            owner.update_value(variable_name, value)
+            owner.update_value(variable_name, value, copy=copy, verbose=verbose)
             return
         if variable_name in self._tree_declared_output_names():
-            self._inject_produced_value(variable_name, value)
+            self._inject_produced_value(variable_name, value, copy=copy, verbose=verbose)
             return
         raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
@@ -590,19 +748,44 @@ class PipelineHandler:
             current = current.parent_pipeline
         return None
 
-    def _inject_produced_value(self, variable_name: str, value: Any) -> None:
+    def _inject_produced_value(
+        self,
+        variable_name: str,
+        value: Any,
+        *,
+        copy: bool = True,
+        verbose: bool = False,
+    ) -> None:
         pipeline = self._find_declaring_pipeline(variable_name)
         if pipeline is None:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         if pipeline is not self:
-            pipeline._inject_produced_value(variable_name, value)
+            pipeline._inject_produced_value(
+                variable_name, value, copy=copy, verbose=verbose
+            )
             return
         node = self._find_declaring_node(variable_name)
         if node is None:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         if isinstance(node, PipelineHandler):
-            node._inject_produced_value(variable_name, value)
+            node._inject_produced_value(
+                variable_name, value, copy=copy, verbose=verbose
+            )
             return
+        if isinstance(
+            value,
+            (ArtifactRecord, TorchStateArtifactRecord),
+        ):
+            pass
+        elif variable_name in node.functions_output_disk_names():
+            value = self._save_value_to_disk(
+                variable_name,
+                value,
+                function_name="set_value",
+                verbose=verbose,
+            )
+        elif copy:
+            value = self._snapshot_value(variable_name, value, verbose=verbose)
         outputs = self.producer_outputs.setdefault(node.registration_name, {})
         outputs[variable_name] = value
         self.para_value_dict[variable_name] = value
