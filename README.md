@@ -53,7 +53,7 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 
 ### Example notebook
 
-Please refer to the [example notebook](https://github.com/XiaokaiCui/MLPipelineHolder/blob/master/examples/comprehensive_pipeline.ipynb) to see the details. 
+Please refer to the [example notebook](https://githubtocolab.com/XiaokaiCui/MLPipelineHolder/blob/master/examples/comprehensive_pipeline.ipynb) to see the details.
 
 ## Fastest way to start: collaborate with an LLM on your notebook
 
