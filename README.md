@@ -35,7 +35,7 @@ The core package requires Python 3.11 or later and includes `termcolor`, NumPy, 
 ### Typical use cases
 
 - I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
-- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (see [strict mode](#81-strict-mode)).
+- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (see [strict mode](#82-strict-mode)).
 - I use the same notebook across different days and do not want to rerun expensive steps every time I reopen it.
 - I have limited RAM and need a convenient way to load and offload DataFrames while exploring the data.
 - I want to focus on analysis and modelling, with logging and pipeline visualisation handled more simply.
@@ -50,6 +50,10 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed.
 - Track logs, results, and pipeline state with minimal effort.
 - Improve the stability and reproducibility of modelling and analysis outputs while retaining full flexibility over the pipeline structure.
+
+### Example notebook
+
+Please refer to the [example notebook](https://github.com/XiaokaiCui/MLPipelineHolder/blob/master/examples/comprehensive_pipeline.ipynb) to see the details. 
 
 ## Fastest way to start: collaborate with an LLM on your notebook
 
@@ -116,7 +120,7 @@ Attached child pipelines inherit both settings from their parent, so configure t
 The full public API is documented in a standalone, pandas/numpy-style reference page:
 
 - [docs/api_reference.html](https://mlpipelineholder.readthedocs.io/en/latest/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
-
+  
 It covers:
 
 - main classes: `PipelineHandler`, `ExecutionBlock`, `GateBlock`, `PipelineLogger`
@@ -337,12 +341,46 @@ Constant behaviour:
 - when multiple pipelines define the same constant name, the nearest definition wins: sibling (by priority) over parent, parent over grandparent
 - constants survive save/load and backup recovery, and may hold callables or `ArtifactRecord` values
 
+### 8.1 Snapshot semantics
+
+Once a value has been assigned to a pipeline, later in-place mutation of the
+original object outside the pipeline does not change the stored value. By
+default `set_constant_value`, `set_value`, and `update_value` store a deep copy
+of mutable objects (dict, list, set, NumPy arrays, pandas DataFrames/Series,
+Dask DataFrames, PyTorch tensors/modules, dataclasses, and similar data types):
+
+```python
+payload = {"symbol": "AAPL", "weight": 1.0}
+pipeline.set_constant_value("score_score_symbol_info", payload)
+payload["weight"] = 2.5          # does NOT affect the constant
+pipeline.get_constant_value("score_score_symbol_info")["weight"]  # still 1.0
+```
+
+Details:
+
+- immutable values (`int`, `str`, `float`, `bool`, `tuple` of immutables, ...) are stored as-is
+- metadata records (`ArtifactRecord`, `TorchStateArtifactRecord`) and callables pass through unchanged
+- if a value cannot be deep-copied, it is stored by reference and a warning is logged; pass `copy=False` to store by reference without copying
+- with `verbose=True`, an info line is logged when a mutable value is deeply copied, and when a value is saved to disk
+- `set_value`/`update_value` inherit disk-backing from the producing block: if the deepest downstream block that produced the value registered it with `save_to_disk`, the updated value is saved to disk automatically (a non-serializable value then raises `PersistenceError`); otherwise it stays in memory
+
+`set_constant_value` can also persist a constant to disk instead of keeping it in memory:
+
+```python
+pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)
+value = pipeline.get_constant_value("big_frame")   # loads from disk
+```
+
+With `to_disk=True` the value is serialized immediately (so it is also protected
+from later in-place mutation); a non-serializable value raises `PersistenceError`.
+Replacing a disk-backed constant deletes the previous artifact file.
+
 Name conflicts are prevented across the whole pipeline tree in both directions:
 
 - `set_constant_value(...)` raises `RegistrationError` if the name is already a declared output or produced value anywhere in the tree, or if it collides with a visible config field
 - registering an output whose name matches a constant anywhere in the tree is rejected or skipped with a warning, depending on the registration path
 
-### 8.1 Strict mode
+### 8.2 Strict mode
 
 Strict mode enables fail-fast registration validation. Create the root pipeline with `strict_mode=True`:
 

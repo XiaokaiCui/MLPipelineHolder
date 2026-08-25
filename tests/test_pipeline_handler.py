@@ -233,6 +233,10 @@ def build_unserializable_object():
     return Lock()
 
 
+def produce_json() -> dict[str, int]:
+    return {"value": 1}
+
+
 def use_stock_project_root(stock_project_root: str) -> str:
     return stock_project_root
 
@@ -2221,7 +2225,9 @@ class PipelineHandlerTests(unittest.TestCase):
             interrupting_block = pipeline.add_block("interrupting", 1)
             interrupting_block.register_function(interrupting_print_step, ["never_written"])
             executed_thread_ids: list[int] = []
-            pipeline.set_constant_value("executed_thread_ids", executed_thread_ids)
+            pipeline.set_constant_value(
+                "executed_thread_ids", executed_thread_ids, copy=False
+            )
             caller_thread_id = threading.get_ident()
 
             # Given: a patched stdout and a single-function block that prints then interrupts.
@@ -3932,6 +3938,152 @@ class StrictModeTests(unittest.TestCase):
             pipeline.set_config({"manual_name": 2})
             self.assertIn("manual value", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))
             self.assertEqual(pipeline.get_constant_value("manual_name"), 1)
+
+    def test_set_constant_value_deep_copies_mutable_object(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("copy", {}, Path(temp_dir))
+            payload = {"symbol": "AAPL", "weight": 1.0}
+            pipeline.set_constant_value("score_score_symbol_info", payload)
+            payload["weight"] = 2.5
+            self.assertEqual(
+                pipeline.get_constant_value("score_score_symbol_info")["weight"], 1.0
+            )
+
+    def test_set_constant_value_copy_false_keeps_reference(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("nocopy", {}, Path(temp_dir))
+            payload = {"weight": 1.0}
+            pipeline.set_constant_value("c", payload, copy=False)
+            payload["weight"] = 2.5
+            self.assertEqual(pipeline.get_constant_value("c")["weight"], 2.5)
+
+    def test_set_constant_value_immutable_skips_copy(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("imm", {}, Path(temp_dir))
+            pipeline.set_constant_value("n", 42, verbose=True)
+            self.assertEqual(pipeline.get_constant_value("n"), 42)
+
+    def test_set_constant_value_to_disk_saves_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("todisk", {}, tmp / "project")
+            pipeline.set_constant_value("big", {"a": 1}, to_disk=True)
+            value = pipeline.get_constant_value("big")
+            self.assertEqual(value, {"a": 1})
+            self.assertIsInstance(pipeline.manual_values["big"], ArtifactRecord)
+            self.assertIn("big", pipeline.artifact_registry)
+
+    def test_set_constant_value_to_disk_raises_on_unserializable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("todisk-fail", {}, tmp / "project")
+            with self.assertRaises(PersistenceError):
+                pipeline.set_constant_value(
+                    "bad", lambda x: x, to_disk=True
+                )
+
+    def test_set_constant_value_to_disk_deletes_old_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("todisk-del", {}, tmp / "project")
+            pipeline.set_constant_value("big", {"a": 1}, to_disk=True)
+            old_record = pipeline.manual_values["big"]
+            self.assertTrue(Path(old_record.file_path).exists())
+            pipeline.set_constant_value("big", {"a": 2}, to_disk=True)
+            self.assertFalse(Path(old_record.file_path).exists())
+            self.assertEqual(pipeline.get_constant_value("big"), {"a": 2})
+
+    def test_set_constant_value_to_disk_verbose_info(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("todisk-info", {}, tmp / "project")
+            pipeline.set_constant_value("big", {"a": 1}, to_disk=True, verbose=True)
+            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("saved to disk", log_text)
+
+    def test_set_constant_value_deep_copy_verbose_info(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("copy-info", {}, tmp / "project")
+            pipeline.set_constant_value("big", {"a": 1}, verbose=True)
+            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("deeply copied", log_text)
+
+    def test_set_constant_value_copy_fallback_warns(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("copy-warn", {}, tmp / "project")
+
+            class Uncopyable:
+                def __deepcopy__(self, memo):
+                    raise TypeError("cannot copy")
+
+            obj = Uncopyable()
+            pipeline.set_constant_value("u", obj)
+            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("stored by reference", log_text)
+            self.assertIs(pipeline.get_constant_value("u"), obj)
+
+    def test_set_value_deep_copies_mutable_object(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("sv", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_json, ["blob"])
+            pipeline.run_all()
+            payload = {"weight": 1.0}
+            pipeline.set_value("blob", payload)
+            payload["weight"] = 2.5
+            self.assertEqual(pipeline.get_value("blob")["weight"], 1.0)
+
+    def test_update_value_keeps_disk_backing_when_producer_disk_backed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("uv", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_json, ["blob"], save_to_disk=["blob"])
+            pipeline.run_all()
+            self.assertIsInstance(pipeline.para_value_dict["blob"], ArtifactRecord)
+            pipeline.update_value("blob", {"current": 9})
+            self.assertIsInstance(pipeline.para_value_dict["blob"], ArtifactRecord)
+            self.assertEqual(pipeline.get_value("blob"), {"current": 9})
+
+    def test_update_value_keeps_in_memory_when_producer_in_memory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("uvmem", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_json, ["blob"])
+            pipeline.run_all()
+            self.assertNotIsInstance(pipeline.para_value_dict["blob"], ArtifactRecord)
+            pipeline.update_value("blob", {"current": 9})
+            self.assertNotIsInstance(pipeline.para_value_dict["blob"], ArtifactRecord)
+
+    def test_set_value_injects_disk_backed_when_declaring_block_disk_backed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("inj", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_json, ["blob"], save_to_disk=["blob"])
+            pipeline.set_value("blob", {"current": 9})
+            self.assertIsInstance(pipeline.para_value_dict["blob"], ArtifactRecord)
+            self.assertEqual(pipeline.get_value("blob"), {"current": 9})
+
+    def test_update_value_raises_when_disk_backed_and_unserializable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("uv-fail", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce_json, ["blob"], save_to_disk=["blob"])
+            pipeline.run_all()
+            with self.assertRaises(PersistenceError):
+                pipeline.update_value("blob", lambda x: x)
 
     def test_set_constant_value_raises_on_visible_config_collision(self) -> None:
         with TemporaryDirectory() as temp_dir:

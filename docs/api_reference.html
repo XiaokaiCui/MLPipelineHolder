@@ -327,23 +327,27 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> if no such constant exists.</p>
 
 <h4 class="method-name" id="PipelineHandler.set_constant_value">set_constant_value()</h4>
-<div class="sig"><span class="kw">set_constant_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
+<div class="sig"><span class="kw">set_constant_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Creates or replaces a pipeline constant. The constant is visible to this pipeline, its descendants, and downstream siblings through the parent visibility model.</p>
 <p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name is a declared output or an existing produced value anywhere in the pipeline tree, and for reserved builtin names.</p>
+<p>By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference; values that cannot be deep-copied fall back to a reference with a warning. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; a non-serializable value raises <code>PersistenceError</code>); replacing a disk-backed constant deletes the previous artifact file.</p>
 <div class="example">
   <div class="example-title">Example</div>
 <pre>pipeline.set_constant_value("learning_rate", 0.01)
-rate = pipeline.get_constant_value("learning_rate")</pre>
+rate = pipeline.get_constant_value("learning_rate")
+pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre>
 </div>
 
 <h4 class="method-name" id="PipelineHandler.set_value">set_value()</h4>
-<div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
+<div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet).</p>
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
+<p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produces the name registered it with <code>save_to_disk</code>, the value is saved to disk automatically, otherwise it stays in memory.</p>
 
 <h4 class="method-name" id="PipelineHandler.update_value">update_value()</h4>
-<div class="sig"><span class="kw">update_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
+<div class="sig"><span class="kw">update_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Updates an existing produced value only. Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
+<p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produced the name registered it with <code>save_to_disk</code>, the updated value is saved to disk automatically (a non-serializable value raises <code>PersistenceError</code>), otherwise it stays in memory.</p>
 
 <h4 class="method-name" id="PipelineHandler.set_config">set_config()</h4>
 <div class="sig"><span class="kw">set_config</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>

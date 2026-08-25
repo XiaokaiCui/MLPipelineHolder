@@ -90,7 +90,7 @@ Handle large objects and memory settings based on these rules:
 ## Expression and Persistence Constraints
 
 Classify each notebook step into one of these categories:
-- **Direct Value**: Stored using `set_constant_value`. Read back with `get_constant_value`, not `get_value`. Large objects that should be disk-backed must be produced by a function stage instead, because `save_to_disk` applies only to declared produced outputs.
+- **Direct Value**: Stored using `set_constant_value`. Read back with `get_constant_value`, not `get_value`. Mutable values are stored as a deep copy by default, so later in-place mutation of the original object does not affect the pipeline. Large objects that should be disk-backed can use `set_constant_value(..., to_disk=True)`; alternatively produce them via a function stage with `save_to_disk`.
 - **Expression**: Registered using `register_expression`.
 - **Direct Function / Atom Child**: Registered using `register_function` or `create_atom_child_pipeline`.
 - **Wrapper-Required**: Needs a wrapper function due to hidden globals or unrepresentable setup.
