@@ -458,6 +458,12 @@ Warnings unrelated to saving (registration, load, logger) are never suppressed.
 
 `load_pipeline(..., verbose=False)` behaves the same way: with `verbose=True` it logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored. A placeholder value raises `ResolutionError` when read via `get_value`, `get_constant_value`, or `get_config_value`, and when resolved as a function argument — so it never silently reaches user code.
 
+Placeholder recovery on load:
+
+- `load_pipeline(..., auto_resolve_placeholders=True)` (the default) re-runs producing blocks to recover produced values that were saved as placeholders (e.g. an output that was a non-serialisable object). Recovery runs **one block per placeholder output**, in upstream-to-downstream order, and injects the fresh values **without invalidating any downstream outputs**. Every recovery is auditable: it appends a `RunRecord` labelled `auto_resolve_placeholder:<block>` to the owning pipeline's run history.
+- Failure handling: gate-off pipelines are skipped silently (their outputs are expected to be invalid); an output whose required input is a placeholder constant, unresolvable, or only produced by gate-off blocks stays a placeholder and logs a verbose-gated warning naming the reason; a block that raises during re-execution logs an **unconditional** warning. Pass `auto_resolve_placeholders=False` to keep the legacy behaviour (placeholders stay placeholders and raise on read).
+- Pure-dataclass values (config objects, constants, and produced values) that could not be pickled are saved as structured references and **reconstructed at load regardless of the flag**: a real dataclass instance when the class is importable and reconstructible from the saved fields, including dataclasses with non-init fields; a `SimpleNamespace` fallback is used otherwise (with a verbose-gated warning when the class is unavailable or its field shape changed).
+
 Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_constant_value(...)`, `set_value(...)`, or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.
@@ -472,11 +478,13 @@ pipeline.recover_variable_from_backup(name="output_df")
 modeling_pipeline.recover_config_from_backup(name="learning_rate")
 ```
 
-Recovery requires `pipeline_state.pkl`, `config.pkl`, and `pipeline_meta.pkl` plus every saved artifact referenced by the backup. The requested name must exist both in the live pipeline and in the matching saved pipeline state. The backup is inspected read-only; recovery never replaces the complete working tree.
+Recovery requires `pipeline_state.pkl`, `config.pkl`, and `pipeline_meta.pkl` plus every saved artifact referenced by the backup. The requested name must exist in the matching saved pipeline state; produced and manual values must also exist in the live pipeline, while a declared-but-not-yet-produced output name can be recovered into its declaring pipeline without a live value. The backup is inspected read-only; recovery never replaces the complete working tree.
 
 Variable recovery rules:
 
 - call `recover_variable_from_backup(...)` on the root pipeline only
+- pass `pipeline_name="<pipeline>"` to target one pipeline: the saved value is resolved from that pipeline's saved state instead of the root's, which disambiguates same-name values owned by different pipelines
+- declared-but-not-yet-produced output names are recovered into their declaring pipeline without requiring a live value
 - if the same name is independently owned by multiple root/child pipelines, one prompt lists every affected pipeline; only `yes` or `y` applies the recovery to all of them
 - declining the prompt leaves all values unchanged and returns `None`
 - disk-backed values are copied into the live project, so they remain usable if the backup is later removed

@@ -509,7 +509,11 @@ class PipelineHandlerTests(unittest.TestCase):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 pipeline.save_pipeline(save_dir, verbose=True)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(
+                save_dir,
+                forced_deleting=True,
+                auto_resolve_placeholders=False,
+            )
 
             self.assertTrue(
                 any("reference placeholder" in str(item.message) for item in caught)

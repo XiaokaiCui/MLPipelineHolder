@@ -139,7 +139,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.2.13) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.2.14) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -212,6 +212,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#blockkwargsregistration">BlockKwargsRegistration</a></li>
     <li><a class="anchor" href="#functionexecutionresult">FunctionExecutionResult</a></li>
     <li><a class="anchor" href="#runtimevaluereference">RuntimeValueReference</a></li>
+    <li><a class="anchor" href="#dataclassvaluereference">DataclassValueReference</a></li>
     <li><a class="anchor" href="#callablevaluereference">CallableValueReference</a></li>
     <li><a class="anchor" href="#runtimecallablereference">RuntimeCallableReference</a></li>
   </ul>
@@ -382,23 +383,27 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
 <p>Loads a saved pipeline project. Reads lightweight metadata before loading full state. If <code>path</code> differs from the canonical working directory, the saved tree is restored to the canonical directory before loading.</p>
 <ul>
   <li><code>forced_deleting=False</code> asks for keyboard confirmation before deleting a non-empty canonical working directory.</li>
   <li><code>forced_deleting=True</code> deletes the canonical working directory directly.</li>
   <li><code>verbose=True</code> logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored; silent by default.</li>
+  <li><code>auto_resolve_placeholders=True</code> (the default) re-runs producing blocks to recover produced values that were saved as placeholders. Exactly one block is executed per placeholder recovery, in upstream-to-downstream order, and fresh values are injected without invalidating downstream outputs. Each recovery appends a <code>RunRecord</code> labelled <code>auto_resolve_placeholder:&lt;block&gt;</code>. With <code>verbose=True</code>, outputs that stay unrecoverable log the reason (unresolvable input, placeholder constant input, input only produced by a gate-off block, or no registered producing block); a block that raises during re-execution always logs an unrecoverable warning. Gate-off pipelines are skipped silently. Pass <code>False</code> to keep legacy placeholder behaviour: saved placeholders raise <code>ResolutionError</code> when read.</li>
+  <li>Pure-dataclass values (config objects, constants, and produced values) that could not be pickled are saved as structured references and reconstructed at load regardless of <code>auto_resolve_placeholders</code>: a real dataclass instance when the class is importable and reconstructible from the saved fields, including dataclasses with non-init fields; a <code>SimpleNamespace</code> fallback is used otherwise (verbose-gated warning).</li>
 </ul>
 <p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_project">load_project()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.load_pipeline"><code>load_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.recover_variable_from_backup">recover_variable_from_backup()</h4>
-<div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
+<div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>, *, pipeline_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
 <p>Restores one current value from the latest complete in-place backup. Call on the root pipeline only. Updates in place and returns <code>None</code>.</p>
 <ul>
+  <li><code>pipeline_name</code> targets one pipeline: the saved value is resolved from that pipeline's saved state instead of the root's, which disambiguates same-name values owned by different pipelines.</li>
+  <li>Declared-but-not-yet-produced output names are recovered into their declaring pipeline without requiring a live value.</li>
   <li>If the same name is independently owned by multiple pipelines, one prompt lists every affected pipeline; only <code>yes</code>/<code>y</code> applies the recovery to all of them.</li>
   <li>Disk-backed values are copied into the live project so they remain usable if the backup is later removed.</li>
   <li>Requires <code>pipeline_state.pkl</code>, <code>config.pkl</code>, and <code>pipeline_meta.pkl</code> plus every saved artifact referenced by the backup.</li>
@@ -872,7 +877,12 @@ block.register_function(
 <h3 class="class-name" id="runtimevaluereference">RuntimeValueReference</h3>
 <p class="class-desc">Fallback reference used when a runtime value cannot be safely persisted.</p>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.models.RuntimeValueReference(type_name, repr_text, reason)</div>
-<p>Created during save when a value is not directly serializable. Contains the type name, a <code>repr()</code> preview, and the reason the value could not be persisted.</p>
+<p>Created during save when a value is not directly serializable. Contains the type name, a <code>repr()</code> preview, and the reason the value could not be persisted. Produced values saved this way are re-run at load by default (<code>auto_resolve_placeholders=True</code>); otherwise they raise <code>ResolutionError</code> when read.</p>
+
+<h3 class="class-name" id="dataclassvaluereference">DataclassValueReference</h3>
+<p class="class-desc">Structured reference to a pure dataclass that could not be pickled.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.DataclassValueReference(class_name, data, reason, module=None)</div>
+<p>Created during save when a dataclass value (config object, constant, or produced value) is not directly serializable. Holds the dataclass name, its source module, and per-field structured data so the value can be reconstructed at load: a real dataclass instance when the class is importable and constructible from the saved fields, a <code>SimpleNamespace</code> fallback otherwise.</p>
 
 <h3 class="class-name" id="callablevaluereference">CallableValueReference</h3>
 <p class="class-desc">Reference to an importable callable stored as a pipeline value.</p>

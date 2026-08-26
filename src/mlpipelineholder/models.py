@@ -101,6 +101,21 @@ class RuntimeValueReference:
 
 
 @dataclass(slots=True)
+class DataclassValueReference:
+    """Structured reference to a pure dataclass that could not be pickled.
+
+    Holds the dataclass name plus per-field structured data so the value can be
+    reconstructed at load time: a real dataclass instance when the class is
+    importable, a ``SimpleNamespace`` fallback otherwise.
+    """
+
+    class_name: str
+    data: dict[str, Any]
+    reason: str
+    module: str | None = None
+
+
+@dataclass(slots=True)
 class CallableValueReference:
     """Reference to an importable callable stored as a pipeline value."""
 

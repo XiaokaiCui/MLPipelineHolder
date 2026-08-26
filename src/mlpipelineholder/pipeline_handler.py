@@ -13,7 +13,7 @@ import sys
 import warnings
 from ctypes import CDLL
 from contextlib import redirect_stdout
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from datetime import UTC, datetime
 from importlib import import_module
 from io import BytesIO, StringIO
@@ -32,6 +32,7 @@ from .logger import PipelineLogger
 from .models import (
     ArtifactRecord,
     CallableValueReference,
+    DataclassValueReference,
     ExpressionRegistration,
     FunctionRegistration,
     RunRecord,
@@ -462,7 +463,7 @@ class PipelineHandler:
             return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
-        if isinstance(value, RuntimeValueReference):
+        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot get value '{variable_name}': it was saved as a placeholder "
                 f"({value.reason}) and cannot be restored; recreate or reset the value"
@@ -481,7 +482,7 @@ class PipelineHandler:
             return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
-        if isinstance(value, RuntimeValueReference):
+        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot get constant '{variable_name}': it was saved as a placeholder "
                 f"({value.reason}) and cannot be restored; reset it with set_constant_value"
@@ -812,6 +813,74 @@ class PipelineHandler:
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
 
+    def _inject_recovered_value(self, variable_name: str, value: Any) -> None:
+        pipeline = self._find_declaring_pipeline(variable_name)
+        if pipeline is None:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        if pipeline is not self:
+            pipeline._inject_recovered_value(variable_name, value)
+            return
+        node = self._find_declaring_node(variable_name)
+        if node is None:
+            raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        if isinstance(node, PipelineHandler):
+            node._inject_recovered_value(variable_name, value)
+            return
+        self.producer_outputs.setdefault(node.registration_name, {})[
+            variable_name
+        ] = value
+        self._refresh_visible_value(variable_name)
+        self._sync_value_to_ancestors_without_invalidation(variable_name)
+
+    def _refresh_visible_value(self, variable_name: str) -> None:
+        found = False
+        value: Any = None
+        upstream_outputs = self._incoming_parent_outputs()
+        if variable_name in upstream_outputs:
+            found = True
+            value = upstream_outputs[variable_name]
+        for node in self._sorted_nodes():
+            produced_outputs = self.producer_outputs.get(node.registration_name, {})
+            if variable_name in produced_outputs:
+                found = True
+                value = produced_outputs[variable_name]
+        if variable_name in self.manual_values:
+            found = True
+            value = self.manual_values[variable_name]
+        if found and (
+            variable_name in self.list_declared_outputs()
+            or variable_name in self.manual_values
+        ):
+            self.para_value_dict[variable_name] = value
+            if isinstance(value, ArtifactRecord):
+                self.artifact_registry[variable_name] = value
+            else:
+                self.artifact_registry.pop(variable_name, None)
+            return
+        self.para_value_dict.pop(variable_name, None)
+        self.artifact_registry.pop(variable_name, None)
+
+    def _sync_value_to_ancestors_without_invalidation(
+        self,
+        variable_name: str,
+    ) -> None:
+        current = self
+        while current.parent_pipeline is not None:
+            parent = current.parent_pipeline
+            if (
+                variable_name in current.para_value_dict
+                and variable_name not in current.manual_values
+            ):
+                parent.producer_outputs.setdefault(current.registration_name, {})[
+                    variable_name
+                ] = current.para_value_dict[variable_name]
+            else:
+                child_outputs = parent.producer_outputs.get(current.registration_name)
+                if child_outputs is not None:
+                    child_outputs.pop(variable_name, None)
+            parent._refresh_visible_value(variable_name)
+            current = parent
+
     def _sync_value_update_to_parent(self, variable_name: str, value: Any) -> None:
         current = self
         while current.parent_pipeline is not None:
@@ -851,7 +920,7 @@ class PipelineHandler:
         if field_name not in config:
             raise ResolutionError(f"Unknown config field: {field_name}")
         value = config[field_name]
-        if isinstance(value, RuntimeValueReference):
+        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot get config field '{field_name}': it was saved as a placeholder "
                 f"({value.reason}) and cannot be restored"
@@ -1204,6 +1273,7 @@ class PipelineHandler:
         *,
         forced_deleting: bool = False,
         verbose: bool = False,
+        auto_resolve_placeholders: bool = True,
     ) -> "PipelineHandler":
         warnings.warn(
             "Loaded pipelines restore current callable references, not historical function snapshots; changed source code may alter behavior.",
@@ -1220,7 +1290,12 @@ class PipelineHandler:
             cls._validate_loaded_payload_placeholders(payload)
         except Exception as exc:
             raise PersistenceError("Failed to load pipeline project") from exc
-        pipeline = cls._from_payload(payload, target, verbose=verbose)
+        pipeline = cls._from_payload(
+            payload,
+            target,
+            verbose=verbose,
+            auto_resolve_placeholders=auto_resolve_placeholders,
+        )
         if restore_message is not None:
             pipeline.logger.info(restore_message)
         pipeline.logger.info(f"Pipeline has been loaded from the project root: {target}")
@@ -1233,9 +1308,13 @@ class PipelineHandler:
         *,
         forced_deleting: bool = False,
         verbose: bool = False,
+        auto_resolve_placeholders: bool = True,
     ) -> "PipelineHandler":
         return cls.load_pipeline(
-            path, forced_deleting=forced_deleting, verbose=verbose
+            path,
+            forced_deleting=forced_deleting,
+            verbose=verbose,
+            auto_resolve_placeholders=auto_resolve_placeholders,
         )
 
     def _write_pipeline_metadata(self, target: Path) -> None:
@@ -1535,8 +1614,14 @@ class PipelineHandler:
         parent: "PipelineHandler | None" = None,
         *,
         verbose: bool = False,
+        auto_resolve_placeholders: bool = True,
     ) -> "PipelineHandler":
-        config = cls._deserialize_saved_config(payload["config"])
+        reconstruction_warnings: list[str] = []
+        config = cls._deserialize_saved_config(
+            payload["config"],
+            verbose=verbose,
+            warn=reconstruction_warnings.append,
+        )
         pipeline = cls(
             registration_name=payload["registration_name"],
             configuration=config,
@@ -1553,6 +1638,8 @@ class PipelineHandler:
             _allow_existing_root=True,
             _allow_legacy_config_object=True,
         )
+        for message in reconstruction_warnings:
+            pipeline.logger.warning(message)
         if payload.get("expression_runtime_code") is not None:
             pipeline.define_expression_runtime(payload["expression_runtime_code"])
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
@@ -1644,6 +1731,7 @@ class PipelineHandler:
                     child_root,
                     parent=pipeline,
                     verbose=verbose,
+                    auto_resolve_placeholders=auto_resolve_placeholders,
                 )
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline
@@ -1685,7 +1773,543 @@ class PipelineHandler:
         if parent is not None:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
+        if parent is None:
+            pipeline._restore_dataclass_value_references(verbose=verbose)
+        if auto_resolve_placeholders and parent is None:
+            pipeline._auto_resolve_placeholder_outputs(verbose=verbose)
+        elif not auto_resolve_placeholders and parent is None:
+            pipeline._warn_unresolved_placeholders_at_load(verbose=verbose)
         return pipeline
+
+    def _restore_dataclass_value_references(
+        self,
+        *,
+        verbose: bool,
+        _memo: dict[int, Any] | None = None,
+    ) -> None:
+        """Replace structured dataclass references with reconstructed values.
+
+        Runs once at the root after the tree is rebuilt: dataclass values saved
+        as structured references are rebuilt (a real dataclass when the class is
+        importable and constructible from the saved fields, a ``SimpleNamespace``
+        fallback otherwise) regardless of the ``auto_resolve_placeholders``
+        flag. A shared identity memo guarantees that one logical saved reference
+        is reconstructed once, so every mirror slot (producer outputs, visible
+        state, parent mirrors) keeps the same object. Legacy pre-0.2.14
+        placeholders that carry only a ``type_name`` are best-effort
+        reconstructed with default fields when a matching importable dataclass
+        exists.
+        """
+        memo = {} if _memo is None else _memo
+        for mapping in (self.manual_values, self.para_value_dict):
+            for value_name, value in list(mapping.items()):
+                if isinstance(value, DataclassValueReference):
+                    mapping[value_name] = self._restore_dataclass_value(
+                        value,
+                        verbose=verbose,
+                        memo=memo,
+                    )
+                elif isinstance(value, RuntimeValueReference):
+                    restored = self._restore_legacy_dataclass_reference(
+                        value,
+                        verbose=verbose,
+                        memo=memo,
+                    )
+                    if restored is not value:
+                        mapping[value_name] = restored
+        for outputs in self.producer_outputs.values():
+            for value_name, value in list(outputs.items()):
+                if isinstance(value, DataclassValueReference):
+                    outputs[value_name] = self._restore_dataclass_value(
+                        value,
+                        verbose=verbose,
+                        memo=memo,
+                    )
+                elif isinstance(value, RuntimeValueReference):
+                    restored = self._restore_legacy_dataclass_reference(
+                        value,
+                        verbose=verbose,
+                        memo=memo,
+                    )
+                    if restored is not value:
+                        outputs[value_name] = restored
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                node._restore_dataclass_value_references(
+                    verbose=verbose,
+                    _memo=memo,
+                )
+
+    def _restore_dataclass_value(
+        self,
+        reference: DataclassValueReference,
+        *,
+        verbose: bool,
+        memo: dict[int, Any],
+    ) -> Any:
+        reference_id = id(reference)
+        cached = memo.get(reference_id)
+        if cached is not None:
+            return cached
+        data = {
+            key: self._deserialize_config_value(
+                item,
+                verbose=verbose,
+                warn=self.logger.warning,
+            )
+            for key, item in reference.data.items()
+        }
+        reconstructed = self._reconstruct_dataclass(
+            reference.class_name,
+            data,
+            verbose=verbose,
+            module_name=reference.module,
+            warn=self.logger.warning,
+        )
+        memo[reference_id] = reconstructed
+        return reconstructed
+
+    def _restore_legacy_dataclass_reference(
+        self,
+        reference: RuntimeValueReference,
+        *,
+        verbose: bool,
+        memo: dict[int, Any],
+    ) -> Any:
+        """Best-effort reconstruction of pre-0.2.14 dataclass placeholders.
+
+        Old saves stored unpicklable dataclasses as plain
+        ``RuntimeValueReference`` objects carrying only ``type_name``,
+        ``repr_text``, and ``reason``, so no field data survives. When a
+        dataclass with that name is importable and constructible with defaults,
+        rebuild it; otherwise keep the placeholder (with a verbose-gated warning
+        when a matching dataclass class was found but could not be built).
+        """
+        reference_id = id(reference)
+        cached = memo.get(reference_id)
+        if cached is not None:
+            return cached
+        candidate = PipelineHandler._find_dataclass_class(reference.type_name)
+        if candidate is None:
+            return reference
+        try:
+            reconstructed = candidate()
+        except Exception:
+            if verbose:
+                self.logger.warning(
+                    f"Saved value placeholder of dataclass '{reference.type_name}' could not be "
+                    "reconstructed (the class is importable but not constructible without fields); "
+                    "it remains a placeholder and raises ResolutionError when read"
+                )
+            memo[reference_id] = reference
+            return reference
+        memo[reference_id] = reconstructed
+        return reconstructed
+
+    def _has_placeholder_outputs_in_subtree(self) -> bool:
+        placeholder_types = (RuntimeValueReference, DataclassValueReference)
+        for outputs in self.producer_outputs.values():
+            if any(isinstance(value, placeholder_types) for value in outputs.values()):
+                return True
+        for name, value in self.para_value_dict.items():
+            if name not in self.manual_values and isinstance(value, placeholder_types):
+                return True
+        return any(
+            node._has_placeholder_outputs_in_subtree()
+            for node in self._sorted_nodes()
+            if isinstance(node, PipelineHandler)
+        )
+
+    def _auto_resolve_placeholder_outputs(self, *, verbose: bool) -> None:
+        """Recover produced values saved as placeholders by re-running their blocks.
+
+        Walks nodes in upstream-to-downstream order and runs at most one block per
+        placeholder recovery, injecting fresh values without invalidating any
+        downstream outputs. Gate-off pipelines are skipped silently; recovery
+        failures emit warnings (unconditional for execution exceptions,
+        verbose-gated otherwise).
+        """
+        status, gate_error = self._pipeline_gate_status()
+        if status == "block":
+            return
+        if status == "error":
+            if verbose and self._has_placeholder_outputs_in_subtree():
+                self.logger.warning(
+                    f"Placeholder output(s) in pipeline '{self.full_path()}' are not recoverable: "
+                    f"the gate could not be evaluated ({gate_error}); they remain placeholders"
+                )
+            return
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                node._auto_resolve_placeholder_outputs(verbose=verbose)
+                continue
+            node_outputs = self.producer_outputs.get(node.registration_name, {})
+            placeholder_names = [
+                output_name
+                for output_name, value in node_outputs.items()
+                if isinstance(value, RuntimeValueReference)
+            ]
+            if not placeholder_names:
+                continue
+            self._recover_block_placeholder_outputs(
+                node,
+                placeholder_names,
+                verbose=verbose,
+            )
+        for value_name, value in self.para_value_dict.items():
+            if (
+                isinstance(value, RuntimeValueReference)
+                and value_name not in self.manual_values
+                and self._tree_find_declaring_node(value_name) is None
+                and verbose
+            ):
+                self.logger.warning(
+                    f"Placeholder value '{value_name}' is not recoverable: its producing "
+                    "block is not registered in the loaded pipeline; it remains a placeholder "
+                    "and raises ResolutionError when read"
+                )
+
+    def _warn_unresolved_placeholders_at_load(
+        self,
+        *,
+        verbose: bool,
+        _seen: set[str] | None = None,
+    ) -> None:
+        """Verbose-gated load warning for produced values saved as placeholders.
+
+        Used when ``auto_resolve_placeholders=False`` so users still learn that
+        a produced value was saved as a placeholder rather than a real value.
+        Gate-off pipelines are skipped silently; a gate that fails to evaluate
+        logs a verbose warning instead.
+        """
+        if not verbose:
+            return
+        seen = set() if _seen is None else _seen
+        status, gate_error = self._pipeline_gate_status()
+        if status == "block":
+            return
+        if status == "error":
+            self.logger.warning(
+                f"Placeholder value(s) in pipeline '{self.full_path()}' could not be inspected: "
+                f"the gate could not be evaluated ({gate_error})"
+            )
+            return
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                node._warn_unresolved_placeholders_at_load(
+                    verbose=verbose,
+                    _seen=seen,
+                )
+                continue
+            for output_name, value in self.producer_outputs.get(
+                node.registration_name, {}
+            ).items():
+                if isinstance(value, RuntimeValueReference) and output_name not in seen:
+                    seen.add(output_name)
+                    self.logger.warning(
+                        f"Pipeline value '{output_name}' was saved as a placeholder "
+                        f"({value.reason}) rather than a real value; it raises "
+                        "ResolutionError when read"
+                    )
+        for value_name, value in self.para_value_dict.items():
+            if (
+                isinstance(value, RuntimeValueReference)
+                and value_name not in self.manual_values
+                and self._tree_find_declaring_node(value_name) is None
+                and value_name not in seen
+            ):
+                seen.add(value_name)
+                self.logger.warning(
+                    f"Pipeline value '{value_name}' was saved as a placeholder "
+                    f"({value.reason}) rather than a real value; it raises "
+                    "ResolutionError when read"
+                )
+
+    def _recover_block_placeholder_outputs(
+        self,
+        node: Any,
+        placeholder_names: list[str],
+        *,
+        verbose: bool,
+    ) -> None:
+        upstream_outputs = self._recovery_upstream_outputs()
+        parent_config = self._ancestor_config_values()
+        visible_outputs = self._recovery_visible_outputs_before_priority(
+            node.execution_priority,
+            upstream_outputs=upstream_outputs,
+        )
+        for registration in node.functions:
+            defaults = (
+                {}
+                if isinstance(registration, ExpressionRegistration)
+                else default_map(registration.callable_obj)
+            )
+            for input_name in self._recovery_input_names(node, registration):
+                status = self._recovery_input_status(
+                    input_name,
+                    visible_outputs,
+                    parent_config,
+                    defaults,
+                )
+                if status == "placeholder":
+                    self._warn_placeholder_unrecoverable(
+                        placeholder_names,
+                        f"required input '{input_name}' is a placeholder that could not be restored",
+                        verbose=verbose,
+                    )
+                    return
+                if status == "unresolvable":
+                    gate_off_reason = self._unresolvable_input_gate_off_reason(
+                        input_name
+                    )
+                    self._warn_placeholder_unrecoverable(
+                        placeholder_names,
+                        f"required input '{input_name}' cannot be resolved{gate_off_reason}",
+                        verbose=verbose,
+                    )
+                    return
+        run_id = uuid4().hex
+        run_record = RunRecord(
+            run_id=run_id,
+            mode=f"auto_resolve_placeholder:{node.registration_name}",
+            executed_blocks=[node.registration_name],
+            started_at=datetime.now(UTC).isoformat(),
+        )
+        self.run_history.append(run_record)
+        try:
+            produced_outputs = node.execute(
+                run_id,
+                visible_outputs,
+                overrides={},
+                parent_config=parent_config,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            run_record.status = "failed"
+            run_record.finished_at = datetime.now(UTC).isoformat()
+            raise
+        except BaseException as exc:
+            run_record.status = "failed"
+            run_record.error_message = str(exc)
+            run_record.finished_at = datetime.now(UTC).isoformat()
+            self.logger.warning(
+                f"Placeholder output(s) '{', '.join(sorted(placeholder_names))}' are not "
+                f"recoverable: re-running block '{node.registration_name}' failed "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return
+        self.producer_outputs[node.registration_name] = produced_outputs
+        self._rebuild_visible_state(upstream_outputs)
+        run_record.status = "success"
+        run_record.produced_outputs.extend(sorted(placeholder_names))
+        run_record.finished_at = datetime.now(UTC).isoformat()
+        if verbose:
+            self.logger.info(
+                f"Recovered placeholder output(s) '{', '.join(sorted(placeholder_names))}' "
+                f"by re-running block '{node.registration_name}'"
+            )
+        for output_name in produced_outputs:
+            self._sync_value_to_ancestors_without_invalidation(output_name)
+
+    def _recovery_input_names(self, node: Any, registration: Any) -> list[str]:
+        """Effective pipeline-facing input names one registration resolves."""
+        if isinstance(registration, ExpressionRegistration):
+            return list(node._effective_expression_input_names(registration))
+        input_names: list[str] = []
+        for parameter in callable_signature(registration.callable_obj).parameters.values():
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                var_pos_name = registration.var_pos_name or parameter.name
+                args_registration = node.registered_args.get(var_pos_name)
+                if args_registration is not None:
+                    input_names.extend(args_registration.ordered_items)
+                continue
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                var_kw_name = registration.var_kw_name or parameter.name
+                kwargs_registration = node.registered_kwargs.get(var_kw_name)
+                if kwargs_registration is not None:
+                    input_names.extend(kwargs_registration.mapping_dct.values())
+                continue
+            mapped_name = registration.param_mapping.get(parameter.name, parameter.name)
+            if mapped_name is not None:
+                input_names.append(mapped_name)
+        return input_names
+
+    def _recovery_input_status(
+        self,
+        input_name: str,
+        visible_outputs: dict[str, Any],
+        parent_config: dict[str, Any] | None,
+        defaults: dict[str, Any],
+    ) -> str:
+        """Classify how one required input resolves during placeholder recovery.
+
+        Returns ``"ok"``, ``"placeholder"`` (a placeholder reference would reach
+        the function), or ``"unresolvable"`` (no source supplies the input).
+        """
+        if input_name == "logger":
+            return "ok"
+        if input_name in visible_outputs:
+            value = visible_outputs[input_name]
+        elif input_name in self.manual_values:
+            value = self.manual_values[input_name]
+        elif input_name in self._ancestor_manual_values():
+            value = self._ancestor_manual_values()[input_name]
+        elif self._config_has_field(self.config, input_name):
+            value = self._config_value(self.config, input_name)
+        elif parent_config and input_name in parent_config:
+            value = parent_config[input_name]
+        elif input_name in defaults:
+            return "ok"
+        else:
+            return "unresolvable"
+        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
+            return "placeholder"
+        return "ok"
+
+    def _unresolvable_input_gate_off_reason(self, input_name: str) -> str:
+        """Describe when an unresolvable input is only produced by gate-off blocks."""
+        declaring_blocks = self._tree_declaring_blocks(input_name)
+        if not declaring_blocks:
+            return ""
+        gated_labels = [
+            f"'{node.registration_name}'"
+            for pipeline, node in declaring_blocks
+            if pipeline._pipeline_effectively_gated()
+        ]
+        if len(gated_labels) == len(declaring_blocks):
+            return (
+                f"; its only producer(s) {', '.join(gated_labels)} are gated off by config"
+            )
+        return ""
+
+    def _tree_declaring_blocks(
+        self,
+        variable_name: str,
+    ) -> list[tuple["PipelineHandler", Any]]:
+        """Return ``(owning pipeline, block)`` pairs for every block declaring the name."""
+        declaring: list[tuple["PipelineHandler", Any]] = []
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                if variable_name in node.list_declared_outputs():
+                    declaring.extend(node._tree_declaring_blocks(variable_name))
+            elif variable_name in node.declared_outputs():
+                declaring.append((self, node))
+        return declaring
+
+    def _tree_find_declaring_node(self, variable_name: str) -> Any | None:
+        """Find the first block declaring the name anywhere in the subtree."""
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                if variable_name in node.list_declared_outputs():
+                    found = node._tree_find_declaring_node(variable_name)
+                    if found is not None:
+                        return found
+            elif variable_name in node.declared_outputs():
+                return node
+        return None
+
+    def _pipeline_gate_status(self) -> tuple[str, str | None]:
+        """Classify this pipeline's gate chain as ``("pass" | "block" | "error", message)``.
+
+        A successfully evaluated false gate blocks; a config-field gate whose
+        value is ``None`` is treated as no blocking; any exception while
+        evaluating a gate yields ``"error"`` with the exception text.
+        """
+        current: PipelineHandler | None = self
+        while current is not None:
+            gate = current.gate_block
+            if gate is not None:
+                if gate.config_field_name is not None:
+                    try:
+                        value = current._resolve_named_input(
+                            gate.config_field_name,
+                            gate.registration.function_name,
+                            {},
+                            current._incoming_parent_outputs(),
+                            current._ancestor_config_values(),
+                            {},
+                            [],
+                            set(current._incoming_parent_outputs()).union(
+                                current.list_declared_outputs()
+                            ),
+                        )
+                    except Exception as exc:
+                        return "error", f"{type(exc).__name__}: {exc}"
+                    if value is None:
+                        current = current.parent_pipeline
+                        continue
+                    if value != gate.expected_value:
+                        return "block", None
+                else:
+                    try:
+                        gate_passes = gate.evaluate(
+                            {},
+                            current._incoming_parent_outputs(),
+                            current._ancestor_config_values(),
+                        )
+                    except Exception as exc:
+                        return "error", f"{type(exc).__name__}: {exc}"
+                    if not gate_passes:
+                        return "block", None
+            current = current.parent_pipeline
+        return "pass", None
+
+    def _pipeline_effectively_gated(self) -> bool:
+        """True when this pipeline or any ancestor gate blocks or fails to evaluate."""
+        status, _ = self._pipeline_gate_status()
+        return status in ("block", "error")
+
+    def _recovery_upstream_outputs(self) -> dict[str, Any]:
+        """Parent outputs visible to this pipeline, excluding gate-off producers."""
+        if self.parent_pipeline is None or self.execution_priority is None:
+            return {}
+        return self.parent_pipeline._recovery_visible_outputs_before_priority(
+            self.execution_priority
+        )
+
+    def _recovery_visible_outputs_before_priority(
+        self,
+        priority: float | None,
+        upstream_outputs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Visible outputs for placeholder recovery, ignoring gate-off producers.
+
+        A same-name output produced by a non-gated block is used in place of an
+        identical output declared by a gate-off block, regardless of whether the
+        alternative sits upstream or downstream of the gate-off block (point 4).
+        """
+        visible = dict(
+            upstream_outputs
+            if upstream_outputs is not None
+            else self._recovery_upstream_outputs()
+        )
+        visible.update(self.manual_values)
+        if priority is None:
+            return visible
+        for node in self._sorted_nodes():
+            if node.execution_priority >= priority:
+                break
+            if isinstance(node, PipelineHandler):
+                if node._pipeline_effectively_gated():
+                    continue
+                visible.update(node.para_value_dict)
+            else:
+                visible.update(self.producer_outputs.get(node.registration_name, {}))
+        return visible
+
+    def _warn_placeholder_unrecoverable(
+        self,
+        placeholder_names: list[str],
+        reason: str,
+        *,
+        verbose: bool,
+    ) -> None:
+        if not verbose:
+            return
+        self.logger.warning(
+            f"Placeholder output(s) '{', '.join(sorted(placeholder_names))}' are not "
+            f"recoverable at load: {reason}; they remain placeholders and raise "
+            "ResolutionError when read"
+        )
 
     def _serialize_payload_for_save(
         self,
@@ -1871,6 +2495,18 @@ class PipelineHandler:
             pickle.dumps(value)
             return value
         except Exception:
+            if is_dataclass(value) and not isinstance(value, type):
+                return DataclassValueReference(
+                    class_name=type(value).__name__,
+                    module=type(value).__module__,
+                    data={
+                        name: self._serialize_dataclass_field_value(
+                            getattr(value, name)
+                        )
+                        for name in value.__dataclass_fields__
+                    },
+                    reason="not directly serializable during save_pipeline",
+                )
             warnings.warn(
                 f"Runtime value '{node_name}.{output_name}' could not be serialized directly; saving a reference placeholder instead.",
                 stacklevel=2,
@@ -2084,6 +2720,7 @@ class PipelineHandler:
                 "__pipeline_serialized_config__": True,
                 "kind": "namespace",
                 "class_name": type(value).__name__,
+                "module": type(value).__module__,
                 "data": {
                     key: PipelineHandler._serialize_config_value(item)
                     for key, item in PipelineHandler._config_object_as_dict(value).items()
@@ -2094,6 +2731,7 @@ class PipelineHandler:
                 "__pipeline_serialized_config__": True,
                 "kind": "namespace",
                 "class_name": type(value).__name__,
+                "module": type(value).__module__,
                 "data": {
                     key: PipelineHandler._serialize_config_value(item)
                     for key, item in vars(value).items()
@@ -2106,11 +2744,25 @@ class PipelineHandler:
         return value
 
     @staticmethod
-    def _deserialize_saved_config(saved_config: Any) -> Any:
-        return PipelineHandler._deserialize_config_value(saved_config)
+    def _deserialize_saved_config(
+        saved_config: Any,
+        *,
+        verbose: bool = False,
+        warn: Any | None = None,
+    ) -> Any:
+        return PipelineHandler._deserialize_config_value(
+            saved_config,
+            verbose=verbose,
+            warn=warn,
+        )
 
     @staticmethod
-    def _deserialize_config_value(value: Any) -> Any:
+    def _deserialize_config_value(
+        value: Any,
+        *,
+        verbose: bool = False,
+        warn: Any | None = None,
+    ) -> Any:
         if isinstance(value, CallableValueReference):
             return PipelineHandler._restore_callable_value(value)
         if isinstance(value, RuntimeCallableReference):
@@ -2124,29 +2776,182 @@ class PipelineHandler:
         ):
             if isinstance(value, dict):
                 return {
-                    key: PipelineHandler._deserialize_config_value(item)
+                    key: PipelineHandler._deserialize_config_value(
+                        item,
+                        verbose=verbose,
+                        warn=warn,
+                    )
                     for key, item in value.items()
                 }
             if isinstance(value, list):
-                return [PipelineHandler._deserialize_config_value(item) for item in value]
+                return [
+                    PipelineHandler._deserialize_config_value(
+                        item,
+                        verbose=verbose,
+                        warn=warn,
+                    )
+                    for item in value
+                ]
             if isinstance(value, tuple):
-                return tuple(PipelineHandler._deserialize_config_value(item) for item in value)
+                return tuple(
+                    PipelineHandler._deserialize_config_value(
+                        item,
+                        verbose=verbose,
+                        warn=warn,
+                    )
+                    for item in value
+                )
             return value
         kind = value.get("kind")
         if kind == "dict":
             return {
-                key: PipelineHandler._deserialize_config_value(item)
+                key: PipelineHandler._deserialize_config_value(
+                    item,
+                    verbose=verbose,
+                    warn=warn,
+                )
                 for key, item in dict(value.get("data", {})).items()
             }
         if kind == "namespace":
-            config = SimpleNamespace(
-                **{
-                    key: PipelineHandler._deserialize_config_value(item)
-                    for key, item in dict(value.get("data", {})).items()
-                }
+            data = {
+                key: PipelineHandler._deserialize_config_value(
+                    item,
+                    verbose=verbose,
+                    warn=warn,
+                )
+                for key, item in dict(value.get("data", {})).items()
+            }
+            return PipelineHandler._reconstruct_dataclass(
+                value.get("class_name"),
+                data,
+                verbose=verbose,
+                module_name=value.get("module"),
+                warn=warn,
             )
-            return config
         return value
+
+    @classmethod
+    def _serialize_dataclass_field_value(cls, value: Any) -> Any:
+        """Return a picklable structured representation of one dataclass field value.
+
+        Picklable values are kept as-is; unpicklable values are converted into
+        reconstructable references (callables, nested dataclasses, dict-like
+        objects) or a last-resort placeholder.
+        """
+        try:
+            pickle.dumps(value)
+            return value
+        except Exception:
+            pass
+        if isinstance(value, dict):
+            return {
+                key: cls._serialize_dataclass_field_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._serialize_dataclass_field_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._serialize_dataclass_field_value(item) for item in value)
+        serialized = cls._serialize_config_value(value)
+        if isinstance(
+            serialized,
+            (CallableValueReference, RuntimeCallableReference, RuntimeValueReference),
+        ):
+            return serialized
+        try:
+            pickle.dumps(serialized)
+            return serialized
+        except Exception:
+            return RuntimeValueReference(
+                type_name=type(value).__name__,
+                repr_text=repr(value),
+                reason="dataclass field not directly serializable during save_pipeline",
+            )
+
+    @staticmethod
+    def _find_dataclass_class(
+        class_name: str,
+        module_name: str | None = None,
+    ) -> type | None:
+        """Locate an importable pure dataclass by name.
+
+        When the saved module is known, the class is looked up there first;
+        otherwise every loaded module's attributes are scanned. ``__main__``
+        definitions (notebook-local classes) are preferred over ambiguous
+        same-name matches.
+        """
+        if module_name is not None:
+            module = sys.modules.get(module_name)
+            if module is not None:
+                candidate = getattr(module, class_name, None)
+                if (
+                    isinstance(candidate, type)
+                    and is_dataclass(candidate)
+                    and candidate.__name__ == class_name
+                ):
+                    return candidate
+        candidates: list[type] = []
+        for module in sys.modules.values():
+            candidate = getattr(module, class_name, None)
+            if (
+                isinstance(candidate, type)
+                and is_dataclass(candidate)
+                and candidate.__name__ == class_name
+            ):
+                candidates.append(candidate)
+        main_candidates = [
+            candidate
+            for candidate in candidates
+            if getattr(candidate, "__module__", None) == "__main__"
+        ]
+        if main_candidates:
+            return main_candidates[0]
+        if candidates:
+            return candidates[0]
+        return None
+
+    @staticmethod
+    def _reconstruct_dataclass(
+        class_name: str | None,
+        data: dict[str, Any],
+        *,
+        verbose: bool,
+        module_name: str | None = None,
+        warn: Any | None = None,
+    ) -> Any:
+        """Rebuild a saved pure dataclass from its structured fields.
+
+        Returns a real dataclass instance when the class is importable and can be
+        constructed from the saved fields; otherwise falls back to a
+        ``SimpleNamespace`` (with a verbose-gated warning when ``warn`` is given).
+        """
+        if class_name is not None:
+            candidate_class = PipelineHandler._find_dataclass_class(
+                class_name,
+                module_name=module_name,
+            )
+            if candidate_class is not None:
+                init_field_names = {
+                    field.name for field in fields(candidate_class) if field.init
+                }
+                try:
+                    return candidate_class(
+                        **{
+                            key: value
+                            for key, value in data.items()
+                            if key in init_field_names
+                        }
+                    )
+                except TypeError:
+                    pass
+        if verbose and warn is not None:
+            warn(
+                f"Saved dataclass '{class_name}' could not be reconstructed at load "
+                "(class is not importable as a pure dataclass, its fields changed, or the "
+                "saved fields cannot be passed to its constructor); "
+                "using a SimpleNamespace fallback instead."
+            )
+        return SimpleNamespace(**data)
 
     @staticmethod
     def _config_object_as_dict(config_obj: Any) -> dict[str, Any]:
@@ -3283,7 +4088,7 @@ class PipelineHandler:
             loaded_artifacts.append(input_name)
         if isinstance(value, CallableValueReference):
             value = self._restore_callable_value(value)
-        if isinstance(value, RuntimeValueReference):
+        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot resolve argument '{input_name}' for function '{function_name}': "
                 f"the value was saved as a placeholder ({value.reason}) and cannot be restored; "

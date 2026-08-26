@@ -3,13 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, cast
+from typing import Callable, cast
 
+from .backup_recovery import _PipelineProtocol
 from .exceptions import PersistenceError, ResolutionError
 from .models import ArtifactRecord, TorchStateArtifactRecord
-
-if TYPE_CHECKING:
-    from .pipeline_handler import PipelineHandler
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +51,7 @@ class _BackupSnapshot:
         _validate_artifact_sources(value, Path(saved_root), self.backup_root)
 
 
-def read_backup_snapshot(root_pipeline: PipelineHandler) -> _BackupSnapshot:
+def read_backup_snapshot(root_pipeline: _PipelineProtocol) -> _BackupSnapshot:
     root = root_pipeline
     while root.parent_pipeline is not None:
         root = root.parent_pipeline
@@ -107,7 +105,7 @@ def _load_pickle(path: Path, loader: Callable[[bytes], object], label: str) -> o
 
 
 def _validate_root_payload(
-    payload: object, root: PipelineHandler, backup_root: Path
+    payload: object, root: _PipelineProtocol, backup_root: Path
 ) -> None:
     mapping = _require_mapping(payload, "backup state payload")
     _require_root_shape(mapping, "backup state payload")
@@ -122,7 +120,7 @@ def _validate_root_payload(
 
 
 def _validate_metadata(
-    metadata: object, root: PipelineHandler, backup_root: Path
+    metadata: object, root: _PipelineProtocol, backup_root: Path
 ) -> None:
     mapping = _require_mapping(metadata, "backup metadata")
     if mapping.get("pipeline_directory") != str(root.project_root):

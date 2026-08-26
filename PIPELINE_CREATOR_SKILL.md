@@ -13,6 +13,10 @@ Before writing any pipeline code, read these files in the repository:
 4. `tests/test_pipeline_handler.py`
 5. `tests/test_execution_block.py`
 6. `tests/test_save_load.py`
+7. `tests/test_backup_recovery.py`
+8. `tests/test_backup_recovery_ownership.py`
+9. `tests/test_backup_value_resolver.py`
+10. `tests/test_auto_resolve_placeholders.py`
 
 Verify that you understand:
 - `PipelineHandler` owns config, values, child pipelines, save/load, and logging.
@@ -120,9 +124,11 @@ Registered stages with an import path are restored from that path. Registered st
 
 When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading restores that backup into the canonical working directory. This copies project data, not Python source, installed packages, or the runtime environment.
 
+`load_pipeline(...)` re-runs producing blocks by default (`auto_resolve_placeholders=True`) to recover produced values that were saved as placeholders (non-serialisable outputs), one block per recovery, upstream-to-downstream, without invalidating downstream values; each recovery is recorded with a `RunRecord` labelled `auto_resolve_placeholder:<block>`. Unrecoverable outputs stay placeholders and raise `ResolutionError` when read (verbose-gated load warnings explain why; a block raising during re-execution warns unconditionally). Pure-dataclass values are reconstructed at load when their class is importable and constructible from the saved fields (else `SimpleNamespace`). Mention these semantics when the user's pipeline produces non-picklable values or relies on saved dataclass configs.
+
 **Single-Item Backup Recovery**
 
-Use `root_pipeline.recover_variable_from_backup(name=...)` only when the root has a configured backup directory and a complete in-place save. The name must exist in both current and saved state. If independently owned same-name values exist across the attached tree, the method lists all affected pipeline paths and requires `yes` or `y`; refusal is a no-op. The method updates in place, returns `None`, clones disk-backed data into the live project, and does not rerun or invalidate derived outputs.
+Use `root_pipeline.recover_variable_from_backup(name=...)` only when the root has a configured backup directory and a complete in-place save. The name must exist in the saved state; produced and manual values must also exist in the live pipeline, while a declared-but-not-yet-produced output name can be recovered into its declaring pipeline. Pass the optional `pipeline_name="..."` to target one specific pipeline when the same name is owned by several pipelines. If independently owned same-name values exist across the attached tree, the method lists all affected pipeline paths and requires `yes` or `y`; refusal is a no-op. The method updates in place, returns `None`, clones disk-backed data into the live project, and does not rerun or invalidate derived outputs.
 
 Use `selected_pipeline.recover_config_from_backup(name=...)` only for a field locally owned by that selected pipeline in both current and saved state. Existing config inheritance applies to descendants, while descendant local overrides remain unchanged. The method returns `None` and swaps in a staged config copy after validation.
 

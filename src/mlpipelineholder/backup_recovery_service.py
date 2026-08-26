@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .artifact_recovery import (
     _ArtifactRecoveryTransaction,
@@ -13,8 +13,10 @@ from .backup_recovery import (
     OwnerKind,
     SlotKind,
     _OwnedVariableState,
+    _PipelineProtocol,
     _StateSlot,
     _VariableOwnershipInventory,
+    _is_pipeline_node,
     confirm_recovery_impact,
     discover_owned_variable_slots,
 )
@@ -26,9 +28,6 @@ from .backup_value_resolver import (
 from .exceptions import PersistenceError, RegistrationError, ResolutionError
 from .models import ArtifactRecord, TorchStateArtifactRecord
 
-if TYPE_CHECKING:
-    from .pipeline_handler import PipelineHandler
-
 
 @dataclass(frozen=True, slots=True)
 class _SlotSnapshot:
@@ -37,8 +36,16 @@ class _SlotSnapshot:
     value: Any
 
 
+@dataclass(frozen=True, slots=True)
+class _DeclaredInjectionSnapshots:
+    entry_snapshots: tuple[tuple[dict[str, Any] | None, str, bool, Any], ...]
+    mapping_snapshots: tuple[
+        tuple[dict[str, Any], str, bool, dict[str, Any] | None], ...
+    ]
+
+
 def recover_variable_from_backup(
-    pipeline: PipelineHandler,
+    pipeline: _PipelineProtocol,
     name: str,
     *,
     pipeline_name: str | None = None,
@@ -54,12 +61,22 @@ def recover_variable_from_backup(
         scope = _find_pipeline_by_name(pipeline, pipeline_name)
         if scope is None:
             raise ResolutionError(f"Unknown pipeline: {pipeline_name}")
-    inventory = discover_owned_variable_slots(pipeline, name, scope_pipeline=scope)
+    inventory = discover_owned_variable_slots(
+        pipeline,
+        name,
+        scope_pipeline=scope if pipeline_name is not None else None,
+    )
+    declaring = scope
     declared_only = False
     if not inventory.owners:
-        if name not in scope.list_declared_outputs():
-            raise ResolutionError(f"Unknown pipeline value: {name}")
-        declaring = _deepest_declaring_pipeline(scope, name)
+        if pipeline_name is not None:
+            declaring_node = scope._find_declaring_node(name)
+            if declaring_node is None or _is_pipeline_node(declaring_node):
+                raise ResolutionError(f"Unknown pipeline value: {name}")
+        else:
+            if name not in scope.list_declared_outputs():
+                raise ResolutionError(f"Unknown pipeline value: {name}")
+            declaring = _deepest_declaring_pipeline(scope, name)
         inventory = _declared_inventory(declaring, name)
         declared_only = True
     snapshot = read_backup_snapshot(pipeline)
@@ -85,18 +102,23 @@ def recover_variable_from_backup(
     prepared = transaction.clone_value(resolved)
     snapshot.assert_unchanged()
     slot_snapshots = _snapshot_inventory(inventory)
+    declared_snapshots = _snapshot_declared_injection(inventory, pipeline)
     try:
-        if any(owner.owner_kind is OwnerKind.DECLARED for owner in inventory.owners):
+        if declared_snapshots is not None:
             _inject_declared_owners(pipeline, inventory, prepared)
         else:
             _assign_inventory(inventory, prepared)
         transaction.commit()
     except (KeyboardInterrupt, SystemExit):
         _restore_slots(slot_snapshots)
+        if declared_snapshots is not None:
+            _restore_declared_injection(declared_snapshots)
         transaction.rollback()
         raise
     except Exception as exc:
         _restore_slots(slot_snapshots)
+        if declared_snapshots is not None:
+            _restore_declared_injection(declared_snapshots)
         transaction.rollback()
         if isinstance(exc, PersistenceError):
             raise
@@ -106,7 +128,7 @@ def recover_variable_from_backup(
     _cleanup_old_artifacts(pipeline, slot_snapshots)
 
 
-def recover_config_from_backup(pipeline: PipelineHandler, name: str) -> None:
+def recover_config_from_backup(pipeline: _PipelineProtocol, name: str) -> None:
     current_config = pipeline.config_as_dict()
     if name not in current_config:
         raise ResolutionError(f"Unknown local config field: {name}")
@@ -185,9 +207,9 @@ def _snapshot_inventory(
 
 
 def _find_pipeline_by_name(
-    root: PipelineHandler,
+    root: _PipelineProtocol,
     registration_name: str,
-) -> PipelineHandler | None:
+) -> _PipelineProtocol | None:
     for candidate in root._iter_attached_pipelines():
         if candidate.registration_name == registration_name:
             return candidate
@@ -195,7 +217,7 @@ def _find_pipeline_by_name(
 
 
 def _declared_inventory(
-    scope: PipelineHandler,
+    scope: _PipelineProtocol,
     variable_name: str,
 ) -> _VariableOwnershipInventory:
     owner = _OwnedVariableState(
@@ -207,9 +229,9 @@ def _declared_inventory(
 
 
 def _deepest_declaring_pipeline(
-    scope: PipelineHandler,
+    scope: _PipelineProtocol,
     variable_name: str,
-) -> PipelineHandler:
+) -> _PipelineProtocol:
     current = scope
     while True:
         node = current._find_declaring_node(variable_name)
@@ -219,7 +241,7 @@ def _deepest_declaring_pipeline(
 
 
 def _inject_declared_owners(
-    root: PipelineHandler,
+    root: _PipelineProtocol,
     inventory: _VariableOwnershipInventory,
     value: Any,
 ) -> None:
@@ -229,18 +251,88 @@ def _inject_declared_owners(
         target = _find_pipeline_by_path(root, owner.pipeline_path)
         if target is None:
             continue
-        target._inject_produced_value(
-            inventory.variable_name,
-            value,
-            copy=False,
-            verbose=False,
+        target._inject_recovered_value(inventory.variable_name, value)
+
+
+def _snapshot_declared_injection(
+    inventory: _VariableOwnershipInventory,
+    root: _PipelineProtocol,
+) -> _DeclaredInjectionSnapshots | None:
+    owners = [
+        owner
+        for owner in inventory.owners
+        if owner.owner_kind is OwnerKind.DECLARED
+    ]
+    if not owners:
+        return None
+    target = _find_pipeline_by_path(root, owners[0].pipeline_path)
+    variable_name = inventory.variable_name
+    if target is None:
+        return None
+    declaring_node = target._find_declaring_node(variable_name)
+    while declaring_node is not None and _is_pipeline_node(declaring_node):
+        target = declaring_node
+        declaring_node = target._find_declaring_node(variable_name)
+    if declaring_node is None:
+        return None
+    block_name = declaring_node.registration_name
+    block_mapping = target.producer_outputs.get(block_name)
+    entry_targets: list[tuple[dict[str, Any] | None, str]] = [
+        (block_mapping, variable_name),
+        (target.para_value_dict, variable_name),
+        (target.artifact_registry, variable_name),
+    ]
+    mapping_targets = [(target.producer_outputs, block_name)]
+    current = target
+    while current.parent_pipeline is not None:
+        parent = current.parent_pipeline
+        child_mapping = parent.producer_outputs.get(current.registration_name)
+        entry_targets.extend(
+            [
+                (child_mapping, variable_name),
+                (parent.para_value_dict, variable_name),
+                (parent.artifact_registry, variable_name),
+            ]
         )
+        mapping_targets.append(
+            (parent.producer_outputs, current.registration_name)
+        )
+        current = parent
+    entry_snapshots = tuple(
+        (
+            mapping,
+            key,
+            mapping is not None and key in mapping,
+            mapping.get(key) if mapping is not None else None,
+        )
+        for mapping, key in entry_targets
+    )
+    mapping_snapshots = tuple(
+        (parent_mapping, key, key in parent_mapping, parent_mapping.get(key))
+        for parent_mapping, key in mapping_targets
+    )
+    return _DeclaredInjectionSnapshots(entry_snapshots, mapping_snapshots)
+
+
+def _restore_declared_injection(snapshots: _DeclaredInjectionSnapshots) -> None:
+    for mapping, key, existed, value in snapshots.mapping_snapshots:
+        if existed:
+            mapping[key] = value
+        else:
+            mapping.pop(key, None)
+    for mapping, key, existed, value in snapshots.entry_snapshots:
+        if mapping is None:
+            continue
+        if existed:
+            mapping[key] = value
+        else:
+            mapping.pop(key, None)
 
 
 def _find_pipeline_by_path(
-    root: PipelineHandler,
+    root: _PipelineProtocol,
     pipeline_path: str,
-) -> PipelineHandler | None:
+) -> _PipelineProtocol | None:
     for candidate in root._iter_attached_pipelines():
         if candidate.full_path() == pipeline_path:
             return candidate
@@ -284,7 +376,7 @@ def _staged_config(config: Any, name: str, value: Any) -> Any:
 
 
 def _cleanup_old_artifacts(
-    root: PipelineHandler,
+    root: _PipelineProtocol,
     snapshots: tuple[_SlotSnapshot, ...],
 ) -> None:
     old_records: dict[str, ArtifactRecord | TorchStateArtifactRecord] = {}
@@ -301,7 +393,7 @@ def _cleanup_old_artifacts(
             )
 
 
-def _cleanup_config_artifact(pipeline: PipelineHandler, old_value: Any) -> None:
+def _cleanup_config_artifact(pipeline: _PipelineProtocol, old_value: Any) -> None:
     if not isinstance(old_value, (ArtifactRecord, TorchStateArtifactRecord)):
         return
     try:
@@ -312,7 +404,7 @@ def _cleanup_config_artifact(pipeline: PipelineHandler, old_value: Any) -> None:
         )
 
 
-def _all_live_values(root: PipelineHandler) -> list[object]:
+def _all_live_values(root: _PipelineProtocol) -> list[object]:
     values: list[object] = []
     for pipeline in root._iter_attached_pipelines():
         values.extend(pipeline.para_value_dict.values())
