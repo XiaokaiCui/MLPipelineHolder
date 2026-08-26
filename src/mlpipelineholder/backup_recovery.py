@@ -29,6 +29,7 @@ class OwnerKind(StrEnum):
     MANUAL = "manual"
     LATEST_PRODUCER = "latest_producer"
     FALLBACK_PARA = "fallback_para"
+    DECLARED = "declared"
 
 
 @unique
@@ -78,10 +79,16 @@ class ImpactConfirmation:
 def discover_owned_variable_slots(
     root_pipeline: PipelineHandler,
     variable_name: str,
+    *,
+    scope_pipeline: PipelineHandler | None = None,
 ) -> _VariableOwnershipInventory:
     owners: list[_OwnedVariableState] = []
     mirrors: list[_StateSlot] = []
-    for pipeline in root_pipeline._iter_attached_pipelines():
+    if scope_pipeline is not None:
+        pipelines = scope_pipeline._iter_attached_pipelines()
+    else:
+        pipelines = root_pipeline._iter_attached_pipelines()
+    for pipeline in pipelines:
         owner = _discover_owner(pipeline, variable_name)
         if owner is None:
             continue

@@ -100,6 +100,7 @@ class PipelineHandler:
         torch_load_weights_only: bool = False,
         strict_mode: bool = False,
         _allow_existing_root: bool = False,
+        _allow_legacy_config_object: bool = False,
     ) -> None:
         self.registration_name = registration_name
         self.config = {} if configuration is None else configuration
@@ -117,6 +118,9 @@ class PipelineHandler:
             else Path(pipeline_backup_directory)
         )
         try:
+            if not _allow_legacy_config_object:
+                self._validate_config_reconstructable(self.config)
+            self._validate_config_picklable(self.config)
             self._validate_builtin_name_conflicts_in_mapping(
                 self._config_name_mapping(self.config),
                 owner_label="configuration",
@@ -403,6 +407,7 @@ class PipelineHandler:
         manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
         for field_name, value in overrides.items():
             self._validate_builtin_name_conflict(field_name, owner_label="configuration")
+            self._validate_config_value_picklable(field_name, value)
             if field_name in declared_outputs:
                 self.logger.warning(
                     f"Skipped config update for '{field_name}' because it conflicts with a declared output"
@@ -423,6 +428,7 @@ class PipelineHandler:
             self._validate_builtin_name_conflict(field_name, owner_label="configuration")
             if field_name not in config_names:
                 raise ResolutionError(f"Unknown config field: {field_name}")
+            self._validate_config_value_picklable(field_name, value)
             if field_name in declared_outputs:
                 self.logger.warning(
                     f"Skipped config update for '{field_name}' because it conflicts with a declared output"
@@ -456,6 +462,11 @@ class PipelineHandler:
             return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
+        if isinstance(value, RuntimeValueReference):
+            raise ResolutionError(
+                f"Cannot get value '{variable_name}': it was saved as a placeholder "
+                f"({value.reason}) and cannot be restored; recreate or reset the value"
+            )
         return value
 
     def get_constant_value(self, variable_name: str) -> Any:
@@ -470,6 +481,11 @@ class PipelineHandler:
             return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
+        if isinstance(value, RuntimeValueReference):
+            raise ResolutionError(
+                f"Cannot get constant '{variable_name}': it was saved as a placeholder "
+                f"({value.reason}) and cannot be restored; reset it with set_constant_value"
+            )
         return value
 
     @staticmethod
@@ -817,10 +833,15 @@ class PipelineHandler:
                     parent.artifact_registry.pop(variable_name, None)
             current = parent
 
-    def recover_variable_from_backup(self, name: str) -> None:
+    def recover_variable_from_backup(
+        self,
+        name: str,
+        *,
+        pipeline_name: str | None = None,
+    ) -> None:
         from .backup_recovery_service import recover_variable_from_backup
 
-        recover_variable_from_backup(self, name)
+        recover_variable_from_backup(self, name, pipeline_name=pipeline_name)
 
     def get_full_config(self) -> dict[str, Any]:
         return dict(self._ancestor_config_values(), **self.config_as_dict())
@@ -829,7 +850,13 @@ class PipelineHandler:
         config = self.get_full_config()
         if field_name not in config:
             raise ResolutionError(f"Unknown config field: {field_name}")
-        return config[field_name]
+        value = config[field_name]
+        if isinstance(value, RuntimeValueReference):
+            raise ResolutionError(
+                f"Cannot get config field '{field_name}': it was saved as a placeholder "
+                f"({value.reason}) and cannot be restored"
+            )
+        return value
 
     def recover_config_from_backup(self, name: str) -> None:
         from .backup_recovery_service import recover_config_from_backup
@@ -1176,6 +1203,7 @@ class PipelineHandler:
         path: str | Path,
         *,
         forced_deleting: bool = False,
+        verbose: bool = False,
     ) -> "PipelineHandler":
         warnings.warn(
             "Loaded pipelines restore current callable references, not historical function snapshots; changed source code may alter behavior.",
@@ -1192,7 +1220,7 @@ class PipelineHandler:
             cls._validate_loaded_payload_placeholders(payload)
         except Exception as exc:
             raise PersistenceError("Failed to load pipeline project") from exc
-        pipeline = cls._from_payload(payload, target)
+        pipeline = cls._from_payload(payload, target, verbose=verbose)
         if restore_message is not None:
             pipeline.logger.info(restore_message)
         pipeline.logger.info(f"Pipeline has been loaded from the project root: {target}")
@@ -1204,8 +1232,11 @@ class PipelineHandler:
         path: str | Path,
         *,
         forced_deleting: bool = False,
+        verbose: bool = False,
     ) -> "PipelineHandler":
-        return cls.load_pipeline(path, forced_deleting=forced_deleting)
+        return cls.load_pipeline(
+            path, forced_deleting=forced_deleting, verbose=verbose
+        )
 
     def _write_pipeline_metadata(self, target: Path) -> None:
         with (target / "pipeline_meta.pkl").open("wb") as handle:
@@ -1502,6 +1533,8 @@ class PipelineHandler:
         payload: dict[str, Any],
         project_root: Path,
         parent: "PipelineHandler | None" = None,
+        *,
+        verbose: bool = False,
     ) -> "PipelineHandler":
         config = cls._deserialize_saved_config(payload["config"])
         pipeline = cls(
@@ -1518,6 +1551,7 @@ class PipelineHandler:
             strict_mode=payload.get("strict_mode", False),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
+            _allow_legacy_config_object=True,
         )
         if payload.get("expression_runtime_code") is not None:
             pipeline.define_expression_runtime(payload["expression_runtime_code"])
@@ -1605,7 +1639,12 @@ class PipelineHandler:
                     )
             else:
                 child_root = project_root / "children" / node_payload["registration_name"]
-                child = cls._from_payload(node_payload["payload"], child_root, parent=pipeline)
+                child = cls._from_payload(
+                    node_payload["payload"],
+                    child_root,
+                    parent=pipeline,
+                    verbose=verbose,
+                )
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline
                 child.logger = pipeline.logger
@@ -1621,6 +1660,13 @@ class PipelineHandler:
             payload.get("manual_values", {}),
             owner_label="pipeline value",
         )
+        for constant_name, constant_value in pipeline.manual_values.items():
+            if isinstance(constant_value, RuntimeValueReference) and verbose:
+                pipeline.logger.warning(
+                    f"Constant '{constant_name}' was saved as a placeholder ({constant_value.reason}) "
+                    "and could not be restored; reset it with set_constant_value before running, "
+                    "otherwise functions consuming it will fail"
+                )
         pipeline.para_value_dict = cls._restore_saved_runtime_mapping(
             payload.get("para_value_dict", {}),
             owner_label="pipeline state value",
@@ -2464,9 +2510,19 @@ class PipelineHandler:
         earliest_priority = min(
             node.execution_priority for node in nodes if node.execution_priority is not None
         )
+        removed_outputs: list[dict[str, Any]] = []
         for node in nodes:
+            removed_outputs.append(self.producer_outputs.pop(node.registration_name, {}))
+            if isinstance(node, PipelineHandler):
+                node._invalidate_all_outputs()
             self._remove_registered_node(node)
         self._invalidate_from_priority(earliest_priority)
+        # The removed nodes are no longer in _sorted_nodes(), so
+        # _invalidate_from_priority cannot clean their producer_outputs
+        # entries; delete their artifacts explicitly so downstream blocks
+        # cannot silently consume stale values.
+        for outputs in removed_outputs:
+            self._delete_artifacts_from_outputs(outputs)
 
     def _validate_strict_attach(
         self,
@@ -3227,6 +3283,12 @@ class PipelineHandler:
             loaded_artifacts.append(input_name)
         if isinstance(value, CallableValueReference):
             value = self._restore_callable_value(value)
+        if isinstance(value, RuntimeValueReference):
+            raise ResolutionError(
+                f"Cannot resolve argument '{input_name}' for function '{function_name}': "
+                f"the value was saved as a placeholder ({value.reason}) and cannot be restored; "
+                "recreate or reset the value before running"
+            )
         return value
 
     def _config_has_field(self, config_obj: Any, field_name: str) -> bool:
@@ -3270,6 +3332,67 @@ class PipelineHandler:
     ) -> None:
         for name in values:
             cls._validate_builtin_name_conflict(name, owner_label)
+
+    @staticmethod
+    def _validate_config_value_picklable(field_name: str, value: Any) -> None:
+        if isinstance(value, (CallableValueReference, RuntimeValueReference, RuntimeCallableReference)):
+            return
+        try:
+            pickle.dumps(value)
+        except Exception as exc:
+            raise RegistrationError(
+                f"Config field '{field_name}' is not picklable ({type(value).__name__}: {exc}); "
+                "use set_constant_value instead for values that cannot be persisted"
+            ) from exc
+
+    @staticmethod
+    def _validate_config_reconstructable(config: Any) -> None:
+        if isinstance(config, dict):
+            return
+        if is_dataclass(config) and not isinstance(config, type):
+            field_names = set(config.__dataclass_fields__)
+            offending: list[str] = []
+            for cls in type(config).__mro__:
+                if cls is object:
+                    continue
+                for name in vars(cls):
+                    if name.startswith("__") or name in field_names:
+                        continue
+                    offending.append(name)
+            if offending:
+                raise RegistrationError(
+                    f"Pipeline configuration dataclass '{type(config).__name__}' "
+                    f"must be pure (fields only) so it can be reconstructed after "
+                    f"save/load; found non-field member(s): {sorted(offending)}"
+                )
+            return
+        raise RegistrationError(
+            f"Pipeline configuration must be a dict or a pure dataclass instance "
+            f"(fields only) so it can be reconstructed after save/load; got "
+            f"{type(config).__name__}. Use a dict or define a @dataclass config."
+        )
+
+    @classmethod
+    def _validate_config_picklable(cls, config: Any) -> None:
+        if config is None:
+            return
+        if is_dataclass(config) and not isinstance(config, type):
+            for name in config.__dataclass_fields__:
+                cls._validate_config_value_picklable(name, getattr(config, name))
+            if hasattr(config, "__dict__"):
+                extra_names = set(vars(config)).difference(config.__dataclass_fields__)
+                for name in extra_names:
+                    cls._validate_config_value_picklable(name, getattr(config, name))
+            return
+        if isinstance(config, dict):
+            for name, value in config.items():
+                cls._validate_config_value_picklable(name, value)
+            return
+        if hasattr(config, "__dict__"):
+            for name, value in vars(config).items():
+                cls._validate_config_value_picklable(name, value)
+            return
+        cls._validate_config_value_picklable("configuration", config)
 
     def _set_config_value(self, field_name: str, value: Any) -> None:
         if is_dataclass(self.config) and not isinstance(self.config, type):

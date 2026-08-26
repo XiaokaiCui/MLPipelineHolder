@@ -456,6 +456,8 @@ pipeline.save_pipeline(verbose=True)   # show save advisory warnings
 
 Warnings unrelated to saving (registration, load, logger) are never suppressed.
 
+`load_pipeline(..., verbose=False)` behaves the same way: with `verbose=True` it logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored. A placeholder value raises `ResolutionError` when read via `get_value`, `get_constant_value`, or `get_config_value`, and when resolved as a function argument — so it never silently reaches user code.
+
 Saved pipelines preserve callable references rather than historical source code. Importable callables are restored from their import paths. Notebook-local functions and other runtime-only callables, including callable values supplied through `set_constant_value(...)`, `set_value(...)`, or upstream outputs, must be defined or imported under the same name before calling `load_pipeline(...)`. Missing runtime callables raise during loading instead of being passed to a stage as inert placeholders. A saved project copies pipeline data, not Python source, installed packages, or the runtime environment.
 
 Compatibility aliases `save_project()` and `load_project()` still exist.

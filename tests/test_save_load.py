@@ -9,7 +9,7 @@ import shutil
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import PersistenceError, PipelineHandler
+from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
 from src.mlpipelineholder.models import RuntimeCallableReference, RuntimeValueReference
 
 
@@ -517,7 +517,8 @@ class SaveLoadTests(unittest.TestCase):
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-            self.assertIsInstance(loaded.get_constant_value("callable_value"), RuntimeValueReference)
+            with self.assertRaises(ResolutionError):
+                loaded.get_constant_value("callable_value")
 
     def test_main_callable_value_restores_from_loading_runtime(self) -> None:
         namespace: dict[str, object] = {}
@@ -586,7 +587,8 @@ class SaveLoadTests(unittest.TestCase):
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-            self.assertIsInstance(loaded.get_constant_value("callable_value"), RuntimeValueReference)
+            with self.assertRaises(ResolutionError):
+                loaded.get_constant_value("callable_value")
 
     def test_save_pipeline_archives_timestamped_log_snapshot_in_history_logs(self) -> None:
         with TemporaryDirectory() as temp_dir:

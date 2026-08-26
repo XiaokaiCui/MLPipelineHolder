@@ -41,6 +41,18 @@ def bind_runtime_callable() -> object:
     return getattr(__main__, "recovery_runtime_callable")
 
 
+def recovery_produce() -> dict[str, int]:
+    return {"v": 1}
+
+
+def recovery_produce_a() -> dict[str, str]:
+    return {"from": "A"}
+
+
+def recovery_produce_b() -> dict[str, str]:
+    return {"from": "B"}
+
+
 class BackupRecoveryTests(unittest.TestCase):
     def test_recover_variable_restores_root_manual_value_and_returns_none(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -348,6 +360,93 @@ class BackupRecoveryTests(unittest.TestCase):
 
             with self.assertRaises(PersistenceError):
                 root.recover_variable_from_backup(name="blob")
+
+    def test_recover_declared_but_unproduced_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            child = PipelineHandler("child", {}, Path(temp_dir) / "child")
+            block = child.add_block("producer", 1)
+            block.register_function(recovery_produce, ["saved_blob"])
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+            self.assertNotIn("saved_blob", root.para_value_dict)
+
+            root.recover_variable_from_backup(name="saved_blob")
+
+            self.assertEqual(child.get_value("saved_blob"), {"v": 1})
+            self.assertEqual(root.get_value("saved_blob"), {"v": 1})
+
+    def test_recover_declared_with_pipeline_name_targets_scope(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            child_a = PipelineHandler("child_a", {}, Path(temp_dir) / "a")
+            child_b = PipelineHandler("child_b", {}, Path(temp_dir) / "b")
+            ba = child_a.add_block("ba", 1)
+            ba.register_function(recovery_produce_a, ["shared_value"])
+            bb = child_b.add_block("bb", 1)
+            bb.register_function(recovery_produce_b, ["shared_value"])
+            root.add_child_pipeline(child_a, 10.0)
+            root.add_child_pipeline(child_b, 20.0)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+
+            root.recover_variable_from_backup(
+                pipeline_name="child_b", name="shared_value"
+            )
+
+            self.assertEqual(child_b.get_value("shared_value"), {"from": "B"})
+
+    def test_recover_declared_default_injects_first_declaring_pipeline(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            child_a = PipelineHandler("child_a", {}, Path(temp_dir) / "a")
+            child_b = PipelineHandler("child_b", {}, Path(temp_dir) / "b")
+            ba = child_a.add_block("ba", 1)
+            ba.register_function(recovery_produce_a, ["shared_value"])
+            bb = child_b.add_block("bb", 1)
+            bb.register_function(recovery_produce_b, ["shared_value"])
+            root.add_child_pipeline(child_a, 10.0)
+            root.add_child_pipeline(child_b, 20.0)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+
+            root.recover_variable_from_backup(name="shared_value")
+
+            self.assertEqual(child_a.get_value("shared_value"), {"from": "A"})
+
+    def test_recover_declared_unknown_pipeline_name_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            child = PipelineHandler("child", {}, Path(temp_dir) / "child")
+            block = child.add_block("producer", 1)
+            block.register_function(recovery_produce, ["saved_blob"])
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+
+            with self.assertRaisesRegex(ResolutionError, "Unknown pipeline"):
+                root.recover_variable_from_backup(
+                    pipeline_name="nope", name="saved_blob"
+                )
+
+    def test_recover_unknown_value_still_raises(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            child = PipelineHandler("child", {}, Path(temp_dir) / "child")
+            block = child.add_block("producer", 1)
+            block.register_function(recovery_produce, ["saved_blob"])
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+
+            with self.assertRaisesRegex(ResolutionError, "Unknown pipeline value"):
+                root.recover_variable_from_backup(name="no_such_value")
 
     @staticmethod
     def _saved_root(

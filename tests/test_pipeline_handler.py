@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
 import pickle
@@ -235,6 +235,26 @@ def build_unserializable_object():
 
 def produce_json() -> dict[str, int]:
     return {"value": 1}
+
+
+def original_calc(x: int) -> int:
+    return x * 2
+
+
+def new_calc(x: int) -> int:
+    return x * 100
+
+
+def new_calc_v2(x: int) -> int:
+    return x * 1000
+
+
+def downstream(result: int) -> int:
+    return result + 1
+
+
+def use_constant_input(x: Any) -> Any:
+    return x
 
 
 def use_stock_project_root(stock_project_root: str) -> str:
@@ -494,7 +514,8 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertTrue(
                 any("reference placeholder" in str(item.message) for item in caught)
             )
-            self.assertIsInstance(loaded.get_value("weird_obj"), RuntimeValueReference)
+            with self.assertRaises(ResolutionError):
+                loaded.get_value("weird_obj")
 
     def test_save_pipeline_persists_live_torch_optimizer_as_artifact(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1222,6 +1243,48 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertRegex(chart, r"\x1b\[(3[1-6])m")
             self.assertRegex(chart, r"\x1b\[(37|97)m[├└│─ ]+")
+
+    def test_replace_block_cleans_stale_producer_outputs_after_load(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("override", {"x": 10}, tmp / "project")
+            block = pipeline.add_block("calc", 10.0)
+            block.register_function(original_calc, ["result"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result"), 20)
+            save_dir = tmp / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            self.assertEqual(loaded.get_value("result"), 20)
+
+            new_block = loaded.add_block("calc", 10.0, forced=True)
+            new_block.register_function(new_calc, ["result"], forced=True)
+
+            self.assertEqual(loaded.producer_outputs, {})
+            with self.assertRaises(ResolutionError):
+                loaded.get_value("result")
+
+    def test_replace_block_prevents_downstream_stale_consumption(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("override-down", {"x": 10}, tmp / "project")
+            calc = pipeline.add_block("calc", 10.0)
+            calc.register_function(original_calc, ["result"])
+            down = pipeline.add_block("down", 20.0)
+            down.register_function(downstream, ["final"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("final"), 21)
+            save_dir = tmp / "bundle"
+            pipeline.save_pipeline(save_dir)
+
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+
+            new_calc = loaded.add_block("calc", 10.0, forced=True)
+            new_calc.register_function(new_calc_v2, ["result"], forced=True)
+
+            with self.assertRaises(ResolutionError):
+                loaded.run_block("down")
 
     def test_overridden_disk_artifact_is_cleaned_when_later_value_is_in_memory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4084,6 +4147,147 @@ class StrictModeTests(unittest.TestCase):
             pipeline.run_all()
             with self.assertRaises(PersistenceError):
                 pipeline.update_value("blob", lambda x: x)
+
+    def test_placeholder_constant_warns_on_load_verbose(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("ph", {}, tmp / "project")
+            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(
+                tmp / "bundle", forced_deleting=True, verbose=True
+            )
+            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("was saved as a placeholder", log_text)
+
+    def test_placeholder_constant_silent_on_load_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("ph", {}, tmp / "project")
+            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(
+                tmp / "bundle", forced_deleting=True
+            )
+            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("was saved as a placeholder", log_text)
+
+    def test_placeholder_constant_raises_on_get(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("ph", {}, tmp / "project")
+            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            with self.assertRaises(ResolutionError):
+                loaded.get_constant_value("bad_const")
+
+    def test_placeholder_value_raises_when_resolved_as_function_input(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("ph", {}, tmp / "project")
+            block = pipeline.add_block("b", 1)
+            block.register_function(use_constant_input, ["out"], param_mapping={"x": "bad_const"})
+            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            with self.assertRaises(ResolutionError):
+                loaded.run_block("b")
+
+    def test_set_config_rejects_unpicklable_field(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("cfg", {}, Path(temp_dir))
+            with self.assertRaises(RegistrationError):
+                pipeline.set_config({"bad": build_unserializable_object()})
+
+    def test_update_config_rejects_unpicklable_field(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("cfg", {"good": 1}, Path(temp_dir))
+            with self.assertRaises(RegistrationError):
+                pipeline.update_config({"good": build_unserializable_object()})
+
+    def test_constructor_accepts_pure_dataclass_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            @dataclass
+            class PipelineUserconfig:
+                market_equity_quantile_lower_excluding: float = field(default=0.1)
+            pipeline = PipelineHandler(
+                "cfg", PipelineUserconfig(), Path(temp_dir)
+            )
+            self.assertIsInstance(pipeline.config, PipelineUserconfig)
+
+    def test_constructor_rejects_dataclass_config_with_method(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            @dataclass
+            class ImpureConfig:
+                value: int = 1
+
+                def helper(self) -> int:
+                    return self.value
+
+            with self.assertRaises(RegistrationError):
+                PipelineHandler("cfg", ImpureConfig(), Path(temp_dir))
+
+    def test_constructor_rejects_dataclass_config_with_property(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            @dataclass
+            class PropertyConfig:
+                value: int = 1
+
+                @property
+                def doubled(self) -> int:
+                    return self.value * 2
+
+            with self.assertRaises(RegistrationError):
+                PipelineHandler("cfg", PropertyConfig(), Path(temp_dir))
+
+    def test_constructor_accepts_dataclass_with_dunder_methods(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            @dataclass
+            class DunderConfig:
+                value: int = 1
+
+                def __post_init__(self) -> None:
+                    self.value = self.value or 1
+
+            pipeline = PipelineHandler("cfg", DunderConfig(), Path(temp_dir))
+            self.assertIsInstance(pipeline.config, DunderConfig)
+
+    def test_constructor_rejects_non_dict_non_dataclass_config(self) -> None:
+
+        with TemporaryDirectory() as temp_dir:
+            class ArbitraryConfig:
+                pass
+            with self.assertRaises(RegistrationError):
+                PipelineHandler("cfg", ArbitraryConfig(), Path(temp_dir))
+
+    def test_constructor_rejects_simple_namespace_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            from types import SimpleNamespace
+            with self.assertRaises(RegistrationError):
+                PipelineHandler(
+                    "cfg", SimpleNamespace(value=1), Path(temp_dir)
+                )
+
+    def test_constructor_rejects_unpicklable_config(self) -> None:
+
+        with TemporaryDirectory() as temp_dir:
+            with self.assertRaises(RegistrationError):
+                PipelineHandler(
+                    "cfg",
+                    {"bad": build_unserializable_object()},
+                    Path(temp_dir),
+                )
+
+    def test_set_constant_value_still_allows_unpicklable(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("const", {}, Path(temp_dir))
+            pipeline.set_constant_value("bad", build_unserializable_object())
+            self.assertIsNotNone(pipeline.get_constant_value("bad"))
 
     def test_set_constant_value_raises_on_visible_config_collision(self) -> None:
         with TemporaryDirectory() as temp_dir:

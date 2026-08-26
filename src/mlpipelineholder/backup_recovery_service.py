@@ -10,7 +10,9 @@ from .artifact_recovery import (
     _delete_unreferenced_artifact,
 )
 from .backup_recovery import (
+    OwnerKind,
     SlotKind,
+    _OwnedVariableState,
     _StateSlot,
     _VariableOwnershipInventory,
     confirm_recovery_impact,
@@ -35,19 +37,43 @@ class _SlotSnapshot:
     value: Any
 
 
-def recover_variable_from_backup(pipeline: PipelineHandler, name: str) -> None:
+def recover_variable_from_backup(
+    pipeline: PipelineHandler,
+    name: str,
+    *,
+    pipeline_name: str | None = None,
+) -> None:
     if pipeline.parent_pipeline is not None:
         root = pipeline._root_pipeline()
         raise RegistrationError(
             f"Variable recovery is only available from root pipeline '{root.full_path()}'; "
             f"call {root.registration_name}.recover_variable_from_backup(...)"
         )
-    inventory = discover_owned_variable_slots(pipeline, name)
+    scope = pipeline
+    if pipeline_name is not None:
+        scope = _find_pipeline_by_name(pipeline, pipeline_name)
+        if scope is None:
+            raise ResolutionError(f"Unknown pipeline: {pipeline_name}")
+    inventory = discover_owned_variable_slots(pipeline, name, scope_pipeline=scope)
+    declared_only = False
     if not inventory.owners:
-        raise ResolutionError(f"Unknown pipeline value: {name}")
+        if name not in scope.list_declared_outputs():
+            raise ResolutionError(f"Unknown pipeline value: {name}")
+        declaring = _deepest_declaring_pipeline(scope, name)
+        inventory = _declared_inventory(declaring, name)
+        declared_only = True
     snapshot = read_backup_snapshot(pipeline)
+    if declared_only or pipeline_name is not None:
+        target_path = (
+            declaring.full_path()
+            if declared_only
+            else scope.full_path()
+        )
+        payload = snapshot.payload_for_path(tuple(target_path.split("/")))
+    else:
+        payload = snapshot.state_payload
     resolved = resolve_saved_root_variable(
-        snapshot.state_payload,
+        payload,
         name,
         is_missing_main_placeholder=pipeline._contains_missing_main_placeholder,
     )
@@ -60,7 +86,10 @@ def recover_variable_from_backup(pipeline: PipelineHandler, name: str) -> None:
     snapshot.assert_unchanged()
     slot_snapshots = _snapshot_inventory(inventory)
     try:
-        _assign_inventory(inventory, prepared)
+        if any(owner.owner_kind is OwnerKind.DECLARED for owner in inventory.owners):
+            _inject_declared_owners(pipeline, inventory, prepared)
+        else:
+            _assign_inventory(inventory, prepared)
         transaction.commit()
     except (KeyboardInterrupt, SystemExit):
         _restore_slots(slot_snapshots)
@@ -153,6 +182,69 @@ def _snapshot_inventory(
         _SlotSnapshot(slot, slot.key in slot.mapping, slot.mapping.get(slot.key))
         for slot in _inventory_slots(inventory)
     )
+
+
+def _find_pipeline_by_name(
+    root: PipelineHandler,
+    registration_name: str,
+) -> PipelineHandler | None:
+    for candidate in root._iter_attached_pipelines():
+        if candidate.registration_name == registration_name:
+            return candidate
+    return None
+
+
+def _declared_inventory(
+    scope: PipelineHandler,
+    variable_name: str,
+) -> _VariableOwnershipInventory:
+    owner = _OwnedVariableState(
+        scope.full_path(),
+        OwnerKind.DECLARED,
+        (),
+    )
+    return _VariableOwnershipInventory(variable_name, (owner,), ())
+
+
+def _deepest_declaring_pipeline(
+    scope: PipelineHandler,
+    variable_name: str,
+) -> PipelineHandler:
+    current = scope
+    while True:
+        node = current._find_declaring_node(variable_name)
+        if node is None or not hasattr(node, "parent_pipeline"):
+            return current
+        current = node
+
+
+def _inject_declared_owners(
+    root: PipelineHandler,
+    inventory: _VariableOwnershipInventory,
+    value: Any,
+) -> None:
+    for owner in inventory.owners:
+        if owner.owner_kind is not OwnerKind.DECLARED:
+            continue
+        target = _find_pipeline_by_path(root, owner.pipeline_path)
+        if target is None:
+            continue
+        target._inject_produced_value(
+            inventory.variable_name,
+            value,
+            copy=False,
+            verbose=False,
+        )
+
+
+def _find_pipeline_by_path(
+    root: PipelineHandler,
+    pipeline_path: str,
+) -> PipelineHandler | None:
+    for candidate in root._iter_attached_pipelines():
+        if candidate.full_path() == pipeline_path:
+            return candidate
+    return None
 
 
 def _assign_inventory(

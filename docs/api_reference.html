@@ -382,16 +382,17 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
 <p>Loads a saved pipeline project. Reads lightweight metadata before loading full state. If <code>path</code> differs from the canonical working directory, the saved tree is restored to the canonical directory before loading.</p>
 <ul>
   <li><code>forced_deleting=False</code> asks for keyboard confirmation before deleting a non-empty canonical working directory.</li>
   <li><code>forced_deleting=True</code> deletes the canonical working directory directly.</li>
+  <li><code>verbose=True</code> logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored; silent by default.</li>
 </ul>
-<p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders.</p>
+<p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_project">load_project()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.load_pipeline"><code>load_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.recover_variable_from_backup">recover_variable_from_backup()</h4>
