@@ -4,6 +4,10 @@
 
 It helps you persist intermediate results, organise modelling workflows, run reproducible experiments, manage large DataFrames, and track pipeline structure without turning an exploratory project into a full MLOps system.
 
+Although this is currently a personal project that I originally developed for my own quantitative investing experiments, I’d be very happy to see it become useful to a wider group of people. Thank you for your interest in the project — any ideas, comments, suggestions, or feedback are very welcome!
+
+**v0.3.0 will be the first full release**, but **v0.2.14 and later versions are already very close to the planned full version**. If you are currently using an earlier release, I recommend upgrading to v0.2.14 or newer.
+
 ## Installation
 
 Install from [PyPI](https://pypi.org/project/mlpipelineholder/):
@@ -44,7 +48,7 @@ The core package requires Python 3.11 or later and includes `termcolor` and NumP
 ### Typical use cases
 
 - I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
-- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (see [strict mode](#82-strict-mode)).
+- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (use `strict_mode`).
 - I use the same notebook across different days and do not want to rerun expensive steps every time I reopen it.
 - I have limited RAM and need a convenient way to load and offload DataFrames while exploring the data.
 - I want to focus on analysis and modelling, with logging and pipeline visualisation handled more simply.
@@ -56,7 +60,7 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes.
 - Persist intermediate and final outputs to disk, then reload them quickly and easily after a kernel restart.
 - Run independent functions concurrently using threads within the same execution block, while keeping cross-block execution explicit and ordered by priority.
-- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed(more effective when used together with [save_to_disk](#4-outputs)).
+- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed(more effective when used together with `save_to_disk`).
 - Track logs, results, and pipeline state with minimal effort.
 - Improve the stability and reproducibility of modelling and analysis outputs while retaining full flexibility over the pipeline structure.
 

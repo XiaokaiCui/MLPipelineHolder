@@ -413,10 +413,6 @@ class PipelineHandler:
             and isinstance(existing, PipelineHandler)
             and self._atom_matches(existing, temp_pipeline)
         ):
-            self.logger.info(
-                f"Atom pipeline '{child_name}' is already registered with an identical "
-                "configuration; leaving it and its outputs unchanged"
-            )
             return None
         if forced and existing is not None:
             self._validate_atom_replacement(
@@ -5159,34 +5155,45 @@ class PipelineHandler:
                 muted,
             )
             gate_line = (
-                f"{self._line_style(f'{indent}├── ', muted)}{self._chart_color('[gate]', 'magenta', muted)} {self._chart_color(self.gate_block.registration.function_name, 'green', muted)}"
+                f"{indent}{self._line_style('├── ', muted)}{self._chart_color('[gate]', 'magenta', muted)} {self._chart_color(self.gate_block.registration.function_name, 'green', muted)}"
                 f"{self._chart_color('(', symbol_color, muted)}{gate_args}{self._chart_color(')', symbol_color, muted)}"
             )
             lines.append(gate_line)
         sorted_nodes = self._sorted_nodes()
+        node_muted_states = [
+            muted or (isinstance(node, PipelineHandler) and node._should_grey_in_chart())
+            for node in sorted_nodes
+        ]
         for index, node in enumerate(sorted_nodes):
             is_last = index == len(sorted_nodes) - 1
+            node_muted = node_muted_states[index]
             prefix = "└──" if is_last else "├──"
-            child_indent = indent + ("    " if is_last else "│   ")
+            # The spine segment owned by this level stays active while any
+            # later sibling at this level will still run, so the outermost
+            # vertical line never looks broken across a skipped subtree; it
+            # only greys when this node and every later sibling is skipped.
+            spine_muted = node_muted and all(node_muted_states[index + 1 :])
+            child_indent = indent + self._spine_style(
+                "    " if is_last else "│   ", spine_muted
+            )
             if isinstance(node, PipelineHandler):
-                child_muted = muted or node._should_grey_in_chart()
                 child_line = (
-                    f"{self._line_style(f'{indent}{prefix} ', child_muted)}{self._chart_color('child-pipeline', 'magenta', child_muted)} {self._chart_color(f'[{node.execution_priority}]', 'cyan', child_muted)} {self._chart_color(node.registration_name, 'blue', child_muted)}"
+                    f"{indent}{self._line_style(f'{prefix} ', node_muted)}{self._chart_color('child-pipeline', 'magenta', node_muted)} {self._chart_color(f'[{node.execution_priority}]', 'cyan', node_muted)} {self._chart_color(node.registration_name, 'blue', node_muted)}"
                 )
                 lines.append(child_line)
-                lines.extend(node._describe_lines(child_indent, as_child=True, muted=child_muted)[1:])
+                lines.extend(node._describe_lines(child_indent, as_child=True, muted=node_muted)[1:])
                 continue
             block_line = (
-                f"{self._line_style(f'{indent}{prefix} ', muted)}{self._chart_color(f'[{node.execution_priority}]', 'cyan', muted)} {self._chart_color(node.registration_name, 'blue', muted)}"
+                f"{indent}{self._line_style(f'{prefix} ', node_muted)}{self._chart_color(f'[{node.execution_priority}]', 'cyan', node_muted)} {self._chart_color(node.registration_name, 'blue', node_muted)}"
             )
             lines.append(block_line)
             for function_index, registration in enumerate(node.functions):
                 function_prefix = "└──" if function_index == len(node.functions) - 1 else "├──"
                 outputs = [
                     (
-                        self._chart_color(f"{output_name}*", "red", muted)
+                        self._chart_color(f"{output_name}*", "red", node_muted)
                         if output_name in registration.save_to_disk
-                        else self._chart_color(output_name, "green", muted)
+                        else self._chart_color(output_name, "green", node_muted)
                     )
                     for output_name in registration.output_names
                 ]
@@ -5199,13 +5206,13 @@ class PipelineHandler:
                         )
                     ),
                     arg_color,
-                    muted,
+                    node_muted,
                 )
                 function_line = (
-                    f"{self._line_style(f'{child_indent}{function_prefix} ', muted)}{self._chart_color(registration.function_name, 'green', muted)}"
-                    f"{self._chart_color('(', symbol_color, muted)}{args}{self._chart_color(')', symbol_color, muted)}"
+                    f"{child_indent}{self._line_style(f'{function_prefix} ', node_muted)}{self._chart_color(registration.function_name, 'green', node_muted)}"
+                    f"{self._chart_color('(', symbol_color, node_muted)}{args}{self._chart_color(')', symbol_color, node_muted)}"
                     + (
-                        f" {self._chart_color('->', symbol_color, muted)} {', '.join(outputs)}"
+                        f" {self._chart_color('->', symbol_color, node_muted)} {', '.join(outputs)}"
                         if outputs
                         else ""
                     )
@@ -5246,6 +5253,12 @@ class PipelineHandler:
         )
 
     def _line_style(self, text: str, muted: bool) -> str:
+        if not muted:
+            return text
+        return import_module("termcolor").colored(text, "light_grey", force_color=True)
+
+    def _spine_style(self, text: str, muted: bool) -> str:
+        """Color a spine segment (``│   `` or spaces) for the chart."""
         if not muted:
             return text
         return import_module("termcolor").colored(text, "light_grey", force_color=True)

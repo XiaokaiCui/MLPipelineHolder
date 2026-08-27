@@ -137,6 +137,10 @@ class ExecutionBlock:
                 and existing.warn_on_input_mutation == warn_on_input_mutation
             ):
                 return existing
+            self.parent.logger.warning(
+                f"Expression in block '{self.registration_name}' was overridden with a "
+                "different expression; invalidating its outputs and downstream dependents"
+            )
             self.parent._erase_overridden_node_outputs(
                 self.registration_name,
                 self.execution_priority,
