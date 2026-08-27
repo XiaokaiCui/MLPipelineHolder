@@ -75,9 +75,9 @@ class PickleWithoutDeepcopy:
         raise RuntimeError("no deepcopy")
 
 
-def make_runtime_callable() -> Callable[[], int]:
+def make_runtime_callable(value: int = 7) -> Callable[[], int]:
     def inner() -> int:
-        return 7
+        return value
 
     return inner
 
@@ -104,7 +104,11 @@ class ForcedReRegistrationTests(unittest.TestCase):
             block = pipeline.add_block("b", 1)
             block.register_expression("x = 1")
             warnings: list[str] = []
-            pipeline.logger.warning = warnings.append
+
+            def capture_warning(message: str) -> None:
+                warnings.append(message)
+
+            pipeline.logger.warning = capture_warning
 
             block.register_expression("x = 2", forced=True)
 
@@ -115,6 +119,385 @@ class ForcedReRegistrationTests(unittest.TestCase):
             block.register_expression("x = 2", forced=True)
 
             self.assertEqual(warnings, [])
+
+    def test_forbid_invalidate_objects_skips_erasure_and_allow_restores(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("p", {}, tmp / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("x"), 7)
+            self.assertEqual(pipeline.get_value("y"), 8)
+
+            pipeline.forbid_invalidate_objects()
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 8)
+            log_text = (tmp / "p" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("is now FORBIDDEN", log_text)
+
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("x"), 11)
+            self.assertEqual(pipeline.get_value("y"), 12)
+
+            pipeline.allow_invalidate_objects()
+            block.register_function(make_runtime_callable(13), ["x"], forced=True)
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertNotIn("y", pipeline.para_value_dict)
+            log_text = (tmp / "p" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("is now ALLOWED", log_text)
+
+    def test_forbidden_invalidation_expression_replacement_erases_own_keeps_downstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("p", {}, tmp / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_expression("x = 1")
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            block.register_expression("x = 2", forced=True)
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 2)
+            log_text = (tmp / "p" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("erasing the block's own outputs", log_text)
+
+            pipeline.allow_invalidate_objects()
+            block.register_expression("x = 3", forced=True)
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertNotIn("y", pipeline.para_value_dict)
+
+    def test_forbidden_invalidation_erases_removed_block_but_keeps_downstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce, ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            pipeline.remove_block("b")
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 2)
+            self.assertNotIn("b", pipeline.producer_outputs)
+
+    def test_forbidden_invalidation_erases_replaced_block_but_keeps_downstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce, ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            pipeline.add_block("b", 1, forced=True)
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 2)
+            self.assertNotIn("b", pipeline.producer_outputs)
+
+    def test_forbidden_invalidation_erases_replaced_pipeline_but_keeps_downstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            old_child = PipelineHandler("child", {}, tmp / "old_child")
+            old_child.add_block("b", 1).register_function(produce, ["x"])
+            root.add_child_pipeline(old_child, 1)
+            root.add_block("tail", 2).register_function(consume, ["y"])
+            root.run_all()
+            root.forbid_invalidate_objects()
+
+            new_child = PipelineHandler("child", {}, tmp / "new_child")
+            new_child.add_block("b", 1).register_function(produce_y, ["x"])
+            root.add_child_pipeline(new_child, 1, forced=True)
+
+            self.assertNotIn("x", root.para_value_dict)
+            self.assertEqual(root.get_value("y"), 2)
+            self.assertNotIn("child", root.producer_outputs)
+            self.assertEqual(old_child.para_value_dict, {})
+
+    def test_forbidden_invalidation_erases_replaced_atom_but_keeps_downstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+            pipeline.create_atom_child_pipeline(
+                "atom",
+                1,
+                produce,
+                output_variable_names=["x"],
+                save_to_disk_lst=["x"],
+            )
+            pipeline.add_block("tail", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            artifact = pipeline.para_value_dict["x"]
+            self.assertIsInstance(artifact, ArtifactRecord)
+            artifact_path = Path(artifact.file_path)
+            self.assertTrue(artifact_path.exists())
+            pipeline.forbid_invalidate_objects()
+
+            pipeline.create_atom_child_pipeline(
+                "atom", 1, produce_y, output_variable_names=["x"]
+            )
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 2)
+            self.assertNotIn("atom", pipeline.producer_outputs)
+            self.assertFalse(artifact_path.exists())
+
+    def test_forbidden_invalidation_erases_changed_block_when_function_removed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_function(produce, ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            block.remove_function("produce")
+
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("y"), 2)
+            self.assertNotIn("b", pipeline.producer_outputs)
+
+    def test_forbidden_invalidation_keeps_outputs_when_gate_is_replaced(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "p", {"gate_enabled": True}, Path(temp_dir) / "p"
+            )
+            pipeline.set_gate_block("gate_enabled")
+            pipeline.add_block("b", 1).register_function(produce, ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            pipeline.set_gate_block("gate_enabled", expected_value=False, forced=True)
+
+            self.assertEqual(pipeline.get_value("x"), 1)
+            self.assertEqual(pipeline.get_value("y"), 2)
+
+            pipeline.allow_invalidate_objects()
+            pipeline.set_gate_block("gate_enabled", expected_value=True, forced=True)
+            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertNotIn("y", pipeline.para_value_dict)
+
+    def test_forbidden_invalidation_keeps_outputs_when_gate_is_removed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "p", {"gate_enabled": True}, Path(temp_dir) / "p"
+            )
+            pipeline.set_gate_block("gate_enabled")
+            pipeline.add_block("b", 1).register_function(produce, ["x"])
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+
+            pipeline.reset_gate_block()
+
+            self.assertEqual(pipeline.get_value("x"), 1)
+            self.assertEqual(pipeline.get_value("y"), 2)
+
+    def test_invalidation_mode_is_not_persisted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "p"
+            pipeline = PipelineHandler("p", {}, root)
+            block = pipeline.add_block("b", 1)
+            block.register_expression("x = 1")
+            pipeline.add_block("c", 2).register_function(consume, ["y"])
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+            pipeline.save_pipeline()
+
+            loaded = PipelineHandler.load_pipeline(root)
+            loaded.get_block("b").register_expression("x = 2", forced=True)
+
+            self.assertNotIn("x", loaded.para_value_dict)
+            self.assertNotIn("y", loaded.para_value_dict)
+
+    def test_invalidate_toggle_warns_only_on_state_change_and_requires_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            child = PipelineHandler("child", {}, tmp / "child")
+            root.add_child_pipeline(child, 1)
+            with self.assertRaisesRegex(RegistrationError, "root pipeline"):
+                child.forbid_invalidate_objects()
+            with self.assertRaisesRegex(RegistrationError, "root pipeline"):
+                child.allow_invalidate_objects()
+
+            root.forbid_invalidate_objects()
+            root.forbid_invalidate_objects()
+            root.allow_invalidate_objects()
+            root.allow_invalidate_objects()
+
+            log_text = (tmp / "root" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(log_text.count("is now FORBIDDEN"), 1)
+            self.assertEqual(log_text.count("is now ALLOWED"), 1)
+
+    def test_forbid_invalidate_objects_applies_to_descendant_blocks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            child = PipelineHandler("child", {}, tmp / "child")
+            block = child.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            child.add_block("c", 2).register_function(consume, ["y"])
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            self.assertEqual(root.get_value("y"), 8)
+
+            root.forbid_invalidate_objects()
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+
+            self.assertNotIn("x", child.para_value_dict)
+            self.assertEqual(child.get_value("y"), 8)
+
+            root.allow_invalidate_objects()
+            block.register_function(make_runtime_callable(13), ["x"], forced=True)
+
+            self.assertNotIn("x", child.para_value_dict)
+            self.assertNotIn("y", child.para_value_dict)
+
+    def test_newly_added_pipelines_inherit_invalidation_state_and_sync(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            root.forbid_invalidate_objects()
+
+            child = PipelineHandler("child", {}, tmp / "child")
+            block = child.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            child.add_block("c", 2).register_function(consume, ["y"])
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            self.assertEqual(root.get_value("y"), 8)
+
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+
+            self.assertNotIn("x", child.para_value_dict)
+            self.assertEqual(child.get_value("y"), 8)
+
+            root.allow_invalidate_objects()
+            block.register_function(make_runtime_callable(13), ["x"], forced=True)
+
+            self.assertNotIn("x", child.para_value_dict)
+            self.assertNotIn("y", child.para_value_dict)
+
+    def test_pipelines_attached_to_descendants_inherit_invalidation_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            child = PipelineHandler("child", {}, tmp / "child")
+            root.add_child_pipeline(child, 1)
+            root.forbid_invalidate_objects()
+
+            grandchild = PipelineHandler("grandchild", {}, tmp / "grandchild")
+            block = grandchild.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            grandchild.add_block("c", 2).register_function(consume, ["y"])
+            child.add_child_pipeline(grandchild, 1)
+            root.run_all()
+            self.assertEqual(root.get_value("y"), 8)
+
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+
+            self.assertNotIn("x", grandchild.para_value_dict)
+            self.assertEqual(grandchild.get_value("y"), 8)
+
+    def test_attaching_previous_root_transfers_invalidation_state_to_new_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            previous_root = PipelineHandler("old_root", {}, tmp / "old_root")
+            block = previous_root.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            previous_root.add_block("c", 2).register_function(consume, ["y"])
+            previous_root.forbid_invalidate_objects()
+
+            new_root = PipelineHandler("new_root", {}, tmp / "new_root")
+            sibling = PipelineHandler("sibling", {}, tmp / "sibling")
+            sibling_block = sibling.add_block("sb", 1)
+            sibling_block.register_function(make_runtime_callable(), ["sx"])
+            sibling.add_block("sc", 2).register_function(
+                consume, ["sy"], param_mapping={"x": "sx"}
+            )
+            new_root.add_child_pipeline(sibling, 1)
+            new_root.add_child_pipeline(previous_root, 2)
+            new_root.run_all()
+            self.assertEqual(new_root.get_value("y"), 8)
+            self.assertEqual(new_root.get_value("sy"), 8)
+            transfer_log = (tmp / "new_root" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(transfer_log.count("transferred FORBIDDEN state"), 1)
+
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+            sibling_block.register_function(make_runtime_callable(11), ["sx"], forced=True)
+
+            self.assertNotIn("x", previous_root.para_value_dict)
+            self.assertEqual(previous_root.get_value("y"), 8)
+            self.assertNotIn("sx", sibling.para_value_dict)
+            self.assertEqual(sibling.get_value("sy"), 8)
+
+            new_root.allow_invalidate_objects()
+            block.register_function(make_runtime_callable(13), ["x"], forced=True)
+            sibling_block.register_function(make_runtime_callable(13), ["sx"], forced=True)
+
+            self.assertNotIn("x", previous_root.para_value_dict)
+            self.assertNotIn("y", previous_root.para_value_dict)
+            self.assertNotIn("sx", sibling.para_value_dict)
+            self.assertNotIn("sy", sibling.para_value_dict)
+
+    def test_attaching_forbidden_former_root_to_forbidden_tree_does_not_warn(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            new_root = PipelineHandler("new_root", {}, tmp / "new_root")
+            new_root.forbid_invalidate_objects()
+            old_root = PipelineHandler("old_root", {}, tmp / "old_root")
+            old_root.forbid_invalidate_objects()
+
+            new_root.add_child_pipeline(old_root, 1)
+
+            log_text = (tmp / "new_root" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(log_text.count("is now FORBIDDEN"), 1)
+            self.assertEqual(log_text.count("transferred FORBIDDEN state"), 0)
+
+    def test_attaching_allowed_former_root_does_not_change_forbidden_tree(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            new_root = PipelineHandler("new_root", {}, tmp / "new_root")
+            new_root.forbid_invalidate_objects()
+            old_root = PipelineHandler("old_root", {}, tmp / "old_root")
+            block = old_root.add_block("b", 1)
+            block.register_function(make_runtime_callable(), ["x"])
+            old_root.add_block("c", 2).register_function(consume, ["y"])
+            new_root.add_child_pipeline(old_root, 1)
+            new_root.run_all()
+            self.assertEqual(new_root.get_value("y"), 8)
+
+            block.register_function(make_runtime_callable(11), ["x"], forced=True)
+
+            self.assertNotIn("x", old_root.para_value_dict)
+            self.assertEqual(old_root.get_value("y"), 8)
+            log_text = (tmp / "new_root" / "metadata" / "pipeline.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(log_text.count("transferred FORBIDDEN state"), 0)
 
     def test_second_expression_in_block_is_rejected(self) -> None:
         with TemporaryDirectory() as temp_dir:

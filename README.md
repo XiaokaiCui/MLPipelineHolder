@@ -117,7 +117,7 @@ I will now provide my notebook/code.
 
 ## API reference
 
-The full public API is documented in a standalone, pandas/numpy-style reference page:
+The full public API is documented in a standalone reference page:
 
 - [docs/api_reference.html](https://mlpipelineholder.readthedocs.io/en/latest/api_reference.html) — complete documentation of every public class, function, decorator, exception, and data model in the package. It is a local, self-contained HTML file (no external dependencies) and can be opened directly in any browser.
   
