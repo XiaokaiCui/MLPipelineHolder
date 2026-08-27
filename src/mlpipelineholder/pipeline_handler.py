@@ -413,10 +413,6 @@ class PipelineHandler:
             and isinstance(existing, PipelineHandler)
             and self._atom_matches(existing, temp_pipeline)
         ):
-            self.logger.info(
-                f"Atom pipeline '{child_name}' is already registered with an identical "
-                "configuration; leaving it and its outputs unchanged"
-            )
             return None
         if forced and existing is not None:
             self._validate_atom_replacement(

@@ -98,6 +98,24 @@ def bind_runtime_wrapped() -> Callable[[int], int]:
 
 
 class ForcedReRegistrationTests(unittest.TestCase):
+    def test_forced_expression_override_warns_and_identical_reregistration_is_silent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+            block = pipeline.add_block("b", 1)
+            block.register_expression("x = 1")
+            warnings: list[str] = []
+            pipeline.logger.warning = warnings.append
+
+            block.register_expression("x = 2", forced=True)
+
+            self.assertTrue(
+                any("was overridden with a different expression" in w for w in warnings)
+            )
+            warnings.clear()
+            block.register_expression("x = 2", forced=True)
+
+            self.assertEqual(warnings, [])
+
     def test_second_expression_in_block_is_rejected(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
@@ -993,11 +1011,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
             pipeline.create_atom_child_pipeline(
                 "atom", 1, produce, output_variable_names=["x"]
             )
-            log_text = (tmp / "p" / "metadata" / "pipeline.log").read_text(
-                encoding="utf-8"
-            )
 
-            self.assertIn("identical configuration", log_text)
             self.assertEqual(pipeline.get_value("x"), 1)
             self.assertEqual(pipeline.get_value("y"), 2)
             self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
