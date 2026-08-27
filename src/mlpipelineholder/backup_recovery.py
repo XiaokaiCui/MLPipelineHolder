@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum, unique
 from pathlib import Path
@@ -20,7 +20,6 @@ class _LoggerProtocol(Protocol):
 
 class _PipelineProtocol(Protocol):
     registration_name: str
-    parent_pipeline: _PipelineProtocol | None
     project_root: Path
     pipeline_backup_root: Path | None
     config: Any
@@ -28,13 +27,18 @@ class _PipelineProtocol(Protocol):
     manual_values: dict[str, Any]
     artifact_registry: dict[str, ArtifactRecord]
     producer_outputs: dict[str, dict[str, Any]]
-    logger: _LoggerProtocol
+
+    @property
+    def parent_pipeline(self) -> _PipelineProtocol | None: ...
+
+    @property
+    def logger(self) -> _LoggerProtocol: ...
 
     def full_path(self) -> str: ...
 
     def _root_pipeline(self) -> _PipelineProtocol: ...
 
-    def _iter_attached_pipelines(self) -> list[_PipelineProtocol]: ...
+    def _iter_attached_pipelines(self) -> Sequence[_PipelineProtocol]: ...
 
     def _find_declaring_node(self, variable_name: str) -> Any: ...
 

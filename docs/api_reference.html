@@ -248,7 +248,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <table>
   <tr><th>Name</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>registration_name</code></td><td>str</td><td>Unique name of this pipeline.</td></tr>
-  <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dataclass instance or dict used as the pipeline configuration. Omitted values start with an empty config.</td></tr>
+  <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dict or pure dataclass instance (fields only) used as the pipeline configuration. Every field value must be picklable; use <code>set_constant_value</code> for non-picklable values. Omitted values start with an empty config.</td></tr>
   <tr><td><code>local_folder_path</code></td><td>str | Path | None</td><td>Optional working directory. When omitted, a temporary staging root is used; attaching to a parent relocates the pipeline under the parent tree.</td></tr>
   <tr><td><code>execution_priority</code></td><td>float | None</td><td>Optional priority used when this pipeline is a child node of a parent.</td></tr>
   <tr><td><code>forced</code></td><td>bool</td><td>If True, allows replacing an existing pipeline registered under the same name.</td></tr>
@@ -300,6 +300,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
+<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, or gates to it raises <code>RegistrationError</code>; only config and constant values remain mutable (so gates keep toggling through config).</p>
+<p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
+<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers), and the same effective values for the config fields the atom consumes (gate field, <code>param_mapping</code> values, <code>kwargs_dct</code> values, <code>args_lst</code> entries). Unused config fields and their counts are ignored. Any difference in the compared fields replaces the atom and erases its own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_function</code> and <code>register_expression</code>; unrelated downstream blocks are preserved.</p>
 
 <h4 class="method-name" id="PipelineHandler.run_all">run_all()</h4>
 <div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
@@ -384,7 +387,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
 <div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
-<p>Loads a saved pipeline project. Reads lightweight metadata before loading full state. If <code>path</code> differs from the canonical working directory, the saved tree is restored to the canonical directory before loading.</p>
+<p>Loads a saved pipeline project. The state payload, placeholders, and callable references are fully reconstructed in a temporary preflight first. Only after that succeeds may a non-canonical saved tree replace the canonical working directory; a preflight failure raises <code>PersistenceError</code> and leaves the existing working tree untouched.</p>
 <ul>
   <li><code>forced_deleting=False</code> asks for keyboard confirmation before deleting a non-empty canonical working directory.</li>
   <li><code>forced_deleting=True</code> deletes the canonical working directory directly.</li>
@@ -564,6 +567,8 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>param_mapping</code> exposes safer pipeline-facing parameter names without changing the callable.</li>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
+  <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
+  <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
 </ul>
 <div class="example">
   <div class="example-title">Example</div>
@@ -595,6 +600,8 @@ block.register_function(
 <ul>
   <li>Returns <code>None</code> when the registration is rejected (for example output name conflicts).</li>
   <li>Imports used by expressions are supplied through <code>define_expression_runtime()</code>.</li>
+  <li>A block holds <strong>at most one expression</strong>: a second assignment, a second logging expression, or a mixed pair raises <code>RegistrationError</code>; re-registering the existing expression with <code>forced=True</code> replaces it.</li>
+  <li>Forced replacement follows the same unified rule as <code>register_function</code> and <code>create_atom_child_pipeline</code>: an <strong>identical</strong> re-registration is a no-op that preserves all outputs; any real change erases the expression's own output, then invalidates from the earliest downstream block that consumes any affected output name (old outputs plus new outputs colliding with downstream inputs), warning about the consumers. Unrelated downstream blocks and consumers shielded by a later same-name producer are left untouched.</li>
 </ul>
 
 <h4 class="method-name" id="ExecutionBlock.register_args">register_args()</h4>
@@ -783,7 +790,7 @@ block.register_function(
 
 <h3 class="class-name" id="artifacrecord">ArtifactRecord</h3>
 <p class="class-desc">Metadata for one disk-backed pipeline value.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name, serializer, file_path, produced_by_block, produced_by_function, run_id, created_at=None)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name, serializer, file_path, produced_by_block, produced_by_function, run_id, created_at=None, torch_load_weights_only=False)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>variable_name</code></td><td>str</td><td>Pipeline-facing name of the value.</td></tr>
@@ -793,6 +800,7 @@ block.register_function(
   <tr><td><code>produced_by_function</code></td><td>str</td><td>Function that produced the value.</td></tr>
   <tr><td><code>run_id</code></td><td>str</td><td>Run that produced the value.</td></tr>
   <tr><td><code>created_at</code></td><td>str</td><td>UTC ISO timestamp of creation.</td></tr>
+  <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Whether this torch artifact must be loaded with <code>weights_only=True</code>.</td></tr>
 </table>
 <h4 class="method-name">path()</h4>
 <div class="sig"><span class="kw">path</span>() -&gt; <span class="ret">Path</span></div>
@@ -827,7 +835,7 @@ block.register_function(
 
 <h3 class="class-name" id="functionregistration">FunctionRegistration</h3>
 <p class="class-desc">Captured registration metadata used for execution, charting, and persistence.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionRegistration(function_name, import_path, callable_obj, input_names, output_names, save_to_disk, param_mapping=None, var_pos_name=None, var_kw_name=None)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionRegistration(function_name, import_path, callable_obj, input_names, output_names, save_to_disk, param_mapping=None, var_pos_name=None, var_kw_name=None, args_registration_state=None, kwargs_registration_state=None)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>function_name</code></td><td>str</td><td>Registered name of the function.</td></tr>
@@ -839,6 +847,8 @@ block.register_function(
   <tr><td><code>param_mapping</code></td><td>dict[str, str | None]</td><td>Renamed-parameter mapping.</td></tr>
   <tr><td><code>var_pos_name</code></td><td>str | None</td><td>Pipeline-facing name for variadic positional args.</td></tr>
   <tr><td><code>var_kw_name</code></td><td>str | None</td><td>Pipeline-facing name for variadic keyword args.</td></tr>
+  <tr><td><code>args_registration_state</code></td><td>list[str] | None</td><td>Snapshot of the bound block args helper used for structural re-registration equality.</td></tr>
+  <tr><td><code>kwargs_registration_state</code></td><td>dict[str, str] | None</td><td>Snapshot of the bound block kwargs helper used for structural re-registration equality.</td></tr>
 </table>
 
 <h3 class="class-name" id="expressionregistration">ExpressionRegistration</h3>

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
 from .function_registry import callable_signature, infer_declared_output_count, inspect_input_names, rename_args, resolve_callable
+from .function_registry import callable_identity_matches
 from .function_registry import inspect_exposed_input_names
 from .models import (
     BlockArgsRegistration,
@@ -51,6 +52,11 @@ class ExecutionBlock:
         forced: bool = False,
         warn_on_input_mutation: bool = False,
     ) -> Any:
+        if self.parent._is_atom:
+            raise RegistrationError(
+                f"Atom pipeline '{self.parent.registration_name}' is immutable "
+                "and cannot accept new expressions"
+            )
         return self._register_expression_strict(
             code,
             output_variable_name=output_variable_name,
@@ -98,11 +104,46 @@ class ExecutionBlock:
             ),
             None,
         )
+        other_expressions = [
+            registration
+            for registration in self.functions
+            if isinstance(registration, ExpressionRegistration)
+            and registration is not existing
+        ]
+        if other_expressions:
+            if not forced:
+                raise RegistrationError(
+                    f"Block '{self.registration_name}' already contains an expression; "
+                    "at most one expression may be registered per block"
+                )
+            if len(other_expressions) > 1:
+                raise RegistrationError(
+                    f"Block '{self.registration_name}' contains multiple expressions; "
+                    "cannot determine which one to override"
+                )
+            existing = other_expressions[0]
         if existing is not None and not forced:
             raise RegistrationError(
                 f"Expression '{identity}' is already registered in block '{self.registration_name}'"
             )
         if existing is not None and forced:
+            new_save_to_disk = (
+                {final_output} if save_to_disk and final_output is not None else set()
+            )
+            if (
+                existing.code == code
+                and existing.output_names == output_names
+                and existing.save_to_disk == new_save_to_disk
+                and existing.warn_on_input_mutation == warn_on_input_mutation
+            ):
+                return existing
+            self.parent._erase_overridden_node_outputs(
+                self.registration_name,
+                self.execution_priority,
+                self.execution_priority,
+                existing.output_names,
+                output_names,
+            )
             self.functions.remove(existing)
         registration = ExpressionRegistration(
             code=code,
@@ -206,6 +247,11 @@ class ExecutionBlock:
     def register_args(
         self, name: str, ordered_items: tuple[str, ...] | list[str], forced: bool = False
     ) -> BlockArgsRegistration | None:
+        if self.parent._is_atom:
+            raise RegistrationError(
+                f"Atom pipeline '{self.parent.registration_name}' is immutable "
+                "and cannot accept new args helpers"
+            )
         try:
             if name in self.registered_args and not forced:
                 raise RegistrationError(
@@ -223,6 +269,11 @@ class ExecutionBlock:
     def register_kwargs(
         self, name: str, mapping_dct: dict[str, str], forced: bool = False
     ) -> BlockKwargsRegistration | None:
+        if self.parent._is_atom:
+            raise RegistrationError(
+                f"Atom pipeline '{self.parent.registration_name}' is immutable "
+                "and cannot accept new kwargs helpers"
+            )
         try:
             if name in self.registered_kwargs and not forced:
                 raise RegistrationError(
@@ -247,12 +298,18 @@ class ExecutionBlock:
         var_kw_name: str | None = None,
         forced: bool = False,
     ) -> Any:
-        _, _, function_name = resolve_callable(function_or_path)
+        if self.parent._is_atom:
+            raise RegistrationError(
+                f"Atom pipeline '{self.parent.registration_name}' is immutable "
+                "and cannot accept new functions"
+            )
+        callable_obj, import_path, function_name = resolve_callable(function_or_path)
         existing_registration = next(
             (
                 registration
                 for registration in self.functions
-                if registration.function_name == function_name
+                if isinstance(registration, FunctionRegistration)
+                and registration.function_name == function_name
             ),
             None,
         )
@@ -261,7 +318,17 @@ class ExecutionBlock:
                 f"Function '{function_name}' is already registered in block '{self.registration_name}'"
             )
         if existing_registration is not None and forced:
-            self.remove_function(function_name)
+            if self._function_registration_matches(
+                existing_registration,
+                callable_obj,
+                import_path,
+                output_variable_names,
+                save_to_disk,
+                param_mapping,
+                var_pos_name,
+                var_kw_name,
+            ):
+                return existing_registration
         try:
             registration = self._register_function_strict(
                 function_or_path,
@@ -271,6 +338,8 @@ class ExecutionBlock:
                 var_pos_name=var_pos_name,
                 var_kw_name=var_kw_name,
                 forced=forced,
+                replacing=existing_registration,
+                commit=existing_registration is None,
             )
         except RegistrationError as exc:
             if self.parent.strict_mode:
@@ -279,7 +348,80 @@ class ExecutionBlock:
                 f"Skipped function registration in block '{self.registration_name}': {exc}"
             )
             return None
+        if existing_registration is not None:
+            self.parent._erase_overridden_node_outputs(
+                self.registration_name,
+                self.execution_priority,
+                self.execution_priority,
+                list(existing_registration.output_names),
+                list(registration.output_names),
+            )
+            index = self.functions.index(existing_registration)
+            self.functions[index] = registration
+            self.parent._register_node(self)
         return registration
+
+    def _function_registration_matches(
+        self,
+        existing: FunctionRegistration,
+        callable_obj: Any,
+        import_path: str | None,
+        output_variable_names: str | list[str] | tuple[str, ...] | None,
+        save_to_disk: list[str] | tuple[str, ...] | set[str] | None,
+        param_mapping: dict[str, str | None] | None,
+        var_pos_name: str | None,
+        var_kw_name: str | None,
+    ) -> bool:
+        if not callable_identity_matches(
+            existing.import_path,
+            existing.callable_obj,
+            import_path,
+            callable_obj,
+        ):
+            return False
+        if output_variable_names is None:
+            new_output_names: list[str] = []
+        elif isinstance(output_variable_names, str):
+            new_output_names = [output_variable_names]
+        else:
+            new_output_names = list(output_variable_names)
+        args_state, kwargs_state = self._variadic_registration_state(
+            var_pos_name,
+            var_kw_name,
+        )
+        return (
+            existing.output_names == new_output_names
+            and existing.save_to_disk == set(save_to_disk or [])
+            and existing.param_mapping == dict(param_mapping or {})
+            and existing.var_pos_name == var_pos_name
+            and existing.var_kw_name == var_kw_name
+            and existing.args_registration_state == args_state
+            and existing.kwargs_registration_state == kwargs_state
+        )
+
+    def _variadic_registration_state(
+        self,
+        var_pos_name: str | None,
+        var_kw_name: str | None,
+    ) -> tuple[list[str] | None, dict[str, str] | None]:
+        args_registration = (
+            None
+            if var_pos_name is None
+            else self.registered_args.get(var_pos_name)
+        )
+        kwargs_registration = (
+            None
+            if var_kw_name is None
+            else self.registered_kwargs.get(var_kw_name)
+        )
+        return (
+            None
+            if args_registration is None
+            else list(args_registration.ordered_items),
+            None
+            if kwargs_registration is None
+            else dict(kwargs_registration.mapping_dct),
+        )
 
     def _register_function_strict(
         self,
@@ -290,6 +432,8 @@ class ExecutionBlock:
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
         forced: bool = False,
+        replacing: FunctionRegistration | None = None,
+        commit: bool = True,
     ) -> FunctionRegistration:
         del forced
         if output_variable_names is None:
@@ -304,6 +448,7 @@ class ExecutionBlock:
         existing_local_outputs = {
             output_name
             for registration in self.functions
+            if registration is not replacing
             for output_name in registration.output_names
         }
         overlap = existing_local_outputs.intersection(output_names)
@@ -326,6 +471,10 @@ class ExecutionBlock:
             param_mapping=param_mapping,
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
+        )
+        args_state, kwargs_state = self._variadic_registration_state(
+            var_pos_name,
+            var_kw_name,
         )
         if not output_names and declared_output_count is not None and declared_output_count > 0:
             if not getattr(self.parent, "suppress_registration_advisories", False):
@@ -350,12 +499,15 @@ class ExecutionBlock:
             param_mapping=dict(param_mapping or {}),
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
+            args_registration_state=args_state,
+            kwargs_registration_state=kwargs_state,
         )
         self._strict_validate_registration(registration)
         self._warn_on_unmapped_resolvable_inputs(callable_obj, registration)
         self._warn_on_disk_backed_input_persistence_pitfall(registration)
-        self.functions.append(registration)
-        self.parent._register_node(self)
+        if commit:
+            self.functions.append(registration)
+            self.parent._register_node(self)
         return registration
 
     def _warn_on_unmapped_resolvable_inputs(
@@ -529,6 +681,11 @@ class ExecutionBlock:
         self.parent.logger.warning(message)
 
     def remove_function(self, function_name: str) -> None:
+        if self.parent._is_atom:
+            raise RegistrationError(
+                f"Atom pipeline '{self.parent.registration_name}' is immutable "
+                "and cannot remove functions"
+            )
         matches = [
             registration
             for registration in self.functions

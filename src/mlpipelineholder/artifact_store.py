@@ -5,6 +5,7 @@ import shutil
 from typing import Any
 from uuid import uuid4
 
+from .exceptions import PersistenceError
 from .models import ArtifactRecord
 from .serializers import choose_serializer, dump_value, extension_for, load_value
 
@@ -55,9 +56,15 @@ class ArtifactStore:
         )
 
     def delete(self, artifact: ArtifactRecord) -> None:
-        path = Path(artifact.file_path)
-        if path.exists():
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+        path = Path(artifact.file_path).resolve()
+        if not path.exists():
+            return
+        artifact_root = self.artifact_root.resolve()
+        if artifact_root not in path.parents:
+            raise PersistenceError(
+                f"Refusing to delete artifact outside artifact root: {path}"
+            )
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()

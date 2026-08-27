@@ -36,6 +36,8 @@ class FunctionRegistration:
     param_mapping: dict[str, str | None] = field(default_factory=dict)
     var_pos_name: str | None = None
     var_kw_name: str | None = None
+    args_registration_state: list[str] | None = None
+    kwargs_registration_state: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
