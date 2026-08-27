@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 from collections.abc import Sequence
+from dataclasses import fields, is_dataclass
 from functools import partial, wraps
 from typing import Any, get_type_hints
 
@@ -59,6 +60,91 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
     return function_or_path, import_path, function_name
 
 
+def callable_identity_matches(
+    existing_import_path: str | None,
+    existing_callable: Any,
+    import_path: str | None,
+    callable_obj: Any,
+) -> bool:
+    """Whether a stored registration and a new callable refer to the same function.
+
+    ``functools.partial`` objects are compared structurally: the wrapped callable
+    is matched recursively (import path, or identity for runtime callables) and
+    the bound ``args``/``keywords`` must be equal — so rebuilding an identical
+    partial inline still no-ops, while a changed binding or a redefined wrapped
+    function correctly replaces. Importable module functions are matched by
+    import path (both the loaded registration and a freshly resolved callable
+    point at the same module attribute). ``__main__`` and runtime-only callables
+    have no stable path, so they are matched by object identity — a redefined
+    notebook function is therefore correctly treated as different.
+    """
+    if isinstance(existing_callable, partial) and isinstance(callable_obj, partial):
+        return _partial_identity_matches(existing_callable, callable_obj)
+    if existing_import_path is not None and import_path is not None:
+        if (
+            existing_import_path.startswith("__main__")
+            or import_path.startswith("__main__")
+        ):
+            return existing_callable is callable_obj
+        return existing_import_path == import_path
+    return existing_callable is callable_obj
+
+
+def _partial_identity_matches(
+    existing: partial[Any],
+    new: partial[Any],
+) -> bool:
+    existing_func, existing_path, _ = resolve_callable(existing.func)
+    new_func, new_path, _ = resolve_callable(new.func)
+    if not callable_identity_matches(
+        existing_path,
+        existing_func,
+        new_path,
+        new_func,
+    ):
+        return False
+    return _values_equal(existing.args, new.args) and _values_equal(
+        existing.keywords,
+        new.keywords,
+    )
+
+
+def _values_equal(left: Any, right: Any) -> bool:
+    """Deep equality for config-like values, robust to numpy/pandas objects."""
+    if type(left) is not type(right):
+        return False
+    if is_dataclass(left) and not isinstance(left, type):
+        return all(
+            _values_equal(getattr(left, field.name), getattr(right, field.name))
+            for field in fields(left)
+        )
+    if isinstance(left, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_values_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(
+            _values_equal(a, b) for a, b in zip(left, right)
+        )
+    try:
+        import numpy as np
+
+        if isinstance(left, np.ndarray):
+            return left.shape == right.shape and bool((left == right).all())
+    except Exception:
+        pass
+    equals = getattr(left, "equals", None)
+    if callable(equals):
+        try:
+            return bool(equals(right))
+        except Exception:
+            return False
+    try:
+        return bool(left == right)
+    except Exception:
+        return False
+
+
 def inspect_input_names(callable_obj: Any) -> list[str]:
     signature = callable_signature(callable_obj)
     input_names: list[str] = []
@@ -91,7 +177,7 @@ def infer_declared_output_count(callable_obj: Any) -> int | None:
 
 def inspect_exposed_input_names(
     callable_obj: Any,
-    param_mapping: dict[str, str] | None = None,
+    param_mapping: dict[str, str | None] | None = None,
     var_pos_name: str | None = None,
     var_kw_name: str | None = None,
 ) -> list[str]:
@@ -106,6 +192,8 @@ def inspect_exposed_input_names(
             exposed_name = var_kw_name or parameter.name
         else:
             exposed_name = param_mapping.get(parameter.name, parameter.name)
+        if exposed_name is None:
+            continue
         if exposed_name in seen:
             continue
         seen.add(exposed_name)

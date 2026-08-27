@@ -36,6 +36,8 @@ class FunctionRegistration:
     param_mapping: dict[str, str | None] = field(default_factory=dict)
     var_pos_name: str | None = None
     var_kw_name: str | None = None
+    args_registration_state: list[str] | None = None
+    kwargs_registration_state: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -98,6 +100,21 @@ class RuntimeValueReference:
     type_name: str
     repr_text: str
     reason: str
+
+
+@dataclass(slots=True)
+class DataclassValueReference:
+    """Structured reference to a pure dataclass that could not be pickled.
+
+    Holds the dataclass name plus per-field structured data so the value can be
+    reconstructed at load time: a real dataclass instance when the class is
+    importable, a ``SimpleNamespace`` fallback otherwise.
+    """
+
+    class_name: str
+    data: dict[str, Any]
+    reason: str
+    module: str | None = None
 
 
 @dataclass(slots=True)

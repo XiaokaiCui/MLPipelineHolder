@@ -6,13 +6,9 @@ This file is a compact conversion playbook for the agent.
 
 ## Operational Preflight
 
-Before writing any pipeline code, read these files in the repository:
-1. `README.md`
-2. `src/mlpipelineholder/pipeline_handler.py`
-3. `src/mlpipelineholder/execution_block.py`
-4. `tests/test_pipeline_handler.py`
-5. `tests/test_execution_block.py`
-6. `tests/test_save_load.py`
+Before writing pipeline code, read `README.md`, the relevant implementation in
+`pipeline_handler.py` and `execution_block.py`, and the tests for the APIs you will use
+(especially execution, save/load, and recovery tests).
 
 Verify that you understand:
 - `PipelineHandler` owns config, values, child pipelines, save/load, and logging.
@@ -31,16 +27,9 @@ every converted pipeline:
 pipeline = PipelineHandler(..., strict_mode=True)
 ```
 
-Strict mode enforces fail-fast registration validation that catches mistakes early
-instead of surfacing them as confusing run-time failures:
-
-- `kwargs_dct` used without a `**kwargs` parameter in the target function raises at registration.
-- A `kwargs_dct` key that conflicts with an explicit function argument raises at registration.
-- A `gate_config` name not found in config, visible output values, or visible manual values raises at registration.
-- A `param_mapping` value not found in config, visible output values, or visible manual values raises at registration.
-- A `kwargs_dct` value not found in config, visible output values, or visible manual values raises at registration.
-- A `param_mapping` key that is not a function parameter raises at registration.
-- Attaching a child whose config/manual values/outputs cross-collide with the parent's objects raises, as does attaching a child whose registrations violate any of the checks above.
+Strict mode fails registration when mappings do not match the callable signature, mapped
+inputs or gates are not currently visible, kwargs helpers conflict with explicit
+parameters, or an attached child cross-collides with parent config, values, or outputs.
 
 Consequences to account for when converting with strict mode:
 - Input names must be resolvable at registration time: use config fields, manual values (`set_constant_value`), or already-visible output values. Do not rely on forward references to outputs that will only be produced later.
@@ -99,34 +88,56 @@ Classify each notebook step into one of these categories:
 **Direct Function Rules**
 Inspect the real signatures of functions. Apply actual keyword parameter names in `param_mapping`. Do not guess. Mapping to a literal `None` is supported. Use wrappers only for hidden globals or unrepresentable setup.
 
+Pipeline configuration must be a dict or a pure fields-only dataclass, and every config
+field must be picklable. Put non-picklable inputs in pipeline constants instead.
+
+**Atom Child Rules**
+`create_atom_child_pipeline` creates an immutable child: structural mutation (blocks,
+children, functions, expressions, args/kwargs helpers, gates, or removals) raises
+`RegistrationError`; config, constants, execution, and persistence remain available.
+
+Forced re-registration of an atom, function, or expression is a no-op when its definition
+is unchanged. Atom equality covers priority, gate, inner registrations/helpers, and only
+the effective config fields the atom consumes; unused config is ignored. Function equality
+covers callable identity, outputs, disk settings, mappings, variadic helper state, and
+`functools.partial` bindings. A real change erases the overridden node's outputs and
+invalidates from the earliest downstream consumer of any old or new output. A later
+same-name producer shields consumers after it; descendant and ancestor mirrors are kept in
+sync.
+
 If a user-defined function declares a parameter named `logger`, the pipeline injects its own logger automatically when executing that function. Do not pass the logger through `param_mapping`, do not wrap the function to supply it, and do not register it as an input. Just leave the `logger` parameter in the signature and let the pipeline fill it.
 
 **Expression Rules**
-Expressions must represent exactly one statement. Multiline formatting is allowed.
-Restrictions:
-- No semicolons, imports, `eval`, `exec`, or `__import__`.
-- No comprehensions or generator expressions.
-- No walrus operator.
-- No nested function, class, or lambda definitions.
-- No multiple assignment targets or unpacking.
-- Statement form must be an assignment (`NAME = EXPR`) or a print/logger call.
-
-If a step uses a comprehension, you cannot register it via `register_expression`. Preserve it using a normal importable function stage, or ask for approval to use an equivalent supported expression.
+Expressions must contain exactly one assignment (`NAME = EXPR`) or one print/logger call.
+A block may hold at most one expression. Semicolons, imports, `eval`, `exec`,
+`__import__`, comprehensions, generators, walrus expressions, definitions, lambdas,
+unpacking, and multiple targets are unsupported. Use an importable function stage when a
+step needs any of them.
 
 **Persistence Preflight**
-Registered stages with an import path are restored from that path. Registered stages without one are saved by callable name, and the loading notebook or script must import or define that callable under the same name in `__main__` before calling `load_pipeline(...)`.
+Importable stages restore from their import path. Runtime-only stages require an equivalent
+callable under the saved name in `__main__` before loading. Partials are saved as their
+wrapped callable plus bound arguments; the callable must follow the same rule and every
+bound value must be serializable or saving raises `PersistenceError`. Saved projects contain data and callable references, not
+source code or an environment snapshot. Do not claim that nested functions, lambdas,
+closures, or arbitrary callable instances are portable.
 
-`target_function=functools.partial` supports save/load when `partial` is imported into the loading runtime first. Notebook-local functions and runtime-only callable values stored through `set_constant_value(...)`, `set_value(...)`, or produced upstream require an equivalent callable bound under the saved name before loading. Nested functions, lambdas, closures, and bound callables that have no reliable runtime name remain non-portable placeholders. These references are runtime dependencies, not historical code snapshots. Do not make unsupported claims about portability.
+When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading fully preflights the saved payload and callable references before restoring that backup into the canonical working directory, so preflight failure leaves the existing tree untouched. This copies project data, not Python source, installed packages, or the runtime environment.
 
-When the user requests a restart-safe backup, `save_pipeline(backup_path)` copies the current project tree, including nested disk-backed artifacts, into a non-overlapping target. Loading restores that backup into the canonical working directory. This copies project data, not Python source, installed packages, or the runtime environment.
+By default, `load_pipeline(...)` re-runs the producer of each placeholder output without
+invalidating downstream values and records the recovery in run history. Unrecoverable
+placeholders raise on use. Importable dataclasses are reconstructed; otherwise a
+`SimpleNamespace` is used. Mention this only when the workflow relies on non-picklable
+outputs or dataclass configs.
 
 **Single-Item Backup Recovery**
 
-Use `root_pipeline.recover_variable_from_backup(name=...)` only when the root has a configured backup directory and a complete in-place save. The name must exist in both current and saved state. If independently owned same-name values exist across the attached tree, the method lists all affected pipeline paths and requires `yes` or `y`; refusal is a no-op. The method updates in place, returns `None`, clones disk-backed data into the live project, and does not rerun or invalidate derived outputs.
-
-Use `selected_pipeline.recover_config_from_backup(name=...)` only for a field locally owned by that selected pipeline in both current and saved state. Existing config inheritance applies to descendants, while descendant local overrides remain unchanged. The method returns `None` and swaps in a staged config copy after validation.
-
-Before either recovery call, import or define runtime-only callables under their saved names. This includes functions supplied to `functools.partial`. Never claim that recovery can reconstruct `RuntimeValueReference` or missing-class placeholders: unresolved selected objects raise `PersistenceError` and leave live state untouched. Recovery requires current-format `pipeline_state.pkl`, `config.pkl`, and `pipeline_meta.pkl`; it reads the backup without restoring the whole project tree.
+Use root `recover_variable_from_backup(...)` for values and the locally owning pipeline's
+`recover_config_from_backup(...)` for config. Recovery needs a complete current-format
+backup, preserves unrelated state, and does not rerun or invalidate derived outputs.
+Disambiguate duplicate value owners with `pipeline_name`; multi-owner recovery requires
+confirmation. Runtime callables must already be available, and unresolved placeholders
+raise `PersistenceError` without changing live state.
 
 ## Final Checks and Output Contract
 

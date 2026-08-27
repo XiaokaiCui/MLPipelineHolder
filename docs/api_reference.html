@@ -139,7 +139,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.2.13) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.2.14) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -212,6 +212,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#blockkwargsregistration">BlockKwargsRegistration</a></li>
     <li><a class="anchor" href="#functionexecutionresult">FunctionExecutionResult</a></li>
     <li><a class="anchor" href="#runtimevaluereference">RuntimeValueReference</a></li>
+    <li><a class="anchor" href="#dataclassvaluereference">DataclassValueReference</a></li>
     <li><a class="anchor" href="#callablevaluereference">CallableValueReference</a></li>
     <li><a class="anchor" href="#runtimecallablereference">RuntimeCallableReference</a></li>
   </ul>
@@ -247,7 +248,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <table>
   <tr><th>Name</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>registration_name</code></td><td>str</td><td>Unique name of this pipeline.</td></tr>
-  <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dataclass instance or dict used as the pipeline configuration. Omitted values start with an empty config.</td></tr>
+  <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dict or pure dataclass instance (fields only) used as the pipeline configuration. Every field value must be picklable; use <code>set_constant_value</code> for non-picklable values. Omitted values start with an empty config.</td></tr>
   <tr><td><code>local_folder_path</code></td><td>str | Path | None</td><td>Optional working directory. When omitted, a temporary staging root is used; attaching to a parent relocates the pipeline under the parent tree.</td></tr>
   <tr><td><code>execution_priority</code></td><td>float | None</td><td>Optional priority used when this pipeline is a child node of a parent.</td></tr>
   <tr><td><code>forced</code></td><td>bool</td><td>If True, allows replacing an existing pipeline registered under the same name.</td></tr>
@@ -299,6 +300,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
+<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, or gates to it raises <code>RegistrationError</code>; only config and constant values remain mutable (so gates keep toggling through config).</p>
+<p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
+<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers), and the same effective values for the config fields the atom consumes (gate field, <code>param_mapping</code> values, <code>kwargs_dct</code> values, <code>args_lst</code> entries). Unused config fields and their counts are ignored. Any difference in the compared fields replaces the atom and erases its own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_function</code> and <code>register_expression</code>; unrelated downstream blocks are preserved.</p>
 
 <h4 class="method-name" id="PipelineHandler.run_all">run_all()</h4>
 <div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
@@ -382,22 +386,27 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
-<p>Loads a saved pipeline project. Reads lightweight metadata before loading full state. If <code>path</code> differs from the canonical working directory, the saved tree is restored to the canonical directory before loading.</p>
+<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
+<p>Loads a saved pipeline project. The state payload, placeholders, and callable references are fully reconstructed in a temporary preflight first. Only after that succeeds may a non-canonical saved tree replace the canonical working directory; a preflight failure raises <code>PersistenceError</code> and leaves the existing working tree untouched.</p>
 <ul>
   <li><code>forced_deleting=False</code> asks for keyboard confirmation before deleting a non-empty canonical working directory.</li>
   <li><code>forced_deleting=True</code> deletes the canonical working directory directly.</li>
+  <li><code>verbose=True</code> logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored; silent by default.</li>
+  <li><code>auto_resolve_placeholders=True</code> (the default) re-runs producing blocks to recover produced values that were saved as placeholders. Exactly one block is executed per placeholder recovery, in upstream-to-downstream order, and fresh values are injected without invalidating downstream outputs. Each recovery appends a <code>RunRecord</code> labelled <code>auto_resolve_placeholder:&lt;block&gt;</code>. With <code>verbose=True</code>, outputs that stay unrecoverable log the reason (unresolvable input, placeholder constant input, input only produced by a gate-off block, or no registered producing block); a block that raises during re-execution always logs an unrecoverable warning. Gate-off pipelines are skipped silently. Pass <code>False</code> to keep legacy placeholder behaviour: saved placeholders raise <code>ResolutionError</code> when read.</li>
+  <li>Pure-dataclass values (config objects, constants, and produced values) that could not be pickled are saved as structured references and reconstructed at load regardless of <code>auto_resolve_placeholders</code>: a real dataclass instance when the class is importable and reconstructible from the saved fields, including dataclasses with non-init fields; a <code>SimpleNamespace</code> fallback is used otherwise (verbose-gated warning).</li>
 </ul>
-<p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders.</p>
+<p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
 <h4 class="method-name" id="PipelineHandler.load_project">load_project()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
 <p>Compatibility alias for <a class="anchor" href="#PipelineHandler.load_pipeline"><code>load_pipeline()</code></a>.</p>
 
 <h4 class="method-name" id="PipelineHandler.recover_variable_from_backup">recover_variable_from_backup()</h4>
-<div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
+<div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>, *, pipeline_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
 <p>Restores one current value from the latest complete in-place backup. Call on the root pipeline only. Updates in place and returns <code>None</code>.</p>
 <ul>
+  <li><code>pipeline_name</code> targets one pipeline: the saved value is resolved from that pipeline's saved state instead of the root's, which disambiguates same-name values owned by different pipelines.</li>
+  <li>Declared-but-not-yet-produced output names are recovered into their declaring pipeline without requiring a live value.</li>
   <li>If the same name is independently owned by multiple pipelines, one prompt lists every affected pipeline; only <code>yes</code>/<code>y</code> applies the recovery to all of them.</li>
   <li>Disk-backed values are copied into the live project so they remain usable if the backup is later removed.</li>
   <li>Requires <code>pipeline_state.pkl</code>, <code>config.pkl</code>, and <code>pipeline_meta.pkl</code> plus every saved artifact referenced by the backup.</li>
@@ -558,6 +567,8 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>param_mapping</code> exposes safer pipeline-facing parameter names without changing the callable.</li>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
+  <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
+  <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
 </ul>
 <div class="example">
   <div class="example-title">Example</div>
@@ -589,6 +600,8 @@ block.register_function(
 <ul>
   <li>Returns <code>None</code> when the registration is rejected (for example output name conflicts).</li>
   <li>Imports used by expressions are supplied through <code>define_expression_runtime()</code>.</li>
+  <li>A block holds <strong>at most one expression</strong>: a second assignment, a second logging expression, or a mixed pair raises <code>RegistrationError</code>; re-registering the existing expression with <code>forced=True</code> replaces it.</li>
+  <li>Forced replacement follows the same unified rule as <code>register_function</code> and <code>create_atom_child_pipeline</code>: an <strong>identical</strong> re-registration is a no-op that preserves all outputs; any real change erases the expression's own output, then invalidates from the earliest downstream block that consumes any affected output name (old outputs plus new outputs colliding with downstream inputs), warning about the consumers. Unrelated downstream blocks and consumers shielded by a later same-name producer are left untouched.</li>
 </ul>
 
 <h4 class="method-name" id="ExecutionBlock.register_args">register_args()</h4>
@@ -777,7 +790,7 @@ block.register_function(
 
 <h3 class="class-name" id="artifacrecord">ArtifactRecord</h3>
 <p class="class-desc">Metadata for one disk-backed pipeline value.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name, serializer, file_path, produced_by_block, produced_by_function, run_id, created_at=None)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name, serializer, file_path, produced_by_block, produced_by_function, run_id, created_at=None, torch_load_weights_only=False)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>variable_name</code></td><td>str</td><td>Pipeline-facing name of the value.</td></tr>
@@ -787,6 +800,7 @@ block.register_function(
   <tr><td><code>produced_by_function</code></td><td>str</td><td>Function that produced the value.</td></tr>
   <tr><td><code>run_id</code></td><td>str</td><td>Run that produced the value.</td></tr>
   <tr><td><code>created_at</code></td><td>str</td><td>UTC ISO timestamp of creation.</td></tr>
+  <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Whether this torch artifact must be loaded with <code>weights_only=True</code>.</td></tr>
 </table>
 <h4 class="method-name">path()</h4>
 <div class="sig"><span class="kw">path</span>() -&gt; <span class="ret">Path</span></div>
@@ -821,7 +835,7 @@ block.register_function(
 
 <h3 class="class-name" id="functionregistration">FunctionRegistration</h3>
 <p class="class-desc">Captured registration metadata used for execution, charting, and persistence.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionRegistration(function_name, import_path, callable_obj, input_names, output_names, save_to_disk, param_mapping=None, var_pos_name=None, var_kw_name=None)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionRegistration(function_name, import_path, callable_obj, input_names, output_names, save_to_disk, param_mapping=None, var_pos_name=None, var_kw_name=None, args_registration_state=None, kwargs_registration_state=None)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>function_name</code></td><td>str</td><td>Registered name of the function.</td></tr>
@@ -833,6 +847,8 @@ block.register_function(
   <tr><td><code>param_mapping</code></td><td>dict[str, str | None]</td><td>Renamed-parameter mapping.</td></tr>
   <tr><td><code>var_pos_name</code></td><td>str | None</td><td>Pipeline-facing name for variadic positional args.</td></tr>
   <tr><td><code>var_kw_name</code></td><td>str | None</td><td>Pipeline-facing name for variadic keyword args.</td></tr>
+  <tr><td><code>args_registration_state</code></td><td>list[str] | None</td><td>Snapshot of the bound block args helper used for structural re-registration equality.</td></tr>
+  <tr><td><code>kwargs_registration_state</code></td><td>dict[str, str] | None</td><td>Snapshot of the bound block kwargs helper used for structural re-registration equality.</td></tr>
 </table>
 
 <h3 class="class-name" id="expressionregistration">ExpressionRegistration</h3>
@@ -871,7 +887,12 @@ block.register_function(
 <h3 class="class-name" id="runtimevaluereference">RuntimeValueReference</h3>
 <p class="class-desc">Fallback reference used when a runtime value cannot be safely persisted.</p>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.models.RuntimeValueReference(type_name, repr_text, reason)</div>
-<p>Created during save when a value is not directly serializable. Contains the type name, a <code>repr()</code> preview, and the reason the value could not be persisted.</p>
+<p>Created during save when a value is not directly serializable. Contains the type name, a <code>repr()</code> preview, and the reason the value could not be persisted. Produced values saved this way are re-run at load by default (<code>auto_resolve_placeholders=True</code>); otherwise they raise <code>ResolutionError</code> when read.</p>
+
+<h3 class="class-name" id="dataclassvaluereference">DataclassValueReference</h3>
+<p class="class-desc">Structured reference to a pure dataclass that could not be pickled.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.DataclassValueReference(class_name, data, reason, module=None)</div>
+<p>Created during save when a dataclass value (config object, constant, or produced value) is not directly serializable. Holds the dataclass name, its source module, and per-field structured data so the value can be reconstructed at load: a real dataclass instance when the class is importable and constructible from the saved fields, a <code>SimpleNamespace</code> fallback otherwise.</p>
 
 <h3 class="class-name" id="callablevaluereference">CallableValueReference</h3>
 <p class="class-desc">Reference to an importable callable stored as a pipeline value.</p>

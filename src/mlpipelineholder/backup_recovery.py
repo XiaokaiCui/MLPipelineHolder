@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum, unique
-from typing import TYPE_CHECKING, Any, Final, Protocol, TypeAlias, TypeGuard
+from pathlib import Path
+from typing import Any, Final, Protocol, TypeAlias, TypeGuard
 
 from .models import ArtifactRecord
-
-if TYPE_CHECKING:
-    from .pipeline_handler import PipelineHandler
 
 SlotMapping: TypeAlias = dict[str, Any]
 YesInput: TypeAlias = Callable[[str], str]
@@ -20,7 +18,44 @@ class _LoggerProtocol(Protocol):
     def warning(self, message: str) -> None: ...
 
 
-def _is_pipeline_node(node: object) -> TypeGuard[PipelineHandler]:
+class _PipelineProtocol(Protocol):
+    registration_name: str
+    project_root: Path
+    pipeline_backup_root: Path | None
+    config: Any
+    para_value_dict: dict[str, Any]
+    manual_values: dict[str, Any]
+    artifact_registry: dict[str, ArtifactRecord]
+    producer_outputs: dict[str, dict[str, Any]]
+
+    @property
+    def parent_pipeline(self) -> _PipelineProtocol | None: ...
+
+    @property
+    def logger(self) -> _LoggerProtocol: ...
+
+    def full_path(self) -> str: ...
+
+    def _root_pipeline(self) -> _PipelineProtocol: ...
+
+    def _iter_attached_pipelines(self) -> Sequence[_PipelineProtocol]: ...
+
+    def _find_declaring_node(self, variable_name: str) -> Any: ...
+
+    def list_declared_outputs(self) -> set[str]: ...
+
+    def _incoming_parent_outputs(self) -> dict[str, Any]: ...
+
+    def _sorted_nodes(self) -> list[Any]: ...
+
+    def _contains_missing_main_placeholder(self, value: Any) -> bool: ...
+
+    def config_as_dict(self) -> dict[str, Any]: ...
+
+    def _inject_recovered_value(self, variable_name: str, value: Any) -> None: ...
+
+
+def _is_pipeline_node(node: object) -> TypeGuard[_PipelineProtocol]:
     return hasattr(node, "parent_pipeline") and hasattr(node, "para_value_dict")
 
 
@@ -29,6 +64,7 @@ class OwnerKind(StrEnum):
     MANUAL = "manual"
     LATEST_PRODUCER = "latest_producer"
     FALLBACK_PARA = "fallback_para"
+    DECLARED = "declared"
 
 
 @unique
@@ -76,12 +112,18 @@ class ImpactConfirmation:
 
 
 def discover_owned_variable_slots(
-    root_pipeline: PipelineHandler,
+    root_pipeline: _PipelineProtocol,
     variable_name: str,
+    *,
+    scope_pipeline: _PipelineProtocol | None = None,
 ) -> _VariableOwnershipInventory:
     owners: list[_OwnedVariableState] = []
     mirrors: list[_StateSlot] = []
-    for pipeline in root_pipeline._iter_attached_pipelines():
+    if scope_pipeline is not None:
+        pipelines = [scope_pipeline]
+    else:
+        pipelines = root_pipeline._iter_attached_pipelines()
+    for pipeline in pipelines:
         owner = _discover_owner(pipeline, variable_name)
         if owner is None:
             continue
@@ -111,7 +153,7 @@ def confirm_recovery_impact(
 
 
 def _discover_owner(
-    pipeline: PipelineHandler,
+    pipeline: _PipelineProtocol,
     variable_name: str,
 ) -> _OwnedVariableState | None:
     path = pipeline.full_path()
@@ -144,7 +186,7 @@ def _discover_owner(
 
 
 def _latest_local_non_child_producer_name(
-    pipeline: PipelineHandler,
+    pipeline: _PipelineProtocol,
     variable_name: str,
 ) -> str | None:
     for node in reversed(pipeline._sorted_nodes()):
@@ -155,7 +197,10 @@ def _latest_local_non_child_producer_name(
     return None
 
 
-def _latest_child_mirror_name(pipeline: PipelineHandler, variable_name: str) -> str | None:
+def _latest_child_mirror_name(
+    pipeline: _PipelineProtocol,
+    variable_name: str,
+) -> str | None:
     for node in reversed(pipeline._sorted_nodes()):
         outputs = pipeline.producer_outputs.get(node.registration_name)
         if outputs is None or variable_name not in outputs:
@@ -165,7 +210,7 @@ def _latest_child_mirror_name(pipeline: PipelineHandler, variable_name: str) -> 
 
 
 def _ancestor_mirror_slots(
-    owner_pipeline: PipelineHandler,
+    owner_pipeline: _PipelineProtocol,
     variable_name: str,
 ) -> tuple[_StateSlot, ...]:
     mirrors: list[_StateSlot] = []

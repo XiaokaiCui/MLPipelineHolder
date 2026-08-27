@@ -7,7 +7,12 @@ import sys
 
 from .exceptions import PersistenceError, RegistrationError, ResolutionError
 from .function_registry import resolve_callable
-from .models import CallableValueReference, RuntimeCallableReference, RuntimeValueReference
+from .models import (
+    CallableValueReference,
+    DataclassValueReference,
+    RuntimeCallableReference,
+    RuntimeValueReference,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +134,10 @@ def _resolve_selected_graph(
         case RuntimeValueReference() as reference:
             raise PersistenceError(
                 f"Unsupported runtime placeholder '{reference.type_name}' found inside {context.selection_label}: {reference.reason}"
+            )
+        case DataclassValueReference() as reference:
+            raise PersistenceError(
+                f"Unsupported dataclass placeholder '{reference.class_name}' found inside {context.selection_label}: {reference.reason}"
             )
         case dict() if value.get("__pipeline_serialized_config__") is True:
             return _resolve_serialized_config_wrapper(value, context, memo)
