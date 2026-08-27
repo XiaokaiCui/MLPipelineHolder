@@ -137,10 +137,17 @@ class ExecutionBlock:
                 and existing.warn_on_input_mutation == warn_on_input_mutation
             ):
                 return existing
-            self.parent.logger.warning(
-                f"Expression in block '{self.registration_name}' was overridden with a "
-                "different expression; invalidating its outputs and downstream dependents"
-            )
+            if self.parent._invalidation_forbidden:
+                self.parent.logger.warning(
+                    f"Expression in block '{self.registration_name}' was overridden with a "
+                    "different expression; erasing the block's own outputs while retaining "
+                    "other cached outputs because cascade invalidation is forbidden"
+                )
+            else:
+                self.parent.logger.warning(
+                    f"Expression in block '{self.registration_name}' was overridden with a "
+                    "different expression; invalidating its outputs and downstream dependents"
+                )
             self.parent._erase_overridden_node_outputs(
                 self.registration_name,
                 self.execution_priority,
@@ -705,7 +712,11 @@ class ExecutionBlock:
             )
 
         self.functions.remove(matches[0])
-        self.parent._invalidate_from_priority(self.execution_priority)
+        self.parent._erase_node_outputs(self.registration_name)
+        if not self.parent._invalidation_forbidden:
+            self.parent._invalidate_from_priority(self.execution_priority)
+        if self.parent.parent_pipeline is not None:
+            self.parent._resync_mirror_to_parent()
 
     def declared_outputs(self) -> set[str]:
         return {

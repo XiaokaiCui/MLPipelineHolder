@@ -151,6 +151,7 @@ class PipelineHandler:
             self.torch_load_weights_only = bool(torch_load_weights_only)
             self.strict_mode = bool(strict_mode)
             self._suppress_strict_validation = False
+            self._invalidation_forbidden = False
             self.suppress_registration_advisories = False
             self.historical_result_log_path: str | None = None
             self._attached_result_history_override: list[str] | None = None
@@ -266,6 +267,7 @@ class PipelineHandler:
             )
         if child_pipeline is self:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
+        was_root = child_pipeline.parent_pipeline is None
         if registration_name is not None:
             child_pipeline.registration_name = registration_name
         conflicts = self._registration_conflicts(child_pipeline, execution_priority)
@@ -293,6 +295,24 @@ class PipelineHandler:
         self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
         self._validate_strict_attach(child_pipeline, execution_priority)
         child_pipeline._attach_to_parent(self, execution_priority)
+        if was_root and child_pipeline._invalidation_forbidden:
+            top = self._root_pipeline()
+            changed = not top._invalidation_forbidden
+            top._invalidation_forbidden = True
+            top._sync_invalidation_flag()
+            if changed:
+                top.logger.warning(
+                    "Attaching a former root pipeline with object invalidation "
+                    "forbidden transferred FORBIDDEN state to the whole pipeline tree: "
+                    "forced re-registrations and structural changes will still erase "
+                    "each changed node's own outputs but will not invalidate other "
+                    "upstream or downstream outputs, so stale or inconsistent values "
+                    "may survive silently; call allow_invalidate_objects() to restore "
+                    "normal cascade invalidation"
+                )
+        else:
+            child_pipeline._invalidation_forbidden = self._invalidation_forbidden
+            child_pipeline._sync_invalidation_flag()
         self._register_node(child_pipeline)
         if child_pipeline.para_value_dict:
             self.producer_outputs[child_pipeline.registration_name] = (
@@ -663,6 +683,11 @@ class PipelineHandler:
                 return False
         return True
 
+    def _erase_node_outputs(self, node_name: str) -> None:
+        removed = self.producer_outputs.pop(node_name, {})
+        self._rebuild_visible_state(self._incoming_parent_outputs())
+        self._delete_artifacts_from_outputs(removed)
+
     def _erase_overridden_node_outputs(
         self,
         node_name: str,
@@ -673,19 +698,20 @@ class PipelineHandler:
     ) -> None:
         """Unified erasure for a forced override of an expression, function or atom.
 
-        Erases the overridden node's own produced outputs, then erases
-        from the earliest downstream block that consumes any affected output
-        name: the old outputs (whose values change or disappear) and the new
-        outputs (which may collide with downstream inputs). Downstream blocks
-        consuming none of the affected names are left untouched. Old outputs are
-        walked from the old priority and new outputs from the new priority, so a
-        priority change still catches consumers between the two positions.
+        Always erases the overridden node's own produced outputs. Unless cascade
+        invalidation is forbidden, it then erases from the earliest downstream
+        block that consumes any affected output name: the old outputs (whose
+        values change or disappear) and the new outputs (which may collide with
+        downstream inputs). Downstream blocks consuming none of the affected
+        names are left untouched. Old outputs are walked from the old priority
+        and new outputs from the new priority, so a priority change still catches
+        consumers between the two positions.
         """
-        removed = self.producer_outputs.pop(node_name, {})
-        self._rebuild_visible_state(self._incoming_parent_outputs())
-        self._delete_artifacts_from_outputs(removed)
+        self._erase_node_outputs(node_name)
         if self.parent_pipeline is not None:
             self._resync_mirror_to_parent()
+        if self._invalidation_forbidden:
+            return
         users: list[tuple[PipelineHandler, Any]] = []
         affected_names: set[str] = set()
         for output_name in dict.fromkeys(old_output_names):
@@ -944,7 +970,8 @@ class PipelineHandler:
             self.logger.warning("Skipped gate block registration: gate block already exists")
             return None
         self.gate_block = GateBlock(self, function_or_path, expected_value=expected_value)
-        self._invalidate_all_outputs()
+        if not self._invalidation_forbidden:
+            self._invalidate_all_outputs()
         return self.gate_block
 
     def set_gate_block(
@@ -1513,7 +1540,8 @@ class PipelineHandler:
         if self.gate_block is None:
             return
         self.gate_block = None
-        self._invalidate_all_outputs()
+        if not self._invalidation_forbidden:
+            self._invalidate_all_outputs()
 
     def get_result_history(self) -> list[str]:
         # Attached child pipelines intentionally keep reading historical RESULT lines from
@@ -1555,6 +1583,64 @@ class PipelineHandler:
         """Enable or disable strict-mode registration validation for this pipeline and all attached descendants."""
         for pipeline in self._iter_attached_pipelines():
             pipeline.strict_mode = bool(enabled)
+
+    def _sync_invalidation_flag(self) -> None:
+        """Copy this pipeline's invalidation flag to its whole attached subtree."""
+        flag = self._invalidation_forbidden
+        for pipeline in self._iter_attached_pipelines():
+            pipeline._invalidation_forbidden = flag
+
+    def forbid_invalidate_objects(self) -> None:
+        """Suppress cascade invalidation after changes across the pipeline tree.
+
+        Forced re-registrations anywhere from the root down to every descendant
+        still erase the changed node's own outputs, but stop invalidating other
+        upstream or downstream objects. Those retained values may be stale or
+        inconsistent until this mode is lifted. The state is not persisted, only
+        the root pipeline may toggle it, and every pipeline added later inherits
+        the current state automatically; call `allow_invalidate_objects()` to
+        restore normal behaviour.
+        """
+        if self.parent_pipeline is not None:
+            raise RegistrationError(
+                "forbid_invalidate_objects() must be called on the root pipeline"
+            )
+        if self._invalidation_forbidden:
+            return
+        self._invalidation_forbidden = True
+        self._sync_invalidation_flag()
+        self.logger.warning(
+            "Object invalidation is now FORBIDDEN on the whole pipeline tree: forced "
+            "re-registrations and structural changes will still erase each changed "
+            "node's own outputs but will not invalidate other upstream or downstream "
+            "outputs, so stale or inconsistent values may survive silently; call "
+            "allow_invalidate_objects() to restore normal cascade invalidation"
+        )
+
+    def allow_invalidate_objects(self) -> None:
+        """Restore normal erasure behaviour across the whole pipeline tree.
+
+        Forced re-registrations and structural changes will invalidate affected
+        upstream or downstream outputs again, which may discard previously
+        computed results and require re-running blocks. Only the root pipeline
+        may toggle this state; every pipeline already in the tree syncs
+        immediately and later additions inherit the current state. Call
+        `forbid_invalidate_objects()` to suppress cascade invalidation again.
+        """
+        if self.parent_pipeline is not None:
+            raise RegistrationError(
+                "allow_invalidate_objects() must be called on the root pipeline"
+            )
+        if not self._invalidation_forbidden:
+            return
+        self._invalidation_forbidden = False
+        self._sync_invalidation_flag()
+        self.logger.warning(
+            "Object invalidation is now ALLOWED on the whole pipeline tree: forced "
+            "re-registrations and structural changes will invalidate affected upstream "
+            "or downstream outputs again and may discard previously computed results; "
+            "call forbid_invalidate_objects() to suppress cascade invalidation again"
+        )
 
     def define_expression_runtime(self, code: str) -> None:
         code = self._normalize_expression_runtime_code(code)
@@ -1642,7 +1728,11 @@ class PipelineHandler:
         self.blocks = [candidate for candidate in self.blocks if candidate is not block]
         self.nodes = [candidate for candidate in self.nodes if candidate is not block]
         self.nodes_by_name.pop(block_name, None)
-        self._invalidate_from_priority(block.execution_priority)
+        self._erase_node_outputs(block_name)
+        if not self._invalidation_forbidden:
+            self._invalidate_from_priority(block.execution_priority)
+        if self.parent_pipeline is not None:
+            self._resync_mirror_to_parent()
 
     def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
         if self._gate_skip_without_cleanup(
@@ -4035,19 +4125,15 @@ class PipelineHandler:
         earliest_priority = min(
             node.execution_priority for node in nodes if node.execution_priority is not None
         )
-        removed_outputs: list[dict[str, Any]] = []
         for node in nodes:
-            removed_outputs.append(self.producer_outputs.pop(node.registration_name, {}))
+            self._erase_node_outputs(node.registration_name)
             if isinstance(node, PipelineHandler):
                 node._invalidate_all_outputs()
             self._remove_registered_node(node)
-        self._invalidate_from_priority(earliest_priority)
-        # The removed nodes are no longer in _sorted_nodes(), so
-        # _invalidate_from_priority cannot clean their producer_outputs
-        # entries; delete their artifacts explicitly so downstream blocks
-        # cannot silently consume stale values.
-        for outputs in removed_outputs:
-            self._delete_artifacts_from_outputs(outputs)
+        if not self._invalidation_forbidden:
+            self._invalidate_from_priority(earliest_priority)
+        if self.parent_pipeline is not None:
+            self._resync_mirror_to_parent()
 
     def _validate_strict_attach(
         self,
