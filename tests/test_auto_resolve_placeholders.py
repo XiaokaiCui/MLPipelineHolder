@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Lock
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -33,6 +33,20 @@ class ConfigWithDerived:
 
 
 _CALL_COUNTERS: dict[str, int] = {}
+
+
+class Lock:
+    """Unpicklable stand-in for ``threading.Lock``.
+
+    ``threading.Lock`` is a factory function, not a class, before Python 3.13,
+    so it cannot be used as the second argument of ``isinstance`` on 3.11/3.12.
+    This class reproduces the behaviour the tests need on every supported
+    version: instances are not picklable and not deep-copyable, so the pipeline
+    saves them as placeholders and recovers them by re-running their block.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
 
 
 def produce_lock() -> Lock:

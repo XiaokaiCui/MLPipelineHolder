@@ -103,7 +103,8 @@ class PipelineLogger:
         The console receives a Rich-rendered traceback by default (with local
         variables shown only when `set_show_traceback_locals(True)` was called),
         falling back to the plain stdlib traceback when Rich console rendering
-        is disabled with `set_traceback_console_render(False)`.
+        is disabled with `set_traceback_console_render(False)` or when Rich is
+        not installed (Rich is an optional dependency).
         """
         timestamp = datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
         header = f"{timestamp} ERROR {message if message is not None else str(exc)}"
@@ -132,11 +133,19 @@ class PipelineLogger:
     def _console_traceback_text(self, exc: BaseException, stdlib_text: str) -> str:
         if not self._use_rich_traceback_console:
             return stdlib_text
-        return self._render_rich_traceback(exc)
+        return self._render_rich_traceback(exc, stdlib_text)
 
-    def _render_rich_traceback(self, exc: BaseException) -> str:
-        from rich.console import Console
-        from rich.traceback import Traceback
+    def _render_rich_traceback(self, exc: BaseException, stdlib_text: str) -> str:
+        """Render a Rich console traceback, falling back to plain stdlib text.
+
+        Rich is an optional dependency, so this degrades gracefully to the
+        stdlib traceback when it is not installed.
+        """
+        try:
+            from rich.console import Console
+            from rich.traceback import Traceback
+        except ImportError:
+            return stdlib_text
 
         buffer = StringIO()
         console = Console(file=buffer, force_terminal=True, highlight=False)

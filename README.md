@@ -17,18 +17,27 @@ Install optional integrations as needed:
 ```bash
 pip install "mlpipelineholder[dataframe]"
 pip install "mlpipelineholder[torch]"
+pip install "mlpipelineholder[rich]"
 pip install "mlpipelineholder[memory]"
 pip install "mlpipelineholder[all]"
+```
+
+Extras can be combined in a single install. For example, to add DataFrame
+and PyTorch support together:
+
+```bash
+pip install "mlpipelineholder[dataframe,torch]"
 ```
 
 Each extra adds:
 
 - `dataframe`: pandas, PyArrow, and Dask DataFrame support
 - `torch`: PyTorch model, tensor, and optimiser persistence
-- `memory`: `psutil`-based memory profiling logs
+- `rich`: Rich-rendered console tracebacks (console tracebacks fall back to plain stdlib text when Rich is not installed)
+- `memory`: `psutil`-based memory profiling logs (useful when you utilise disk-backed features)
 - `all`: all optional features listed above (**recommended**)
 
-The core package requires Python 3.11 or later and includes `termcolor`, NumPy, and Rich.
+The core package requires Python 3.11 or later and includes `termcolor` and NumPy.
 
 ## At a glance
 

@@ -23,7 +23,6 @@ classifiers = [
 dependencies = [
     "termcolor",
     "numpy",
-    "rich",
 ]
 
 [project.urls]
@@ -34,8 +33,9 @@ Issues = "https://github.com/XiaokaiCui/MLPipelineHolder/issues"
 [project.optional-dependencies]
 dataframe = ["pandas", "pyarrow", "dask[dataframe]"]
 torch = ["torch"]
+rich = ["rich"]
 memory = ["psutil"]
-all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "psutil"]
+all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "rich", "psutil"]
 
 [tool.poetry]
 packages = [{ include = "mlpipelineholder", from = "src" }]
@@ -45,6 +45,7 @@ pandas = "*"
 pyarrow = "*"
 dask = { version = "*", extras = ["dataframe"] }
 torch = "*"
+rich = "*"
 psutil = "*"
 build = "*"
 
