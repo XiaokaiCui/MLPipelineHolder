@@ -16,7 +16,12 @@ from src.mlpipelineholder.backup_value_resolver import (
     resolve_saved_root_variable,
 )
 from src.mlpipelineholder.function_registry import resolve_callable
-from src.mlpipelineholder.models import CallableValueReference, RuntimeCallableReference, RuntimeValueReference
+from src.mlpipelineholder.models import (
+    CallableValueReference,
+    DataclassValueReference,
+    RuntimeCallableReference,
+    RuntimeValueReference,
+)
 
 
 @dataclass
@@ -384,3 +389,117 @@ class BackupValueResolverTests(unittest.TestCase):
                 "selected",
                 is_missing_main_placeholder=_is_missing_main_placeholder,
             )
+
+
+class BackupValueResolverDataclassTests(unittest.TestCase):
+    def test_resolve_saved_root_variable_reconstructs_importable_dataclass(self) -> None:
+        reference = DataclassValueReference(
+            class_name=SaveConfig.__name__,
+            module=SaveConfig.__module__,
+            data={"value": 11},
+            reason="not directly serializable during save_pipeline",
+        )
+        payload = _saved_payload("root", para_value_dict={"selected": reference})
+
+        resolved = resolve_saved_root_variable(
+            payload,
+            "selected",
+            is_missing_main_placeholder=_is_missing_main_placeholder,
+        )
+
+        if not isinstance(resolved, SaveConfig):
+            self.fail("resolved value should be a SaveConfig instance")
+        self.assertEqual(resolved.value, 11)
+
+    def test_resolve_saved_root_variable_reconstructs_unknown_dataclass_as_namespace(self) -> None:
+        reference = DataclassValueReference(
+            class_name="MissingConfig",
+            module="no.such.module",
+            data={"alpha": 1.5, "beta": 2},
+            reason="not directly serializable during save_pipeline",
+        )
+        payload = _saved_payload("root", para_value_dict={"selected": reference})
+
+        resolved = resolve_saved_root_variable(
+            payload,
+            "selected",
+            is_missing_main_placeholder=_is_missing_main_placeholder,
+        )
+
+        if not isinstance(resolved, SimpleNamespace):
+            self.fail("resolved value should fall back to a SimpleNamespace")
+        self.assertEqual(resolved.alpha, 1.5)
+        self.assertEqual(resolved.beta, 2)
+
+    def test_resolve_saved_root_variable_uses_dataclass_class_resolver(self) -> None:
+        @dataclass
+        class DynamicConfig:
+            weight: float = 1.0
+
+        reference = DataclassValueReference(
+            class_name="DynamicConfig",
+            module="somewhere.dynamic",
+            data={"weight": 3.0},
+            reason="not directly serializable during save_pipeline",
+        )
+        payload = _saved_payload("root", para_value_dict={"selected": reference})
+
+        resolved = resolve_saved_root_variable(
+            payload,
+            "selected",
+            is_missing_main_placeholder=_is_missing_main_placeholder,
+            dataclass_class_resolver=lambda name, module: (
+                DynamicConfig if name == "DynamicConfig" else None
+            ),
+        )
+
+        if not isinstance(resolved, DynamicConfig):
+            self.fail("resolved value should use the provided class resolver")
+        self.assertEqual(resolved.weight, 3.0)
+
+    def test_resolve_saved_root_variable_reconstructs_nested_dataclass_placeholder(self) -> None:
+        nested = DataclassValueReference(
+            class_name=SaveConfig.__name__,
+            module=SaveConfig.__module__,
+            data={"value": 4},
+            reason="not directly serializable during save_pipeline",
+        )
+        payload = _saved_payload(
+            "root",
+            para_value_dict={"selected": {"inner": nested}},
+        )
+
+        resolved = resolve_saved_root_variable(
+            payload,
+            "selected",
+            is_missing_main_placeholder=_is_missing_main_placeholder,
+        )
+
+        if not isinstance(resolved, dict):
+            self.fail("resolved value should be a dict")
+        inner = resolved["inner"]
+        if not isinstance(inner, SaveConfig):
+            self.fail("nested placeholder should resolve to a SaveConfig instance")
+        self.assertEqual(inner.value, 4)
+
+    def test_resolve_saved_config_field_reconstructs_dataclass_placeholder(self) -> None:
+        reference = DataclassValueReference(
+            class_name=SaveConfig.__name__,
+            module=SaveConfig.__module__,
+            data={"value": 9},
+            reason="not directly serializable during save_pipeline",
+        )
+        payload = _saved_payload(
+            "root",
+            config=_serialized_config({"selected": reference}),
+        )
+
+        resolved = resolve_saved_config_field(
+            payload,
+            "selected",
+            is_missing_main_placeholder=_is_missing_main_placeholder,
+        )
+
+        if not isinstance(resolved, SaveConfig):
+            self.fail("resolved config field should be a SaveConfig instance")
+        self.assertEqual(resolved.value, 9)

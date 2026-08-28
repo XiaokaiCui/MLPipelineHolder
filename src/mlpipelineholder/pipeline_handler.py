@@ -22,7 +22,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from textwrap import dedent
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .artifact_store import ArtifactStore
@@ -47,6 +47,9 @@ from .models import (
     TorchStateArtifactRecord,
 )
 
+if TYPE_CHECKING:
+    from .execution_block import ExecutionBlock
+
 
 class _MissingMainClassPlaceholder:
     pass
@@ -67,6 +70,8 @@ _SAVE_WARNING_PATTERNS = (
 )
 
 _IMMUTABLE_TYPES = (int, float, complex, bool, str, bytes, type(None))
+_ACTIVE_PACKAGE_ROOT = __name__.rsplit(".", maxsplit=1)[0]
+_PERSISTED_PACKAGE_ROOTS = ("mlpipelineholder", "src.mlpipelineholder")
 
 
 class _MissingClassUnpickler(pickle.Unpickler):
@@ -75,8 +80,13 @@ class _MissingClassUnpickler(pickle.Unpickler):
         self._placeholder_cache: dict[tuple[str, str], type[Any]] = {}
 
     def find_class(self, module: str, name: str) -> Any:
+        resolved_module = module
+        for persisted_root in _PERSISTED_PACKAGE_ROOTS:
+            if module == persisted_root or module.startswith(f"{persisted_root}."):
+                resolved_module = f"{_ACTIVE_PACKAGE_ROOT}{module[len(persisted_root):]}"
+                break
         try:
-            return super().find_class(module, name)
+            return super().find_class(resolved_module, name)
         except (AttributeError, ImportError, ModuleNotFoundError):
             if module != "__main__":
                 raise
@@ -210,7 +220,7 @@ class PipelineHandler:
 
     def add_block(
         self, registration_name: str, execution_priority: float, forced: bool = False
-    ) -> Any:
+    ) -> ExecutionBlock | None:
         if self._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{self.registration_name}' is immutable "
@@ -225,6 +235,16 @@ class PipelineHandler:
             execution_priority,
             conflicts,
         )
+        existing_block = self.blocks_by_name.get(registration_name)
+        if (
+            forced
+            and existing_block is not None
+            and isinstance(existing_block, ExecutionBlock)
+            and existing_block.execution_priority == execution_priority
+            and len(existing_block.functions) == 1
+            and isinstance(existing_block.functions[0], ExpressionRegistration)
+        ):
+            return existing_block
         if conflicts and not forced:
             self.logger.warning(
                 f"Skipped block registration '{registration_name}' at priority {execution_priority}: already exists"
@@ -2438,10 +2458,20 @@ class PipelineHandler:
         if parent is not None:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
+        pending_dataclass_fallbacks: list[
+            tuple[PipelineHandler, str, str | None, str, DataclassValueReference]
+        ] = []
         if parent is None:
-            pipeline._restore_dataclass_value_references(verbose=verbose)
+            pipeline._restore_dataclass_value_references(
+                verbose=verbose,
+                _pending=pending_dataclass_fallbacks,
+            )
         if auto_resolve_placeholders and parent is None:
             pipeline._auto_resolve_placeholder_outputs(verbose=verbose)
+            pipeline._reconnect_dataclass_fallbacks(
+                pending_dataclass_fallbacks,
+                verbose=verbose,
+            )
         elif not auto_resolve_placeholders and parent is None:
             pipeline._warn_unresolved_placeholders_at_load(verbose=verbose)
         return pipeline
@@ -2451,6 +2481,10 @@ class PipelineHandler:
         *,
         verbose: bool,
         _memo: dict[int, Any] | None = None,
+        _pending: list[
+            tuple[PipelineHandler, str, str | None, str, DataclassValueReference]
+        ]
+        | None = None,
     ) -> None:
         """Replace structured dataclass references with reconstructed values.
 
@@ -2464,16 +2498,32 @@ class PipelineHandler:
         placeholders that carry only a ``type_name`` are best-effort
         reconstructed with default fields when a matching importable dataclass
         exists.
+
+        Every slot that falls back to a ``SimpleNamespace`` is recorded in the
+        ``_pending`` registry (when given) as a slot descriptor rather than a
+        dict reference, because placeholder recovery later rebuilds the visible
+        state with fresh dict objects; a later reconnect pass can then upgrade
+        the current slot once placeholder recovery has produced the real class
+        as a pipeline value.
         """
         memo = {} if _memo is None else _memo
-        for mapping in (self.manual_values, self.para_value_dict):
+        pending = [] if _pending is None else _pending
+        for slot_kind, mapping in (
+            ("manual_values", self.manual_values),
+            ("para_value_dict", self.para_value_dict),
+        ):
             for value_name, value in list(mapping.items()):
                 if isinstance(value, DataclassValueReference):
-                    mapping[value_name] = self._restore_dataclass_value(
+                    restored = self._restore_dataclass_value(
                         value,
                         verbose=verbose,
                         memo=memo,
                     )
+                    mapping[value_name] = restored
+                    if isinstance(restored, SimpleNamespace):
+                        pending.append(
+                            (self, slot_kind, None, value_name, value)
+                        )
                 elif isinstance(value, RuntimeValueReference):
                     restored = self._restore_legacy_dataclass_reference(
                         value,
@@ -2482,14 +2532,25 @@ class PipelineHandler:
                     )
                     if restored is not value:
                         mapping[value_name] = restored
-        for outputs in self.producer_outputs.values():
+        for node_name, outputs in self.producer_outputs.items():
             for value_name, value in list(outputs.items()):
                 if isinstance(value, DataclassValueReference):
-                    outputs[value_name] = self._restore_dataclass_value(
+                    restored = self._restore_dataclass_value(
                         value,
                         verbose=verbose,
                         memo=memo,
                     )
+                    outputs[value_name] = restored
+                    if isinstance(restored, SimpleNamespace):
+                        pending.append(
+                            (
+                                self,
+                                "producer_outputs",
+                                node_name,
+                                value_name,
+                                value,
+                            )
+                        )
                 elif isinstance(value, RuntimeValueReference):
                     restored = self._restore_legacy_dataclass_reference(
                         value,
@@ -2503,7 +2564,79 @@ class PipelineHandler:
                 node._restore_dataclass_value_references(
                     verbose=verbose,
                     _memo=memo,
+                    _pending=pending,
                 )
+
+    def _reconnect_dataclass_fallbacks(
+        self,
+        pending: list[
+            tuple[PipelineHandler, str, str | None, str, DataclassValueReference]
+        ],
+        *,
+        verbose: bool,
+    ) -> None:
+        """Upgrade SimpleNamespace fallbacks once placeholder recovery has run.
+
+        Re-running blocks during ``_auto_resolve_placeholder_outputs`` can
+        produce dynamically generated classes (for example a factory function
+        returning a new dataclass), so saved dataclass instances that could not
+        be reconnected during the first restore pass get a second attempt.
+        Each slot is re-resolved against the current pipeline state (placeholder
+        recovery rebuilds the visible state with fresh dict objects) and
+        replaced with a real dataclass instance when its class is now
+        available; every other slot keeps its SimpleNamespace fallback. Slots
+        mirroring the same saved reference share one reconstructed object.
+        """
+        if not pending:
+            return
+        rebuilt: dict[int, Any] = {}
+        for owner, slot_kind, slot_key, value_name, reference in pending:
+            mapping = PipelineHandler._dataclass_fallback_mapping(
+                owner,
+                slot_kind,
+                slot_key,
+            )
+            if mapping is None or not isinstance(
+                mapping.get(value_name), SimpleNamespace
+            ):
+                continue
+            reference_id = id(reference)
+            result = rebuilt.get(reference_id)
+            if result is None:
+                data = {
+                    key: self._deserialize_config_value(
+                        item,
+                        verbose=verbose,
+                        warn=self.logger.warning,
+                    )
+                    for key, item in reference.data.items()
+                }
+                result = PipelineHandler._reconstruct_dataclass(
+                    reference.class_name,
+                    data,
+                    verbose=False,
+                    module_name=reference.module,
+                    warn=None,
+                    pipeline=owner,
+                )
+                rebuilt[reference_id] = result
+            if not isinstance(result, SimpleNamespace):
+                mapping[value_name] = result
+
+    @staticmethod
+    def _dataclass_fallback_mapping(
+        owner: PipelineHandler,
+        slot_kind: str,
+        slot_key: str | None,
+    ) -> dict[str, Any] | None:
+        """Resolve the current mapping a recorded fallback slot lives in."""
+        if slot_kind == "manual_values":
+            return owner.manual_values
+        if slot_kind == "para_value_dict":
+            return owner.para_value_dict
+        if slot_kind == "producer_outputs" and slot_key is not None:
+            return owner.producer_outputs.get(slot_key)
+        return None
 
     def _restore_dataclass_value(
         self,
@@ -2530,6 +2663,7 @@ class PipelineHandler:
             verbose=verbose,
             module_name=reference.module,
             warn=self.logger.warning,
+            pipeline=self,
         )
         memo[reference_id] = reconstructed
         return reconstructed
@@ -3647,6 +3781,58 @@ class PipelineHandler:
             return candidates[0]
         return None
 
+    def _find_pipeline_dataclass_class(
+        self,
+        class_name: str,
+        module_name: str | None = None,
+    ) -> type | None:
+        """Locate a dataclass class among pipeline-visible runtime values.
+
+        Placeholder recovery re-runs blocks, which can produce dynamically
+        generated classes (for example a factory function returning a new
+        dataclass) that exist only as pipeline values after load. Checks this
+        pipeline's visible state and producer outputs, walking up to ancestor
+        pipelines, for a dataclass class matching ``class_name`` (and
+        ``module_name`` when known).
+        """
+        current: PipelineHandler | None = self
+        while current is not None:
+            for mapping in (current.para_value_dict, current.manual_values):
+                for value in mapping.values():
+                    candidate = PipelineHandler._match_dataclass_class_value(
+                        value,
+                        class_name,
+                        module_name,
+                    )
+                    if candidate is not None:
+                        return candidate
+            for outputs in current.producer_outputs.values():
+                for value in outputs.values():
+                    candidate = PipelineHandler._match_dataclass_class_value(
+                        value,
+                        class_name,
+                        module_name,
+                    )
+                    if candidate is not None:
+                        return candidate
+            current = current.parent_pipeline
+        return None
+
+    @staticmethod
+    def _match_dataclass_class_value(
+        value: Any,
+        class_name: str,
+        module_name: str | None,
+    ) -> type | None:
+        """Return ``value`` when it is a dataclass class matching the criteria."""
+        if not isinstance(value, type) or not is_dataclass(value):
+            return None
+        if value.__name__ != class_name:
+            return None
+        if module_name is not None and getattr(value, "__module__", None) != module_name:
+            return None
+        return value
+
     @staticmethod
     def _reconstruct_dataclass(
         class_name: str | None,
@@ -3655,18 +3841,27 @@ class PipelineHandler:
         verbose: bool,
         module_name: str | None = None,
         warn: Any | None = None,
+        pipeline: Any | None = None,
     ) -> Any:
         """Rebuild a saved pure dataclass from its structured fields.
 
         Returns a real dataclass instance when the class is importable and can be
         constructed from the saved fields; otherwise falls back to a
         ``SimpleNamespace`` (with a verbose-gated warning when ``warn`` is given).
+        When ``pipeline`` is given, classes visible as pipeline runtime values
+        (for example dynamically generated classes produced by a block that was
+        re-run during placeholder recovery) are also considered.
         """
         if class_name is not None:
             candidate_class = PipelineHandler._find_dataclass_class(
                 class_name,
                 module_name=module_name,
             )
+            if candidate_class is None and pipeline is not None:
+                candidate_class = pipeline._find_pipeline_dataclass_class(
+                    class_name,
+                    module_name=module_name,
+                )
             if candidate_class is not None:
                 init_field_names = {
                     field.name for field in fields(candidate_class) if field.init

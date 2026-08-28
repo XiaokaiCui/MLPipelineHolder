@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from types import SimpleNamespace
 import sys
 
@@ -19,6 +19,7 @@ from .models import (
 class _ResolutionContext:
     selection_label: str
     is_missing_main_placeholder: Callable[[object], bool]
+    dataclass_class_resolver: Callable[[str, str | None], type | None] | None
 
 
 def resolve_saved_root_variable(
@@ -26,12 +27,14 @@ def resolve_saved_root_variable(
     name: str,
     *,
     is_missing_main_placeholder: Callable[[object], bool],
+    dataclass_class_resolver: Callable[[str, str | None], type | None] | None = None,
 ) -> object:
     selected_value = _select_root_visible_value(saved_root_payload, name)
     return _resolve_selected_value(
         selected_value,
         selection_label=f"saved pipeline value '{name}'",
         is_missing_main_placeholder=is_missing_main_placeholder,
+        dataclass_class_resolver=dataclass_class_resolver,
     )
 
 
@@ -40,12 +43,14 @@ def resolve_saved_config_field(
     name: str,
     *,
     is_missing_main_placeholder: Callable[[object], bool],
+    dataclass_class_resolver: Callable[[str, str | None], type | None] | None = None,
 ) -> object:
     selected_value = _select_local_config_field(saved_pipeline_payload, name)
     return _resolve_selected_value(
         selected_value,
         selection_label=f"saved config field '{name}'",
         is_missing_main_placeholder=is_missing_main_placeholder,
+        dataclass_class_resolver=dataclass_class_resolver,
     )
 
 
@@ -54,10 +59,12 @@ def _resolve_selected_value(
     *,
     selection_label: str,
     is_missing_main_placeholder: Callable[[object], bool],
+    dataclass_class_resolver: Callable[[str, str | None], type | None] | None = None,
 ) -> object:
     context = _ResolutionContext(
         selection_label=selection_label,
         is_missing_main_placeholder=is_missing_main_placeholder,
+        dataclass_class_resolver=dataclass_class_resolver,
     )
     try:
         return _resolve_selected_graph(selected_value, context, {})
@@ -136,9 +143,7 @@ def _resolve_selected_graph(
                 f"Unsupported runtime placeholder '{reference.type_name}' found inside {context.selection_label}: {reference.reason}"
             )
         case DataclassValueReference() as reference:
-            raise PersistenceError(
-                f"Unsupported dataclass placeholder '{reference.class_name}' found inside {context.selection_label}: {reference.reason}"
-            )
+            return _restore_dataclass_reference(reference, context, memo)
         case dict() if value.get("__pipeline_serialized_config__") is True:
             return _resolve_serialized_config_wrapper(value, context, memo)
         case dict():
@@ -220,6 +225,99 @@ def _restore_callable_value(reference: CallableValueReference, selection_label: 
             f"Importable callable '{reference.import_path}' required for {selection_label} could not be restored"
         ) from exc
     return callable_obj
+
+
+def _restore_dataclass_reference(
+    reference: DataclassValueReference,
+    context: _ResolutionContext,
+    memo: dict[int, object],
+) -> object:
+    """Rebuild a saved dataclass placeholder from its structured fields.
+
+    Mirrors the load-time reconstruction semantics: a real dataclass instance
+    when the class is importable (or resolvable through the optional
+    ``dataclass_class_resolver``, for example a class produced by the live
+    pipeline) and constructible from the saved fields, a ``SimpleNamespace``
+    fallback otherwise. Nested field values are resolved through the graph
+    resolver so callables and serialized config wrappers inside the dataclass
+    are restored as well.
+    """
+    reference_id = id(reference)
+    cached = memo.get(reference_id)
+    if cached is not None:
+        return cached
+    data = {
+        key: _resolve_selected_graph(item, context, memo)
+        for key, item in reference.data.items()
+    }
+    candidate = _find_importable_dataclass_class(
+        reference.class_name,
+        reference.module,
+    )
+    if candidate is None and context.dataclass_class_resolver is not None:
+        candidate = context.dataclass_class_resolver(
+            reference.class_name,
+            reference.module,
+        )
+    if candidate is not None:
+        init_field_names = {field.name for field in fields(candidate) if field.init}
+        try:
+            reconstructed = candidate(
+                **{
+                    key: value
+                    for key, value in data.items()
+                    if key in init_field_names
+                }
+            )
+            memo[reference_id] = reconstructed
+            return reconstructed
+        except TypeError:
+            pass
+    reconstructed = SimpleNamespace(**data)
+    memo[reference_id] = reconstructed
+    return reconstructed
+
+
+def _find_importable_dataclass_class(
+    class_name: str,
+    module_name: str | None,
+) -> type | None:
+    """Locate an importable pure dataclass by name.
+
+    When the saved module is known, the class is looked up there first;
+    otherwise every loaded module's attributes are scanned. ``__main__``
+    definitions (notebook-local classes) are preferred over ambiguous
+    same-name matches.
+    """
+    if module_name is not None:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            candidate = getattr(module, class_name, None)
+            if (
+                isinstance(candidate, type)
+                and is_dataclass(candidate)
+                and candidate.__name__ == class_name
+            ):
+                return candidate
+    candidates: list[type] = []
+    for module in sys.modules.values():
+        candidate = getattr(module, class_name, None)
+        if (
+            isinstance(candidate, type)
+            and is_dataclass(candidate)
+            and candidate.__name__ == class_name
+        ):
+            candidates.append(candidate)
+    main_candidates = [
+        candidate
+        for candidate in candidates
+        if getattr(candidate, "__module__", None) == "__main__"
+    ]
+    if main_candidates:
+        return main_candidates[0]
+    if candidates:
+        return candidates[0]
+    return None
 
 
 def _restore_runtime_callable(

@@ -97,6 +97,7 @@ def recover_variable_from_backup(
         payload,
         name,
         is_missing_main_placeholder=pipeline._contains_missing_main_placeholder,
+        dataclass_class_resolver=pipeline._find_pipeline_dataclass_class,
     )
     snapshot.validate_selected_artifacts(resolved)
     confirmation = confirm_recovery_impact(inventory, pipeline.logger)
@@ -143,6 +144,7 @@ def recover_config_from_backup(pipeline: _PipelineProtocol, name: str) -> None:
         payload,
         name,
         is_missing_main_placeholder=pipeline._contains_missing_main_placeholder,
+        dataclass_class_resolver=pipeline._find_pipeline_dataclass_class,
     )
     snapshot.validate_selected_artifacts(resolved)
     transaction = _artifact_transaction(snapshot, pipeline.project_root)
