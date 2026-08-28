@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import __main__
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 import shutil
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -55,6 +57,18 @@ def recovery_produce_a() -> dict[str, str]:
 
 def recovery_produce_b() -> dict[str, str]:
     return {"from": "B"}
+
+
+def recovery_dynamic_config_class() -> object:
+    @dataclass
+    class DynamicScoreConfig:
+        weight: float = 1.0
+
+    return DynamicScoreConfig
+
+
+def recovery_build_dynamic_config(config_cls: Callable[..., object]) -> object:
+    return config_cls(weight=2.5)
 
 
 class BackupRecoveryTests(unittest.TestCase):
@@ -640,6 +654,53 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertNotIn("child", root.producer_outputs)
             with self.assertRaises(ResolutionError):
                 root.get_value("saved_blob")
+
+    def test_recover_variable_restores_pipeline_produced_dynamic_dataclass(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.add_block("make_class", 1).register_function(
+                recovery_dynamic_config_class, ["dynamic_cls"]
+            )
+            root.add_block("make_config", 2).register_function(
+                recovery_build_dynamic_config,
+                ["dynamic_config"],
+                param_mapping={"config_cls": "dynamic_cls"},
+            )
+            root.run_all()
+            root.save_pipeline()
+            live_class = root.get_value("dynamic_cls")
+            root.producer_outputs["make_config"].pop("dynamic_config", None)
+            root.para_value_dict.pop("dynamic_config", None)
+
+            with patch("builtins.input", return_value=" y "):
+                root.recover_variable_from_backup(name="dynamic_config")
+
+            recovered = root.get_value("dynamic_config")
+            self.assertIs(type(recovered), live_class)
+            self.assertEqual(recovered.weight, 2.5)
+
+    def test_recover_variable_falls_back_to_namespace_when_dynamic_class_gone(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.add_block("make_class", 1).register_function(
+                recovery_dynamic_config_class, ["dynamic_cls"]
+            )
+            root.add_block("make_config", 2).register_function(
+                recovery_build_dynamic_config,
+                ["dynamic_config"],
+                param_mapping={"config_cls": "dynamic_cls"},
+            )
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+            self.assertNotIn("dynamic_config", root.para_value_dict)
+
+            with patch("builtins.input", return_value=" y "):
+                root.recover_variable_from_backup(name="dynamic_config")
+
+            recovered = root.get_value("dynamic_config")
+            self.assertIsInstance(recovered, SimpleNamespace)
+            self.assertEqual(recovered.weight, 2.5)
 
     @staticmethod
     def _saved_root(
