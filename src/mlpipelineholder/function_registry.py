@@ -7,6 +7,7 @@ from dataclasses import fields, is_dataclass
 from functools import partial, wraps
 from typing import Any, get_type_hints
 
+from .code_comparison import code_objects_equal
 from .exceptions import RegistrationError
 
 
@@ -74,9 +75,9 @@ def callable_identity_matches(
     partial inline still no-ops, while a changed binding or a redefined wrapped
     function correctly replaces. Importable module functions are matched by
     import path (both the loaded registration and a freshly resolved callable
-    point at the same module attribute). ``__main__`` and runtime-only callables
-    have no stable path, so they are matched by object identity — a redefined
-    notebook function is therefore correctly treated as different.
+    point at the same module attribute). Redefined ``__main__`` functions are
+    matched by executable definition so rerunning an unchanged notebook cell
+    no-ops, while runtime-only callables still require object identity.
     """
     if isinstance(existing_callable, partial) and isinstance(callable_obj, partial):
         return _partial_identity_matches(existing_callable, callable_obj)
@@ -85,9 +86,22 @@ def callable_identity_matches(
             existing_import_path.startswith("__main__")
             or import_path.startswith("__main__")
         ):
-            return existing_callable is callable_obj
+            return existing_import_path == import_path and (
+                existing_callable is callable_obj
+                or _main_function_definitions_equal(existing_callable, callable_obj)
+            )
         return existing_import_path == import_path
     return existing_callable is callable_obj
+
+
+def _main_function_definitions_equal(existing: Any, new: Any) -> bool:
+    if not inspect.isfunction(existing) or not inspect.isfunction(new):
+        return False
+    return (
+        code_objects_equal(existing.__code__, new.__code__, _values_equal)
+        and _values_equal(existing.__defaults__, new.__defaults__)
+        and _values_equal(existing.__kwdefaults__, new.__kwdefaults__)
+    )
 
 
 def _partial_identity_matches(

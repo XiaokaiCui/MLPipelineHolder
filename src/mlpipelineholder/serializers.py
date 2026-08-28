@@ -4,7 +4,10 @@ import json
 import pickle
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+
+
+_DASK_TARGET_PARTITION_SIZE: Final = "256MiB"
 
 
 def choose_serializer(value: Any) -> str:
@@ -109,14 +112,14 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
     if serializer == "parquet":
         try:
             import dask.dataframe as dd  # type: ignore
-
-            if isinstance(value, dd.DataFrame):
-                if value.npartitions == 1:
-                    value = value.repartition(npartitions=2)
-                value.to_parquet(path)
-                return
-        except Exception:
-            pass
+        except ImportError:
+            dd = None
+        if dd is not None and isinstance(value, dd.DataFrame):
+            value = value.repartition(partition_size=_DASK_TARGET_PARTITION_SIZE)
+            if value.npartitions == 1:
+                value = value.repartition(npartitions=2)
+            value.to_parquet(path)
+            return
         value.to_parquet(path)
         return
     raise ValueError(f"Unsupported serializer: {serializer}")

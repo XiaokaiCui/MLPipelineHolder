@@ -300,6 +300,68 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("model"), 3)
             self.assertEqual(pipeline.get_value("recorder"), [1, 2])
 
+    def test_run_block_materializes_prior_disk_output_before_self_overwrite_invalidation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("disk-rerun", {"source_value": 1}, tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(
+                source_data,
+                ["data"],
+                save_to_disk=["data"],
+                param_mapping={"data": "source_value"},
+            )
+            block = pipeline.add_block("block", 2)
+            block.register_function(increment_data, ["data"], save_to_disk=["data"])
+            pipeline.run_all()
+
+            pipeline.run_block("block")
+
+            self.assertEqual(pipeline.get_value("data"), 3)
+
+    def test_run_block_materializes_prior_disk_expression_output_before_invalidation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("disk-expression-rerun", {"source_value": 1}, tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(
+                source_data,
+                ["data"],
+                save_to_disk=["data"],
+                param_mapping={"data": "source_value"},
+            )
+            block = pipeline.add_block("block", 2)
+            block.register_expression("data = data + 1", save_to_disk=True)
+            pipeline.run_all()
+
+            pipeline.run_block("block")
+
+            self.assertEqual(pipeline.get_value("data"), 3)
+
+    def test_run_block_materializes_prior_disk_atom_output_before_invalidation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("disk-atom-rerun", {"source_value": 1}, tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(
+                source_data,
+                ["data"],
+                save_to_disk=["data"],
+                param_mapping={"data": "source_value"},
+            )
+            pipeline.create_atom_child_pipeline(
+                child_name="atom",
+                execution_priority=2,
+                target_function=increment_data,
+                output_variable_names=["data"],
+                save_to_disk_lst=["data"],
+            )
+            pipeline.run_all()
+
+            pipeline.run_block("atom")
+
+            self.assertEqual(pipeline.get_value("data"), 3)
+
     def test_multiple_params_can_map_to_same_pipeline_value(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

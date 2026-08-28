@@ -96,6 +96,33 @@ def save_dask_dataframe(seed: int):
     return dd.from_pandas(df, npartitions=2)
 
 
+def save_single_partition_dask_dataframe(seed: int):
+    from importlib import import_module
+
+    pd = import_module("pandas")
+    dd = import_module("dask.dataframe")
+    df = pd.DataFrame({"value": [seed, seed + 1, seed + 2]})
+    return dd.from_pandas(df, npartitions=1)
+
+
+def save_many_partition_dask_dataframe(seed: int):
+    from importlib import import_module
+
+    pd = import_module("pandas")
+    dd = import_module("dask.dataframe")
+    df = pd.DataFrame({"value": range(seed, seed + 3_200)})
+    return dd.from_pandas(df, npartitions=32)
+
+
+def save_expandable_dask_dataframe(seed: int):
+    from importlib import import_module
+
+    pd = import_module("pandas")
+    dd = import_module("dask.dataframe")
+    df = pd.DataFrame({"value": range(seed, seed + 10_000)})
+    return dd.from_pandas(df, npartitions=2)
+
+
 def read_text(saved_blob: str) -> str:
     return saved_blob.upper()
 
@@ -984,6 +1011,37 @@ class PipelineHandlerTests(unittest.TestCase):
             console_out = captured_stdout.getvalue()
             self.assertIn("\x1b[", console_out)
             self.assertTrue("╭" in console_out or "│" in console_out)
+
+    def test_nested_atom_failure_logs_one_outer_traceback(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("score_analysis_pipeline", {}, tmp_path)
+            pipeline.create_atom_child_pipeline(
+                "score_produce_median_params",
+                10,
+                needs_missing,
+                output_variable_names="score_median_params",
+                param_mapping={"missing": "score_best_params"},
+            )
+
+            with self.assertRaisesRegex(
+                ResolutionError,
+                "Cannot resolve argument 'score_best_params'",
+            ):
+                pipeline.run_block("score_produce_median_params")
+
+            atom = pipeline.get_child_pipeline("score_produce_median_params")
+            log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
+            self.assertEqual(log_text.count("ERROR Failed run_block:"), 1)
+            self.assertNotIn("ERROR Failed run_child:", log_text)
+            self.assertEqual(
+                log_text.count(
+                    "ResolutionError: Cannot resolve argument 'score_best_params'"
+                ),
+                1,
+            )
+            self.assertEqual(pipeline.run_history[-1].status, "failed")
+            self.assertEqual(atom.run_history[-1].status, "failed")
 
     def test_set_traceback_writing_disables_and_reenables_file_traceback(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2115,6 +2173,82 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded.__class__.__name__, "DataFrame")
             self.assertTrue(Path(artifact.file_path).is_dir())
             self.assertGreaterEqual(getattr(loaded, "npartitions", 0), 2)
+
+    def test_dask_parquet_serializer_keeps_two_file_minimum(self) -> None:
+        try:
+            __import__("dask.dataframe")
+        except ImportError:
+            self.skipTest("dask.dataframe is not available")
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dask-minimum", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("parquet_write", 2)
+            block.register_function(
+                save_single_partition_dask_dataframe,
+                ["dask_df"],
+                save_to_disk=["dask_df"],
+            )
+
+            pipeline.run_all()
+
+            artifact = pipeline.para_value_dict["dask_df"]
+            parquet_files = list(Path(artifact.file_path).glob("*.parquet"))
+            self.assertEqual(len(parquet_files), 2)
+
+    def test_dask_parquet_serializer_coalesces_excessive_tiny_partitions(self) -> None:
+        try:
+            __import__("dask.dataframe")
+        except ImportError:
+            self.skipTest("dask.dataframe is not available")
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dask-coalesce", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("parquet_write", 2)
+            block.register_function(
+                save_many_partition_dask_dataframe,
+                ["dask_df"],
+                save_to_disk=["dask_df"],
+            )
+
+            pipeline.run_all()
+
+            artifact = pipeline.para_value_dict["dask_df"]
+            parquet_files = list(Path(artifact.file_path).glob("*.parquet"))
+            self.assertEqual(len(parquet_files), 2)
+
+    def test_dask_parquet_serializer_expands_large_partitions_automatically(self) -> None:
+        try:
+            __import__("dask.dataframe")
+        except ImportError:
+            self.skipTest("dask.dataframe is not available")
+
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("dask-expand", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("parquet_write", 2)
+            block.register_function(
+                save_expandable_dask_dataframe,
+                ["dask_df"],
+                save_to_disk=["dask_df"],
+            )
+
+            with patch(
+                "src.mlpipelineholder.serializers._DASK_TARGET_PARTITION_SIZE",
+                "1KiB",
+            ):
+                pipeline.run_all()
+
+            artifact = pipeline.para_value_dict["dask_df"]
+            parquet_files = list(Path(artifact.file_path).glob("*.parquet"))
+            self.assertGreater(len(parquet_files), 2)
 
     def test_invalidation_removes_dask_parquet_artifact_directory(self) -> None:
         try:

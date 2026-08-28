@@ -403,6 +403,35 @@ class BackupRecoveryTests(unittest.TestCase):
 
             self.assertEqual(child_b.get_value("shared_value"), {"from": "B"})
 
+    def test_recover_declared_atom_output_with_pipeline_name_targets_atom(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            score = PipelineHandler(
+                "score_analysis_pipeline",
+                {},
+                Path(temp_dir) / "score",
+            )
+            score.create_atom_child_pipeline(
+                "score_optimise_parameters",
+                41.0,
+                recovery_produce,
+                output_variable_names="score_best_params",
+            )
+            root.add_child_pipeline(score, 1)
+            root.run_all()
+            root.save_pipeline()
+            root._invalidate_from_priority(0)
+
+            root.recover_variable_from_backup(
+                pipeline_name="score_analysis_pipeline",
+                name="score_best_params",
+            )
+
+            atom = score.get_child_pipeline("score_optimise_parameters")
+            self.assertEqual(atom.get_value("score_best_params"), {"v": 1})
+            self.assertEqual(score.get_value("score_best_params"), {"v": 1})
+            self.assertEqual(root.get_value("score_best_params"), {"v": 1})
+
     def test_recover_declared_default_injects_first_declaring_pipeline(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root, _, _ = self._saved_root(temp_dir, {})

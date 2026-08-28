@@ -807,46 +807,25 @@ class PipelineHandler:
         return users
 
     def _invalidate_with_ancestor_consumers(self, priority: float) -> None:
-        produced_before = set(self.para_value_dict).difference(self.manual_values)
+        """Brutally invalidate from a consumer through every ancestor tail.
+
+        The target pipeline loses the consumer and every later node. Each
+        ancestor keeps the child node containing that consumer, but loses every
+        node registered after that child, preserving one positional cutoff
+        across nested pipeline boundaries.
+        """
         self._invalidate_from_priority(priority)
-        produced_after = set(self.para_value_dict).difference(self.manual_values)
-        removed_names = produced_before.difference(produced_after)
-        if self.parent_pipeline is None or not removed_names:
-            return
-        self._resync_mirror_to_parent()
-        if self.execution_priority is None:
-            return
-        users: list[tuple[PipelineHandler, Any]] = []
-        for output_name in removed_names:
-            ancestor_child: PipelineHandler = self
-            while ancestor_child.parent_pipeline is not None:
-                parent = ancestor_child.parent_pipeline
-                if ancestor_child.execution_priority is None:
-                    break
-                self._walk_input_users_stopping_at_producer(
-                    parent,
-                    ancestor_child.execution_priority,
-                    output_name,
-                    users,
-                )
-                if parent._has_shielding_producer(
-                    ancestor_child.execution_priority,
-                    output_name,
-                ):
-                    break
-                ancestor_child = parent
-        earliest_by_pipeline: dict[int, tuple[PipelineHandler, float]] = {}
-        for owning_pipeline, node in users:
-            if node.execution_priority is None:
-                continue
-            earliest = earliest_by_pipeline.get(id(owning_pipeline))
-            if earliest is None or node.execution_priority < earliest[1]:
-                earliest_by_pipeline[id(owning_pipeline)] = (
-                    owning_pipeline,
-                    node.execution_priority,
-                )
-        for owning_pipeline, consumer_priority in earliest_by_pipeline.values():
-            owning_pipeline._invalidate_with_ancestor_consumers(consumer_priority)
+        current = self
+        while current.parent_pipeline is not None:
+            parent = current.parent_pipeline
+            current._resync_mirror_to_parent()
+            if current.execution_priority is None:
+                return
+            parent._invalidate_from_priority(
+                current.execution_priority,
+                include_target=False,
+            )
+            current = parent
 
     def _has_shielding_producer(
         self,
@@ -1797,6 +1776,11 @@ class PipelineHandler:
             return self._build_skipped_run_record(f"run_from:{node.registration_name}")
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
+        previous_outputs = self._materialize_previous_node_inputs(
+            node,
+            previous_outputs,
+            overrides,
+        )
         self._invalidate_from_priority(node.execution_priority)
         return self._execute_nodes(
             [
@@ -1824,6 +1808,11 @@ class PipelineHandler:
             return self._build_skipped_run_record(f"run_block:{node.registration_name}")
         snapshot = self._snapshot_runtime_state()
         previous_outputs = snapshot[0].get(node.registration_name, {})
+        previous_outputs = self._materialize_previous_node_inputs(
+            node,
+            previous_outputs,
+            overrides,
+        )
         self._invalidate_from_priority(node.execution_priority)
         return self._execute_nodes(
             [node],
@@ -3963,7 +3952,8 @@ class PipelineHandler:
         except BaseException as exc:
             run_record.status = "failed"
             run_record.error_message = str(exc)
-            self.logger.log_exception(exc, f"Failed {mode} with run_id={run_id}: {exc}")
+            if not mode.startswith("run_child:"):
+                self.logger.log_exception(exc, f"Failed {mode} with run_id={run_id}: {exc}")
             if isinstance(
                 exc,
                 (ExecutionError, ResolutionError, RegistrationError, KeyboardInterrupt, SystemExit),
@@ -4694,6 +4684,23 @@ class PipelineHandler:
         for node in self._sorted_nodes():
             required.update(self._required_input_names(node))
         return required
+
+    def _materialize_previous_node_inputs(
+        self,
+        node: Any,
+        previous_outputs: dict[str, Any],
+        overrides: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        materialized = dict(previous_outputs)
+        required_outputs = self._required_input_names(node).intersection(
+            self._node_declared_outputs(node)
+        )
+        required_outputs.difference_update(overrides or {})
+        for output_name in required_outputs:
+            value = materialized.get(output_name)
+            if isinstance(value, ArtifactRecord):
+                materialized[output_name] = self.artifact_store.load(value)
+        return materialized
 
     def _cleanup_block_memory(self, node_name: str) -> None:
         gc.collect()
