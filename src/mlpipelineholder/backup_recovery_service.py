@@ -71,8 +71,12 @@ def recover_variable_from_backup(
     if not inventory.owners:
         if pipeline_name is not None:
             declaring_node = scope._find_declaring_node(name)
-            if declaring_node is None or _is_pipeline_node(declaring_node):
+            if declaring_node is None:
                 raise ResolutionError(f"Unknown pipeline value: {name}")
+            if _is_pipeline_node(declaring_node):
+                if not getattr(declaring_node, "_is_atom", False):
+                    raise ResolutionError(f"Unknown pipeline value: {name}")
+                declaring = declaring_node
         else:
             if name not in scope.list_declared_outputs():
                 raise ResolutionError(f"Unknown pipeline value: {name}")

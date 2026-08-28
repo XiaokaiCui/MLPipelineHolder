@@ -1399,6 +1399,140 @@ class AtomPipelineEqualityTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("y"), 2)
             self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
 
+    def test_identical_redefined_main_atom_reregistration_is_noop(self) -> None:
+        source = (
+            "def notebook_field_specs(param_definitions, field_info, "
+            "existing_field_specs=None, delimiter='_'):\n"
+            "    return [*param_definitions, *field_info, existing_field_specs, delimiter]\n"
+        )
+        exec(source, __main__.__dict__)
+        try:
+            with TemporaryDirectory() as temp_dir:
+                pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+                pipeline.set_constant_value("definitions", [("weight", 1.0)])
+                pipeline.set_constant_value("field_info", [("score", float)])
+                pipeline.set_constant_value("delimiter", "_")
+                pipeline.create_atom_child_pipeline(
+                    "atom",
+                    1,
+                    getattr(__main__, "notebook_field_specs"),
+                    output_variable_names="field_specs",
+                    param_mapping={
+                        "param_definitions": "definitions",
+                        "field_info": "field_info",
+                        "existing_field_specs": None,
+                        "delimiter": "delimiter",
+                    },
+                )
+                pipeline.add_block("consumer", 2).register_function(
+                    consume_list,
+                    ["field_count"],
+                    param_mapping={"values": "field_specs"},
+                )
+                pipeline.run_all()
+                first_atom = pipeline.get_child_pipeline("atom")
+
+                exec(source, __main__.__dict__)
+                pipeline.create_atom_child_pipeline(
+                    "atom",
+                    1,
+                    getattr(__main__, "notebook_field_specs"),
+                    output_variable_names="field_specs",
+                    param_mapping={
+                        "param_definitions": "definitions",
+                        "field_info": "field_info",
+                        "existing_field_specs": None,
+                        "delimiter": "delimiter",
+                    },
+                )
+
+                self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
+                self.assertEqual(pipeline.get_value("field_count"), 4)
+        finally:
+            if hasattr(__main__, "notebook_field_specs"):
+                delattr(__main__, "notebook_field_specs")
+
+    def test_changed_redefined_main_atom_reregistration_replaces(self) -> None:
+        first_source = "def notebook_increment(value: int) -> int:\n    return value + 1\n"
+        second_source = "def notebook_increment(value: int) -> int:\n    return value + 2\n"
+        exec(first_source, __main__.__dict__)
+        try:
+            with TemporaryDirectory() as temp_dir:
+                pipeline = PipelineHandler("p", {}, Path(temp_dir) / "p")
+                pipeline.set_constant_value("value", 1)
+                pipeline.create_atom_child_pipeline(
+                    "atom",
+                    1,
+                    getattr(__main__, "notebook_increment"),
+                    output_variable_names="x",
+                )
+                pipeline.run_all()
+                first_atom = pipeline.get_child_pipeline("atom")
+
+                exec(second_source, __main__.__dict__)
+                pipeline.create_atom_child_pipeline(
+                    "atom",
+                    1,
+                    getattr(__main__, "notebook_increment"),
+                    output_variable_names="x",
+                )
+
+                self.assertIsNot(pipeline.get_child_pipeline("atom"), first_atom)
+                self.assertNotIn("x", pipeline.para_value_dict)
+        finally:
+            if hasattr(__main__, "notebook_increment"):
+                delattr(__main__, "notebook_increment")
+
+    def test_atom_override_brutal_erasure_crosses_ancestor_only_when_allowed(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("quant_pipeline", {}, tmp / "root")
+            score = PipelineHandler("score_analysis_pipeline", {}, tmp / "score")
+            score.create_atom_child_pipeline(
+                "score_produce_median_params",
+                10,
+                produce,
+                output_variable_names="score_best_params",
+            )
+            score.add_block("score_update_sc_config", 20).register_function(
+                consume,
+                ["score_sc_config"],
+                param_mapping={"x": "score_best_params"},
+            )
+            root.add_child_pipeline(score, 40)
+            root.add_block("produce_output_df", 50).register_function(
+                produce_y,
+                ["output_df"],
+            )
+            root.run_all()
+
+            root.forbid_invalidate_objects()
+            score.create_atom_child_pipeline(
+                "score_produce_median_params",
+                10,
+                produce_y,
+                output_variable_names="score_best_params",
+            )
+
+            self.assertNotIn("score_best_params", root.para_value_dict)
+            self.assertEqual(root.get_value("score_sc_config"), 2)
+            self.assertEqual(root.get_value("output_df"), 9)
+
+            root.allow_invalidate_objects()
+            root.run_all()
+            score.create_atom_child_pipeline(
+                "score_produce_median_params",
+                10,
+                produce,
+                output_variable_names="score_best_params",
+            )
+
+            self.assertNotIn("score_best_params", root.para_value_dict)
+            self.assertNotIn("score_sc_config", root.para_value_dict)
+            self.assertNotIn("output_df", root.para_value_dict)
+
     def test_atom_priority_change_replaces(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
