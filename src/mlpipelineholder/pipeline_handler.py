@@ -108,6 +108,25 @@ class _MissingClassUnpickler(pickle.Unpickler):
             return placeholder
 
 
+class _GateStatusCache:
+    """Memo of per-level gate evaluations for one placeholder-recovery pass.
+
+    Each gate-owning pipeline retains a snapshot of every value its gate can
+    read (incoming parent outputs, config fields, and manual values), so a
+    cached answer is reused only while those inputs remain deeply equal. The
+    cache is short-lived: it is created at the entry point of one recovery
+    pass and discarded when the pass completes.
+    """
+
+    __slots__ = ("_levels",)
+
+    def __init__(self) -> None:
+        self._levels: dict[
+            int,
+            tuple[tuple[tuple[str, Any], ...], tuple[str, str | None]],
+        ] = {}
+
+
 class PipelineHandler:
     def __init__(
         self,
@@ -2222,30 +2241,25 @@ class PipelineHandler:
             with (source / "pipeline_state.pkl").open("rb") as handle:
                 state_bytes = handle.read()
             payload = cls._load_pickle_with_missing_class_fallback(state_bytes)
-            preflight_payload = cls._load_pickle_with_missing_class_fallback(
-                state_bytes
-            )
             cls._validate_loaded_payload_placeholders(payload)
-            with TemporaryDirectory(prefix="mlpipelineholder_load_preflight_") as temp_dir:
-                preflight = cls._from_payload(
-                    preflight_payload,
-                    Path(temp_dir),
-                    verbose=False,
-                    auto_resolve_placeholders=False,
-                )
-                preflight.logger.disable_file_logging()
+            cls._validate_loaded_payload_structure(payload)
+            target, restore_message = cls._restore_working_tree_if_needed(
+                source,
+                forced_deleting=forced_deleting,
+            )
+            pipeline = cls._from_payload(
+                payload,
+                target,
+                verbose=verbose,
+                auto_resolve_placeholders=auto_resolve_placeholders,
+            )
+        except PersistenceError:
+            raise
         except Exception as exc:
+            # A failed build leaves the saved pipeline_state.pkl in the working
+            # tree untouched, so the load can be retried; only log and artifact
+            # files written mid-build remain, and save-time cleanup removes them.
             raise PersistenceError(f"Failed to load pipeline project: {exc}") from exc
-        target, restore_message = cls._restore_working_tree_if_needed(
-            source,
-            forced_deleting=forced_deleting,
-        )
-        pipeline = cls._from_payload(
-            payload,
-            target,
-            verbose=verbose,
-            auto_resolve_placeholders=auto_resolve_placeholders,
-        )
         if restore_message is not None:
             pipeline.logger.info(restore_message)
         pipeline.logger.info(f"Pipeline has been loaded from the project root: {target}")
@@ -2431,6 +2445,196 @@ class PipelineHandler:
             raise PersistenceError(
                 "Failed to load pipeline project because a missing __main__ class was found outside the saved pipeline config"
             )
+
+    @classmethod
+    def _validate_loaded_payload_structure(cls, payload: Any) -> None:
+        """Reject obviously unbuildable payloads before the working tree is touched.
+
+        Full validation happens while ``_from_payload`` rebuilds the tree; this
+        pass only performs cheap, side-effect-free checks (payload shape, node
+        kinds, callable references, expression syntax) so a corrupted save is
+        caught before it could replace a working tree that then fails to load.
+        """
+        if not isinstance(payload, dict):
+            raise PersistenceError("Saved pipeline payload is not a mapping")
+        cls._require_loaded_payload_keys(
+            payload,
+            ("registration_name", "config", "nodes"),
+            owner_label="pipeline",
+        )
+        if not isinstance(payload["nodes"], list):
+            raise PersistenceError("Saved pipeline payload has a non-list 'nodes' entry")
+        for mapping_key in (
+            "manual_values",
+            "producer_outputs",
+            "para_value_dict",
+            "artifact_registry",
+        ):
+            if mapping_key in payload and not isinstance(payload[mapping_key], dict):
+                raise PersistenceError(
+                    f"Saved pipeline payload has a non-mapping '{mapping_key}' entry"
+                )
+        for node_payload in payload["nodes"]:
+            if not isinstance(node_payload, dict):
+                raise PersistenceError("Saved pipeline payload has an invalid node entry")
+            cls._require_loaded_payload_keys(
+                node_payload,
+                ("kind", "registration_name", "execution_priority"),
+                owner_label="node",
+            )
+            kind = node_payload["kind"]
+            if kind == "pipeline":
+                cls._require_loaded_payload_keys(
+                    node_payload,
+                    ("payload",),
+                    owner_label=f"pipeline node '{node_payload['registration_name']}'",
+                )
+                cls._validate_loaded_payload_structure(node_payload["payload"])
+                continue
+            if kind == "block":
+                cls._require_loaded_payload_keys(
+                    node_payload,
+                    ("functions",),
+                    owner_label=f"block '{node_payload['registration_name']}'",
+                )
+                if not isinstance(node_payload["functions"], list):
+                    raise PersistenceError(
+                        f"Saved block '{node_payload['registration_name']}' has a non-list 'functions' entry"
+                    )
+                for args_payload in node_payload.get("registered_args", []):
+                    if not isinstance(args_payload, dict):
+                        raise PersistenceError("Saved pipeline payload has an invalid args entry")
+                    cls._require_loaded_payload_keys(
+                        args_payload,
+                        ("name", "ordered_items"),
+                        owner_label=f"args registration in block '{node_payload['registration_name']}'",
+                    )
+                for kwargs_payload in node_payload.get("registered_kwargs", []):
+                    if not isinstance(kwargs_payload, dict):
+                        raise PersistenceError("Saved pipeline payload has an invalid kwargs entry")
+                    cls._require_loaded_payload_keys(
+                        kwargs_payload,
+                        ("name", "mapping_dct"),
+                        owner_label=f"kwargs registration in block '{node_payload['registration_name']}'",
+                    )
+                for function_payload in node_payload["functions"]:
+                    cls._validate_function_payload_structure(
+                        function_payload,
+                        owner_label=f"block '{node_payload['registration_name']}'",
+                    )
+                continue
+            raise PersistenceError(
+                f"Saved pipeline payload has an unknown node kind: {kind!r}"
+            )
+        gate_payload = payload.get("gate")
+        if gate_payload is None:
+            return
+        if not isinstance(gate_payload, dict):
+            raise PersistenceError("Saved pipeline payload has an invalid gate entry")
+        cls._require_loaded_payload_keys(
+            gate_payload,
+            ("kind",),
+            owner_label="gate",
+        )
+        gate_kind = gate_payload["kind"]
+        if gate_kind == "callable":
+            cls._require_loaded_payload_keys(
+                gate_payload,
+                ("import_path",),
+                owner_label="callable gate",
+            )
+            cls._validate_import_path_payload(gate_payload["import_path"])
+        elif gate_kind == "config_field":
+            cls._require_loaded_payload_keys(
+                gate_payload,
+                ("field_name",),
+                owner_label="config-field gate",
+            )
+        else:
+            raise PersistenceError(
+                f"Saved pipeline payload has an unknown gate kind: {gate_kind!r}"
+            )
+
+    @staticmethod
+    def _require_loaded_payload_keys(
+        payload: dict[str, Any],
+        required_keys: tuple[str, ...],
+        *,
+        owner_label: str,
+    ) -> None:
+        for required_key in required_keys:
+            if required_key not in payload:
+                raise PersistenceError(
+                    f"Saved {owner_label} payload is missing required key '{required_key}'"
+                )
+
+    @classmethod
+    def _validate_function_payload_structure(
+        cls,
+        function_payload: Any,
+        *,
+        owner_label: str,
+    ) -> None:
+        if not isinstance(function_payload, dict):
+            raise PersistenceError("Saved pipeline payload has an invalid function entry")
+        cls._require_loaded_payload_keys(
+            function_payload,
+            ("kind", "output_names", "save_to_disk"),
+            owner_label=f"function in {owner_label}",
+        )
+        function_kind = function_payload["kind"]
+        if function_kind == "expression":
+            cls._require_loaded_payload_keys(
+                function_payload,
+                ("code",),
+                owner_label=f"expression in {owner_label}",
+            )
+            code = function_payload["code"]
+            if not isinstance(code, str) or not code.strip():
+                raise PersistenceError("Saved pipeline payload has an empty expression")
+            try:
+                compile(code, "<pipeline_expression>", "exec")
+            except SyntaxError as exc:
+                raise PersistenceError(
+                    f"Saved pipeline payload has invalid expression code: {exc}"
+                ) from exc
+            return
+        if function_kind != "function":
+            raise PersistenceError(
+                f"Saved function in {owner_label} has an unknown kind: {function_kind!r}"
+            )
+        import_path = function_payload.get("import_path")
+        partial_payload = function_payload.get("partial")
+        runtime_reference = function_payload.get("runtime_callable_reference")
+        if import_path is not None:
+            cls._validate_import_path_payload(import_path)
+        elif partial_payload is not None:
+            if not isinstance(partial_payload, dict):
+                raise PersistenceError(
+                    "Saved pipeline payload has an invalid partial callable entry"
+                )
+            cls._restore_partial_callable(partial_payload, owner_label)
+        elif runtime_reference is not None:
+            if not isinstance(runtime_reference, RuntimeCallableReference):
+                raise PersistenceError(
+                    "Saved pipeline payload has an invalid runtime callable reference"
+                )
+            cls._restore_runtime_registered_callable(runtime_reference, owner_label)
+        else:
+            raise PersistenceError("Saved pipeline function has no callable reference")
+
+    @classmethod
+    def _validate_import_path_payload(cls, import_path: Any) -> None:
+        if not isinstance(import_path, str):
+            raise PersistenceError(
+                f"Saved pipeline payload has an invalid callable import path: {import_path!r}"
+            )
+        try:
+            resolve_callable(import_path)
+        except Exception as exc:
+            raise PersistenceError(
+                f"Saved pipeline callable '{import_path}' could not be imported: {exc}"
+            ) from exc
 
     @classmethod
     def _contains_missing_placeholder_outside_config(
@@ -2999,7 +3203,12 @@ class PipelineHandler:
             if isinstance(node, PipelineHandler)
         )
 
-    def _auto_resolve_placeholder_outputs(self, *, verbose: bool) -> None:
+    def _auto_resolve_placeholder_outputs(
+        self,
+        *,
+        verbose: bool,
+        _gate_cache: _GateStatusCache | None = None,
+    ) -> None:
         """Recover produced values saved as placeholders by re-running their blocks.
 
         Walks nodes in upstream-to-downstream order and runs at most one block per
@@ -3008,7 +3217,9 @@ class PipelineHandler:
         failures emit warnings (unconditional for execution exceptions,
         verbose-gated otherwise).
         """
-        status, gate_error = self._pipeline_gate_status()
+        if _gate_cache is None:
+            _gate_cache = _GateStatusCache()
+        status, gate_error = self._pipeline_gate_status(_gate_cache=_gate_cache)
         if status == "block":
             return
         if status == "error":
@@ -3020,7 +3231,10 @@ class PipelineHandler:
             return
         for node in self._sorted_nodes():
             if isinstance(node, PipelineHandler):
-                node._auto_resolve_placeholder_outputs(verbose=verbose)
+                node._auto_resolve_placeholder_outputs(
+                    verbose=verbose,
+                    _gate_cache=_gate_cache,
+                )
                 continue
             node_outputs = self.producer_outputs.get(node.registration_name, {})
             placeholder_names = [
@@ -3034,6 +3248,7 @@ class PipelineHandler:
                 node,
                 placeholder_names,
                 verbose=verbose,
+                _gate_cache=_gate_cache,
             )
         for value_name, value in self.para_value_dict.items():
             if (
@@ -3053,6 +3268,7 @@ class PipelineHandler:
         *,
         verbose: bool,
         _seen: set[str] | None = None,
+        _gate_cache: _GateStatusCache | None = None,
     ) -> None:
         """Verbose-gated load warning for produced values saved as placeholders.
 
@@ -3063,8 +3279,10 @@ class PipelineHandler:
         """
         if not verbose:
             return
+        if _gate_cache is None:
+            _gate_cache = _GateStatusCache()
         seen = set() if _seen is None else _seen
-        status, gate_error = self._pipeline_gate_status()
+        status, gate_error = self._pipeline_gate_status(_gate_cache=_gate_cache)
         if status == "block":
             return
         if status == "error":
@@ -3078,6 +3296,7 @@ class PipelineHandler:
                 node._warn_unresolved_placeholders_at_load(
                     verbose=verbose,
                     _seen=seen,
+                    _gate_cache=_gate_cache,
                 )
                 continue
             for output_name, value in self.producer_outputs.get(
@@ -3110,12 +3329,14 @@ class PipelineHandler:
         placeholder_names: list[str],
         *,
         verbose: bool,
+        _gate_cache: _GateStatusCache | None = None,
     ) -> None:
-        upstream_outputs = self._recovery_upstream_outputs()
+        upstream_outputs = self._recovery_upstream_outputs(_gate_cache=_gate_cache)
         parent_config = self._ancestor_config_values()
         visible_outputs = self._recovery_visible_outputs_before_priority(
             node.execution_priority,
             upstream_outputs=upstream_outputs,
+            _gate_cache=_gate_cache,
         )
         for registration in node.functions:
             defaults = (
@@ -3139,7 +3360,8 @@ class PipelineHandler:
                     return
                 if status == "unresolvable":
                     gate_off_reason = self._unresolvable_input_gate_off_reason(
-                        input_name
+                        input_name,
+                        _gate_cache=_gate_cache,
                     )
                     self._warn_placeholder_unrecoverable(
                         placeholder_names,
@@ -3244,7 +3466,12 @@ class PipelineHandler:
             return "placeholder"
         return "ok"
 
-    def _unresolvable_input_gate_off_reason(self, input_name: str) -> str:
+    def _unresolvable_input_gate_off_reason(
+        self,
+        input_name: str,
+        *,
+        _gate_cache: _GateStatusCache | None = None,
+    ) -> str:
         """Describe when an unresolvable input is only produced by gate-off blocks."""
         declaring_blocks = self._tree_declaring_blocks(input_name)
         if not declaring_blocks:
@@ -3252,7 +3479,7 @@ class PipelineHandler:
         gated_labels = [
             f"'{node.registration_name}'"
             for pipeline, node in declaring_blocks
-            if pipeline._pipeline_effectively_gated()
+            if pipeline._pipeline_effectively_gated(_gate_cache=_gate_cache)
         ]
         if len(gated_labels) == len(declaring_blocks):
             return (
@@ -3286,69 +3513,165 @@ class PipelineHandler:
                 return node
         return None
 
-    def _pipeline_gate_status(self) -> tuple[str, str | None]:
+    def _pipeline_gate_status(
+        self,
+        *,
+        _gate_cache: _GateStatusCache | None = None,
+    ) -> tuple[str, str | None]:
         """Classify this pipeline's gate chain as ``("pass" | "block" | "error", message)``.
 
         A successfully evaluated false gate blocks; a config-field gate whose
         value is ``None`` is treated as no blocking; any exception while
         evaluating a gate yields ``"error"`` with the exception text.
+
+        When ``_gate_cache`` is given, each level's gate result is memoized on
+        the level pipeline's identity plus a digest of the inputs its gate
+        reads, so a gate runs at most once per unchanged input state during
+        one recovery pass.
         """
         current: PipelineHandler | None = self
         while current is not None:
             gate = current.gate_block
             if gate is not None:
-                if gate.config_field_name is not None:
-                    try:
-                        value = current._resolve_named_input(
-                            gate.config_field_name,
-                            gate.registration.function_name,
-                            {},
-                            current._incoming_parent_outputs(),
-                            current._ancestor_config_values(),
-                            {},
-                            [],
-                            set(current._incoming_parent_outputs()).union(
-                                current.list_declared_outputs()
-                            ),
-                        )
-                    except Exception as exc:
-                        return "error", f"{type(exc).__name__}: {exc}"
-                    if value is None:
-                        current = current.parent_pipeline
-                        continue
-                    if value != gate.expected_value:
-                        return "block", None
-                else:
-                    try:
-                        gate_passes = gate.evaluate(
-                            {},
-                            current._incoming_parent_outputs(),
-                            current._ancestor_config_values(),
-                        )
-                    except Exception as exc:
-                        return "error", f"{type(exc).__name__}: {exc}"
-                    if not gate_passes:
-                        return "block", None
+                status, message = self._gate_level_status(
+                    current,
+                    gate,
+                    _gate_cache=_gate_cache,
+                )
+                if status in ("block", "error"):
+                    return status, message
             current = current.parent_pipeline
         return "pass", None
 
-    def _pipeline_effectively_gated(self) -> bool:
+    def _gate_level_status(
+        self,
+        pipeline: "PipelineHandler",
+        gate: GateBlock,
+        *,
+        _gate_cache: _GateStatusCache | None,
+    ) -> tuple[str, str | None]:
+        """Evaluate (or reuse from the cache) one pipeline level's own gate."""
+        if _gate_cache is None:
+            return self._evaluate_gate_level(pipeline, gate)
+        input_snapshot = pipeline._gate_level_input_digest()
+        if input_snapshot is None:
+            return self._evaluate_gate_level(pipeline, gate)
+        cache_key = id(pipeline)
+        cached = _gate_cache._levels.get(cache_key)
+        if cached is not None and _values_equal(cached[0], input_snapshot):
+            return cached[1]
+        result = self._evaluate_gate_level(pipeline, gate)
+        _gate_cache._levels[cache_key] = (input_snapshot, result)
+        return result
+
+    def _evaluate_gate_level(
+        self,
+        pipeline: "PipelineHandler",
+        gate: GateBlock,
+    ) -> tuple[str, str | None]:
+        if gate.config_field_name is not None:
+            try:
+                value = pipeline._resolve_named_input(
+                    gate.config_field_name,
+                    gate.registration.function_name,
+                    {},
+                    pipeline._incoming_parent_outputs(),
+                    pipeline._ancestor_config_values(),
+                    {},
+                    [],
+                    set(pipeline._incoming_parent_outputs()).union(
+                        pipeline.list_declared_outputs()
+                    ),
+                )
+            except Exception as exc:
+                return "error", f"{type(exc).__name__}: {exc}"
+            if value is None or value == gate.expected_value:
+                return "pass", None
+            return "block", None
+        try:
+            gate_passes = gate.evaluate(
+                {},
+                pipeline._incoming_parent_outputs(),
+                pipeline._ancestor_config_values(),
+            )
+        except Exception as exc:
+            return "error", f"{type(exc).__name__}: {exc}"
+        if gate_passes:
+            return "pass", None
+        return "block", None
+
+    def _gate_level_input_digest(self) -> tuple[tuple[str, Any], ...] | None:
+        """Snapshot every state this pipeline's own gate can read.
+
+        Captures the incoming parent outputs, own and ancestor config fields,
+        and own and ancestor manual values. Mutable values are copied so an
+        in-place change invalidates the cached gate result. If a value cannot
+        be copied safely, caching is disabled for that gate level.
+        """
+        entries: list[tuple[str, Any]] = []
+
+        def append_snapshot(name: str, value: Any) -> bool:
+            if not self._is_mutable_value(value):
+                entries.append((name, value))
+                return True
+            try:
+                snapshot = self._copy_value(value)
+            except Exception:
+                return False
+            entries.append((name, snapshot))
+            return True
+
+        for name, value in self._incoming_parent_outputs().items():
+            if not append_snapshot(name, value):
+                return None
+        for name, value in self._config_name_mapping(self.config).items():
+            if not append_snapshot(f"config:{name}", value):
+                return None
+        ancestor = self.parent_pipeline
+        while ancestor is not None:
+            for name, value in self._config_name_mapping(ancestor.config).items():
+                if not append_snapshot(
+                    f"ancestor_config:{ancestor.registration_name}:{name}",
+                    value,
+                ):
+                    return None
+            ancestor = ancestor.parent_pipeline
+        for name, value in self.manual_values.items():
+            if not append_snapshot(f"manual:{name}", value):
+                return None
+        for name, value in self._ancestor_manual_values().items():
+            if not append_snapshot(f"ancestor_manual:{name}", value):
+                return None
+        return tuple(sorted(entries, key=lambda item: item[0]))
+
+    def _pipeline_effectively_gated(
+        self,
+        *,
+        _gate_cache: _GateStatusCache | None = None,
+    ) -> bool:
         """True when this pipeline or any ancestor gate blocks or fails to evaluate."""
-        status, _ = self._pipeline_gate_status()
+        status, _ = self._pipeline_gate_status(_gate_cache=_gate_cache)
         return status in ("block", "error")
 
-    def _recovery_upstream_outputs(self) -> dict[str, Any]:
+    def _recovery_upstream_outputs(
+        self,
+        *,
+        _gate_cache: _GateStatusCache | None = None,
+    ) -> dict[str, Any]:
         """Parent outputs visible to this pipeline, excluding gate-off producers."""
         if self.parent_pipeline is None or self.execution_priority is None:
             return {}
         return self.parent_pipeline._recovery_visible_outputs_before_priority(
-            self.execution_priority
+            self.execution_priority,
+            _gate_cache=_gate_cache,
         )
 
     def _recovery_visible_outputs_before_priority(
         self,
         priority: float | None,
         upstream_outputs: dict[str, Any] | None = None,
+        *,
+        _gate_cache: _GateStatusCache | None = None,
     ) -> dict[str, Any]:
         """Visible outputs for placeholder recovery, ignoring gate-off producers.
 
@@ -3359,7 +3682,7 @@ class PipelineHandler:
         visible = dict(
             upstream_outputs
             if upstream_outputs is not None
-            else self._recovery_upstream_outputs()
+            else self._recovery_upstream_outputs(_gate_cache=_gate_cache)
         )
         visible.update(self.manual_values)
         if priority is None:
@@ -3368,7 +3691,7 @@ class PipelineHandler:
             if node.execution_priority >= priority:
                 break
             if isinstance(node, PipelineHandler):
-                if node._pipeline_effectively_gated():
+                if node._pipeline_effectively_gated(_gate_cache=_gate_cache):
                     continue
                 visible.update(node.para_value_dict)
             else:
@@ -4972,14 +5295,18 @@ class PipelineHandler:
         return node.declared_outputs()
 
     def _rebuild_visible_state(self, upstream_outputs: dict[str, Any] | None = None) -> None:
-        all_artifacts: list[ArtifactRecord] = []
+        """Rebuild this pipeline's visible value mirrors in memory only.
+
+        Artifact files are never deleted here: deletion happens exclusively at
+        the explicit invalidation points (``_erase_node_outputs``,
+        ``_invalidate_from_priority``, ``_invalidate_all_outputs``, gate-skip
+        cleanup) via ``_delete_artifacts_from_outputs``, and stale generations
+        are removed by save-time cleanup. Keeping this rebuild side-effect-free
+        lets the run loop call it after every node without rescanning the tree.
+        """
         visible = dict(upstream_outputs or {})
         for node in self._sorted_nodes():
-            produced_outputs = self.producer_outputs.get(node.registration_name, {})
-            for value in produced_outputs.values():
-                if isinstance(value, ArtifactRecord):
-                    all_artifacts.append(value)
-            visible.update(produced_outputs)
+            visible.update(self.producer_outputs.get(node.registration_name, {}))
         visible.update(self.manual_values)
         declared_outputs = self.list_declared_outputs()
         self.para_value_dict = {
@@ -4993,11 +5320,6 @@ class PipelineHandler:
             for output_name, value in self.para_value_dict.items()
             if isinstance(value, ArtifactRecord)
         }
-        active_artifact_paths = self._collect_referenced_artifact_paths()
-        for artifact in all_artifacts:
-            if artifact.file_path in active_artifact_paths:
-                continue
-            self.artifact_store.delete(artifact)
 
     def _visible_outputs_before_priority(
         self,
