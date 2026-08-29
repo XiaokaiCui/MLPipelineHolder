@@ -74,6 +74,14 @@ class ExecutionBlock:
         forced: bool,
         warn_on_input_mutation: bool,
     ) -> ExpressionRegistration:
+        if any(
+            isinstance(registration, FunctionRegistration)
+            for registration in self.functions
+        ):
+            raise RegistrationError(
+                f"Block '{self.registration_name}' already contains registered functions; "
+                "functions and expressions cannot be mixed in one block"
+            )
         code = self._normalize_expression_code(code)
         expression = self._parse_expression(code)
         inferred_output, input_names, printing_only = self._analyze_expression(
@@ -447,6 +455,14 @@ class ExecutionBlock:
         commit: bool = True,
     ) -> FunctionRegistration:
         del forced
+        if any(
+            isinstance(registration, ExpressionRegistration)
+            for registration in self.functions
+        ):
+            raise RegistrationError(
+                f"Block '{self.registration_name}' already contains an expression; "
+                "functions and expressions cannot be mixed in one block"
+            )
         if output_variable_names is None:
             output_names: list[str] = []
         elif isinstance(output_variable_names, str):

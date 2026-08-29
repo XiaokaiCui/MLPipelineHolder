@@ -8,6 +8,7 @@ import inspect
 import os
 import pickle
 import platform
+import re
 import shutil
 import sys
 import warnings
@@ -72,6 +73,13 @@ _SAVE_WARNING_PATTERNS = (
 _IMMUTABLE_TYPES = (int, float, complex, bool, str, bytes, type(None))
 _ACTIVE_PACKAGE_ROOT = __name__.rsplit(".", maxsplit=1)[0]
 _PERSISTED_PACKAGE_ROOTS = ("mlpipelineholder", "src.mlpipelineholder")
+
+_CLEANUP_MODES = ("none", "confirm", "auto")
+_SAVED_GENERATION_RE = re.compile(
+    r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
+)
+_MANAGED_CHILD_DIR_NAMES = ("artifacts", "children", "metadata", "history_logs")
+_MANAGED_CHILD_FILE_NAMES = ("pipeline_state.pkl", "config.pkl", "pipeline_meta.pkl")
 
 
 class _MissingClassUnpickler(pickle.Unpickler):
@@ -1032,6 +1040,73 @@ class PipelineHandler:
                 value = self._descendant_visible_value(variable_name)
                 if value is None:
                     raise ResolutionError(f"Unknown pipeline value: {variable_name}")
+        return self._materialize_stored_value(
+            value,
+            f"Cannot get value '{variable_name}': it was saved as a placeholder "
+            f"({value.reason}) and cannot be restored; recreate or reset the value"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
+
+    def get_node_output(self, node_name: str, output_name: str) -> Any:
+        """Return one materialized output produced by an immediate block or atom."""
+        node = self.nodes_by_name.get(node_name)
+        if node is None:
+            raise ResolutionError(
+                f"Unknown immediate child node '{node_name}' in pipeline '{self.registration_name}'"
+            )
+        if isinstance(node, PipelineHandler):
+            if not node._is_atom:
+                raise ResolutionError(
+                    f"Node '{node_name}' is not a block or atom pipeline"
+                )
+            values_by_priority: dict[float, Any] = {}
+            for internal_node in node._sorted_nodes():
+                outputs = node.producer_outputs.get(
+                    internal_node.registration_name,
+                    {},
+                )
+                if output_name not in outputs:
+                    continue
+                priority = internal_node.execution_priority
+                if priority is None:
+                    raise ResolutionError(
+                        f"Node '{internal_node.registration_name}' has no execution priority"
+                    )
+                value = outputs[output_name]
+                values_by_priority[priority] = node._materialize_stored_value(
+                    value,
+                    f"Cannot get node output '{node_name}.{output_name}': it was saved "
+                    f"as a placeholder ({value.reason}) and cannot be restored"
+                    if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+                    else "",
+                )
+            if not values_by_priority:
+                raise ResolutionError(
+                    f"Node '{node_name}' has no produced output named '{output_name}'"
+                )
+            if len(values_by_priority) == 1:
+                return next(iter(values_by_priority.values()))
+            return values_by_priority
+        outputs = self.producer_outputs.get(node_name, {})
+        if output_name not in outputs:
+            raise ResolutionError(
+                f"Node '{node_name}' has no produced output named '{output_name}'"
+            )
+        value = outputs[output_name]
+        return self._materialize_stored_value(
+            value,
+            f"Cannot get node output '{node_name}.{output_name}': it was saved as a "
+            f"placeholder ({value.reason}) and cannot be restored"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
+
+    def _materialize_stored_value(
+        self,
+        value: Any,
+        placeholder_error: str,
+    ) -> Any:
         if isinstance(value, TorchStateArtifactRecord):
             return value
         if isinstance(value, CallableValueReference):
@@ -1039,10 +1114,7 @@ class PipelineHandler:
         if isinstance(value, ArtifactRecord):
             return self.artifact_store.load(value)
         if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
-            raise ResolutionError(
-                f"Cannot get value '{variable_name}': it was saved as a placeholder "
-                f"({value.reason}) and cannot be restored; recreate or reset the value"
-            )
+            raise ResolutionError(placeholder_error)
         return value
 
     def get_constant_value(self, variable_name: str) -> Any:
@@ -1051,18 +1123,13 @@ class PipelineHandler:
         if variable_name not in visible:
             raise ResolutionError(f"Unknown pipeline constant: {variable_name}")
         value = visible[variable_name]
-        if isinstance(value, TorchStateArtifactRecord):
-            return value
-        if isinstance(value, CallableValueReference):
-            return self._restore_callable_value(value)
-        if isinstance(value, ArtifactRecord):
-            return self.artifact_store.load(value)
-        if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
-            raise ResolutionError(
-                f"Cannot get constant '{variable_name}': it was saved as a placeholder "
-                f"({value.reason}) and cannot be restored; reset it with set_constant_value"
-            )
-        return value
+        return self._materialize_stored_value(
+            value,
+            f"Cannot get constant '{variable_name}': it was saved as a placeholder "
+            f"({value.reason}) and cannot be restored; reset it with set_constant_value"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
 
     @staticmethod
     def _is_mutable_value(value: Any) -> bool:
@@ -1849,7 +1916,12 @@ class PipelineHandler:
         save_log_to_file: str | Path | None = None,
         *,
         verbose: bool = False,
+        cleanup: str = "auto",
     ) -> Path:
+        if cleanup not in _CLEANUP_MODES:
+            raise ValueError(
+                f"Invalid cleanup mode {cleanup!r}: expected 'none', 'confirm', or 'auto'"
+            )
         with warnings.catch_warnings():
             if not verbose:
                 for pattern in _SAVE_WARNING_PATTERNS:
@@ -1858,12 +1930,13 @@ class PipelineHandler:
                 "Saved pipelines preserve callable references, not historical function behavior; later source changes may affect reloaded pipelines.",
                 stacklevel=2,
             )
-            return self._save_pipeline_impl(path, save_log_to_file)
+            return self._save_pipeline_impl(path, save_log_to_file, cleanup)
 
     def _save_pipeline_impl(
         self,
         path: str | Path | None,
         save_log_to_file: str | Path | None,
+        cleanup_mode: str,
     ) -> Path:
         target = self.project_root if path is None else Path(path)
         if self._temporary_root_handle is not None and self._normalized_path(target) != self._normalized_path(self.project_root):
@@ -1881,6 +1954,14 @@ class PipelineHandler:
         self._atomic_pickle_dump(self._serialize_config_for_save(self.config), target / "config.pkl")
         self._write_pipeline_metadata(target)
         self.logger.info(f"Pipeline has been saved to project root: {target}")
+        if self._normalized_path(target) == self._normalized_path(self.project_root):
+            try:
+                self._cleanup_obsolete_saved_objects(payload, target, cleanup_mode)
+            except OSError as exc:
+                self.logger.warning(
+                    f"Skipped cleanup because saved paths could not be inspected: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         if save_log_to_file is not None:
             self.logger.flush()
             log_target = Path(save_log_to_file)
@@ -1900,6 +1981,205 @@ class PipelineHandler:
             if backup_root is not None:
                 self._sync_history_logs_to_backup(backup_root)
         return target
+
+    def _cleanup_obsolete_saved_objects(
+        self,
+        payload: dict[str, Any],
+        target_root: Path,
+        cleanup_mode: str,
+    ) -> None:
+        """Delete obsolete saved artifacts and orphaned child pipelines.
+
+        The committed payload is the only liveness authority: every artifact
+        path it references is kept, and every other framework-shaped
+        generation entry under ``artifacts/`` plus every child pipeline
+        directory absent from the serialized topology (with a fully
+        framework-managed subtree) is deleted. ``none`` keeps everything,
+        ``confirm`` asks first, and ``auto`` deletes without prompting.
+        """
+        if cleanup_mode == "none":
+            return
+        live_paths = PipelineHandler._referenced_payload_artifact_paths(payload)
+        obsolete_children: list[Path] = []
+        PipelineHandler._collect_obsolete_child_dirs(
+            payload,
+            target_root,
+            live_paths,
+            obsolete_children,
+        )
+        obsolete: list[Path] = []
+        PipelineHandler._collect_obsolete_artifact_entries(
+            payload,
+            target_root,
+            live_paths,
+            obsolete,
+        )
+        obsolete.extend(obsolete_children)
+        if not obsolete:
+            return
+        if cleanup_mode == "confirm":
+            try:
+                answer = input(
+                    f"Delete {len(obsolete)} obsolete saved pipeline object(s)? [y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                self.logger.info(
+                    f"Skipped cleanup: {len(obsolete)} obsolete saved object(s) retained"
+                )
+                return
+        deleted = 0
+        for path in sorted(obsolete, key=lambda item: len(item.parts), reverse=True):
+            try:
+                if PipelineHandler._delete_saved_path(path, target_root):
+                    deleted += 1
+            except OSError as exc:
+                self.logger.warning(
+                    f"Could not delete obsolete saved path '{path}': "
+                    f"{type(exc).__name__}: {exc}"
+                )
+        if deleted:
+            self.logger.info(f"Deleted {deleted} obsolete saved pipeline object(s)")
+
+    @staticmethod
+    def _referenced_payload_artifact_paths(payload: Any) -> set[Path]:
+        """Return resolved absolute paths of every artifact the payload references."""
+        paths: set[Path] = set()
+        seen: set[int] = set()
+
+        def walk(value: Any) -> None:
+            if isinstance(value, (ArtifactRecord, TorchStateArtifactRecord)):
+                paths.add(Path(value.file_path).resolve())
+                return
+            if isinstance(value, dict):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
+                for key, item in value.items():
+                    walk(key)
+                    walk(item)
+            elif isinstance(value, (list, tuple, set, frozenset)):
+                if id(value) in seen:
+                    return
+                seen.add(id(value))
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return paths
+
+    @staticmethod
+    def _collect_obsolete_artifact_entries(
+        payload: dict[str, Any],
+        target_root: Path,
+        live_paths: set[Path],
+        obsolete: list[Path],
+    ) -> None:
+        """Append unreferenced framework artifact generations to ``obsolete``."""
+        artifacts_dir = target_root / "artifacts"
+        if not artifacts_dir.is_symlink() and artifacts_dir.is_dir():
+            for block_dir in artifacts_dir.iterdir():
+                if block_dir.is_symlink() or not block_dir.is_dir():
+                    continue
+                for entry in block_dir.iterdir():
+                    if entry.is_symlink():
+                        continue
+                    if _SAVED_GENERATION_RE.fullmatch(entry.name) is None:
+                        continue
+                    if entry.resolve() in live_paths:
+                        continue
+                    obsolete.append(entry)
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("kind") != "pipeline":
+                continue
+            name = node.get("registration_name")
+            child_payload = node.get("payload")
+            if not isinstance(name, str) or not isinstance(child_payload, dict):
+                continue
+            PipelineHandler._collect_obsolete_artifact_entries(
+                child_payload,
+                target_root / "children" / name,
+                live_paths,
+                obsolete,
+            )
+
+    @staticmethod
+    def _collect_obsolete_child_dirs(
+        payload: dict[str, Any],
+        pipeline_root: Path,
+        live_paths: set[Path],
+        obsolete_children: list[Path],
+    ) -> None:
+        """Classify orphaned child pipeline dirs as obsolete or protected."""
+        nodes = payload.get("nodes")
+        if not isinstance(nodes, list):
+            return
+        active_names = {
+            node["registration_name"]
+            for node in nodes
+            if isinstance(node, dict)
+            and node.get("kind") == "pipeline"
+            and isinstance(node.get("registration_name"), str)
+        }
+        children_dir = pipeline_root / "children"
+        if children_dir.is_dir():
+            for child in children_dir.iterdir():
+                if child.is_symlink() or not child.is_dir():
+                    continue
+                if child.name in active_names:
+                    continue
+                child_root = child.resolve()
+                if any(
+                    live_path == child_root or live_path.is_relative_to(child_root)
+                    for live_path in live_paths
+                ):
+                    continue
+                if PipelineHandler._is_fully_managed_child_tree(child):
+                    obsolete_children.append(child)
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("kind") != "pipeline":
+                continue
+            name = node.get("registration_name")
+            child_payload = node.get("payload")
+            if not isinstance(name, str) or not isinstance(child_payload, dict):
+                continue
+            PipelineHandler._collect_obsolete_child_dirs(
+                child_payload,
+                pipeline_root / "children" / name,
+                live_paths,
+                obsolete_children,
+            )
+
+    @staticmethod
+    def _is_fully_managed_child_tree(root: Path) -> bool:
+        """True when a child directory holds only framework-managed entries."""
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                return False
+            parts = path.relative_to(root).parts
+            if parts[0] in _MANAGED_CHILD_DIR_NAMES:
+                continue
+            if len(parts) == 1 and path.is_file() and parts[0] in _MANAGED_CHILD_FILE_NAMES:
+                continue
+            return False
+        return True
+
+    @staticmethod
+    def _delete_saved_path(path: Path, target_root: Path) -> bool:
+        """Safely delete one obsolete path inside the project root."""
+        if path.is_symlink() or not path.exists():
+            return False
+        if not path.resolve().is_relative_to(target_root.resolve()):
+            return False
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        return True
 
     def save_project(
         self,
@@ -5271,6 +5551,8 @@ class PipelineHandler:
         collect_from_mapping(self.para_value_dict)
         collect_from_mapping(self.artifact_registry)
         collect_from_mapping(self.manual_values)
+        for outputs in self.producer_outputs.values():
+            collect_from_mapping(outputs)
         for node in self._sorted_nodes():
             if isinstance(node, PipelineHandler):
                 paths.update(node._collect_referenced_artifact_paths())
