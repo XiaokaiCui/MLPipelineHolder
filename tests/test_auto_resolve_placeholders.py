@@ -102,6 +102,47 @@ def declare_x() -> Lock:
     return Lock()
 
 
+def counting_true_gate() -> bool:
+    calls = _CALL_COUNTERS.setdefault("counting_true_gate", 0)
+    _CALL_COUNTERS["counting_true_gate"] = calls + 1
+    return True
+
+
+def counting_false_gate() -> bool:
+    calls = _CALL_COUNTERS.setdefault("counting_false_gate", 0)
+    _CALL_COUNTERS["counting_false_gate"] = calls + 1
+    return False
+
+
+def raising_gate() -> bool:
+    raise ValueError("gate boom")
+
+
+def produce_flag() -> bool:
+    return True
+
+
+def gate_reads_flag(flag: bool) -> bool:
+    calls = _CALL_COUNTERS.setdefault("gate_reads_flag", 0)
+    _CALL_COUNTERS["gate_reads_flag"] = calls + 1
+    return flag
+
+
+def gate_reads_items(items: list[int]) -> bool:
+    calls = _CALL_COUNTERS.setdefault("gate_reads_items", 0)
+    _CALL_COUNTERS["gate_reads_items"] = calls + 1
+    return bool(items)
+
+
+def produce_items() -> list[int]:
+    return [1]
+
+
+def clear_items_and_produce_lock(items: list[int]) -> Lock:
+    items.clear()
+    return Lock()
+
+
 def declare_x_real() -> str:
     return "real-x"
 
@@ -684,6 +725,194 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline._auto_resolve_placeholder_outputs(verbose=True)
 
             warning.assert_not_called()
+
+    def test_callable_gate_false_skips_child_recovery_silently(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("ar", {}, tmp / "project")
+            child = PipelineHandler("gated_child", {}, tmp / "child_root")
+            child.set_gate_block(counting_false_gate)
+            gated = child.add_block("gated", 1)
+            gated.register_function(declare_x, ["x"])
+            root.add_child_pipeline(child, execution_priority=1)
+            child.producer_outputs["gated"] = {
+                "x": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            child._rebuild_visible_state({})
+            root._rebuild_visible_state({})
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+            log_text = self._log_text(tmp / "project")
+
+            self.assertNotIn("not recoverable", log_text)
+            self.assertIsInstance(
+                child.producer_outputs["gated"]["x"],
+                RuntimeValueReference,
+            )
+
+    def test_callable_gate_error_blocks_recovery_with_warning(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("ar", {}, tmp / "project")
+            child = PipelineHandler("gated_child", {}, tmp / "child_root")
+            child.set_gate_block(raising_gate)
+            gated = child.add_block("gated", 1)
+            gated.register_function(declare_x, ["x"])
+            root.add_child_pipeline(child, execution_priority=1)
+            child.producer_outputs["gated"] = {
+                "x": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            child._rebuild_visible_state({})
+            root._rebuild_visible_state({})
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+            log_text = self._log_text(tmp / "project")
+
+            self.assertIn("gate could not be evaluated", log_text)
+            self.assertIsInstance(
+                child.producer_outputs["gated"]["x"],
+                RuntimeValueReference,
+            )
+
+    def test_callable_gate_recovery_recovers_multiple_gated_children(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            _CALL_COUNTERS.pop("counting_true_gate", None)
+            root = PipelineHandler("ar", {}, tmp / "project")
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            parent.set_gate_block(counting_true_gate)
+            for leaf_name, priority in (("leaf_a", 1), ("leaf_b", 2)):
+                leaf = PipelineHandler(leaf_name, {}, tmp / leaf_name)
+                leaf.add_block("producer", 1).register_function(produce_lock, ["out"])
+                parent.add_child_pipeline(leaf, priority)
+                leaf.producer_outputs["producer"] = {
+                    "out": RuntimeValueReference(
+                        type_name="Lock",
+                        repr_text="lock",
+                        reason="test",
+                    )
+                }
+                leaf._rebuild_visible_state({})
+            root.add_child_pipeline(parent, 1)
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+
+            recovered_parent = root.get_child_pipeline("parent")
+            for leaf_name in ("leaf_a", "leaf_b"):
+                leaf = recovered_parent.get_child_pipeline(leaf_name)
+                self.assertIsInstance(leaf.producer_outputs["producer"]["out"], Lock)
+            self.assertEqual(_CALL_COUNTERS.get("counting_true_gate", 0), 1)
+
+    def test_gate_reevaluates_when_upstream_input_changes_between_passes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            _CALL_COUNTERS.pop("gate_reads_flag", None)
+            root = PipelineHandler("ar", {}, tmp / "project")
+            flag_block = root.add_block("flag_block", 1)
+            flag_block.register_function(produce_flag, ["flag"])
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.set_gate_block(gate_reads_flag)
+            producer = child.add_block("producer", 1)
+            producer.register_function(produce_lock, ["out"])
+            root.add_child_pipeline(child, 2)
+            child.producer_outputs["producer"] = {
+                "out": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            child._rebuild_visible_state({})
+            root.producer_outputs["flag_block"] = {"flag": True}
+            root._rebuild_visible_state({})
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+            self.assertIsInstance(child.producer_outputs["producer"]["out"], Lock)
+            self.assertEqual(_CALL_COUNTERS["gate_reads_flag"], 1)
+
+            root.producer_outputs["flag_block"] = {"flag": False}
+            root._rebuild_visible_state({})
+            child.producer_outputs["producer"] = {
+                "out": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            child._rebuild_visible_state({})
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+            self.assertEqual(_CALL_COUNTERS["gate_reads_flag"], 2)
+            self.assertIsInstance(
+                child.producer_outputs["producer"]["out"],
+                RuntimeValueReference,
+            )
+
+    def test_gate_reevaluates_after_in_place_input_mutation_during_recovery(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            _CALL_COUNTERS.pop("gate_reads_items", None)
+            root = PipelineHandler("ar", {}, tmp / "project")
+            items_block = root.add_block("items_block", 1)
+            assert items_block is not None
+            items_block.register_function(produce_items, ["items"])
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            parent.set_gate_block(gate_reads_items)
+
+            first = PipelineHandler("first", {}, tmp / "first")
+            first_block = first.add_block("producer", 1)
+            assert first_block is not None
+            first_block.register_function(
+                clear_items_and_produce_lock,
+                ["first_out"],
+            )
+            second = PipelineHandler("second", {}, tmp / "second")
+            second_block = second.add_block("producer", 1)
+            assert second_block is not None
+            second_block.register_function(
+                produce_lock,
+                ["second_out"],
+            )
+            parent.add_child_pipeline(first, 1)
+            parent.add_child_pipeline(second, 2)
+            root.add_child_pipeline(parent, 2)
+
+            first.producer_outputs["producer"] = {
+                "first_out": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            first._rebuild_visible_state({})
+            second.producer_outputs["producer"] = {
+                "second_out": RuntimeValueReference(
+                    type_name="Lock",
+                    repr_text="lock",
+                    reason="test",
+                )
+            }
+            second._rebuild_visible_state({})
+            root.producer_outputs["items_block"] = {"items": [1]}
+            root._rebuild_visible_state({})
+
+            root._auto_resolve_placeholder_outputs(verbose=True)
+
+            self.assertIsInstance(first.get_value("first_out"), Lock)
+            self.assertEqual(root.get_value("items"), [])
+            self.assertEqual(_CALL_COUNTERS["gate_reads_items"], 2)
+            self.assertIsInstance(
+                second.producer_outputs["producer"]["second_out"],
+                RuntimeValueReference,
+            )
 
     def test_dataclass_with_init_false_field_reconstructs_real_class(self) -> None:
         with TemporaryDirectory() as temp_dir:

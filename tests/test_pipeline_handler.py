@@ -3095,6 +3095,44 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertTrue(stale_file.exists())
 
+    def test_load_pipeline_rejects_malformed_payload_before_replacing_work_tree(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            backup = tmp_path / "backup"
+            pipeline = PipelineHandler(
+                "source",
+                DemoConfig(base=2),
+                work,
+                pipeline_backup_directory=backup,
+            )
+            setup = pipeline.add_block("setup", 1)
+            assert setup is not None
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.save_pipeline()
+            sentinel = work / "unsaved.txt"
+            sentinel.write_text("keep me", encoding="utf-8")
+
+            state_path = backup / "pipeline_state.pkl"
+            with state_path.open("rb") as handle:
+                payload = pickle.load(handle)
+            del payload["nodes"][0]["functions"]
+            with state_path.open("wb") as handle:
+                pickle.dump(payload, handle)
+
+            with self.assertRaises(PersistenceError):
+                PipelineHandler.load_pipeline(backup, forced_deleting=True)
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me")
+
+    def test_load_pipeline_wraps_corrupt_pickle_as_persistence_error(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            bundle = Path(temp_dir)
+            (bundle / "pipeline_state.pkl").write_bytes(b"not a pickle")
+
+            with self.assertRaises(PersistenceError):
+                PipelineHandler.load_pipeline(bundle)
+
     def test_pipeline_rejects_overlapping_backup_directory(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -3636,6 +3674,53 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertTrue((save_dir / "pipeline_state.pkl").exists())
             self.assertTrue((save_dir / "config.pkl").exists())
             self.assertFalse(list(save_dir.glob("*.tmp")))
+
+    def test_load_pipeline_builds_pipeline_once(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "single-build",
+                DemoConfig(base=1),
+                tmp_path / "project",
+            )
+            pipeline.add_block("setup", 1).register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline(tmp_path / "bundle")
+
+            build_calls: list[int] = []
+
+            def counting_from_payload(
+                cls,
+                payload,
+                project_root,
+                parent=None,
+                *,
+                verbose=False,
+                auto_resolve_placeholders=True,
+            ):
+                build_calls.append(1)
+                return original_from_payload(
+                    cls,
+                    payload,
+                    project_root,
+                    parent,
+                    verbose=verbose,
+                    auto_resolve_placeholders=auto_resolve_placeholders,
+                )
+
+            original_from_payload = PipelineHandler._from_payload.__func__
+            with patch.object(
+                PipelineHandler,
+                "_from_payload",
+                classmethod(counting_from_payload),
+            ):
+                loaded = PipelineHandler.load_pipeline(
+                    tmp_path / "bundle",
+                    forced_deleting=True,
+                )
+
+            self.assertEqual(loaded.get_value("seed"), 2)
+            self.assertEqual(len(build_calls), 1)
 
     def test_save_pipeline_removes_tmp_file_on_failure(self) -> None:
         with TemporaryDirectory() as temp_dir:
