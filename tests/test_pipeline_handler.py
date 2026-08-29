@@ -1348,7 +1348,7 @@ class PipelineHandlerTests(unittest.TestCase):
             with self.assertRaises(ResolutionError):
                 loaded.run_block("down")
 
-    def test_overridden_disk_artifact_is_cleaned_when_later_value_is_in_memory(self) -> None:
+    def test_overridden_disk_artifact_remains_available_by_producer(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("cleanup", DemoConfig(base=2), tmp_path)
@@ -1364,7 +1364,9 @@ class PipelineHandlerTests(unittest.TestCase):
             artifact_dir = tmp_path / "artifacts"
             artifact_files = list(artifact_dir.rglob("*")) if artifact_dir.exists() else []
             self.assertEqual(pipeline.get_value("shared"), "memory=3")
-            self.assertFalse(any(path.is_file() for path in artifact_files))
+            self.assertTrue(any(path.is_file() for path in artifact_files))
+            self.assertEqual(pipeline.get_node_output("first", "shared"), "value=3")
+            self.assertEqual(pipeline.get_node_output("second", "shared"), "memory=3")
 
     def test_referenced_artifact_is_not_deleted_during_rebuild(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2250,7 +2252,7 @@ class PipelineHandlerTests(unittest.TestCase):
             parquet_files = list(Path(artifact.file_path).glob("*.parquet"))
             self.assertGreater(len(parquet_files), 2)
 
-    def test_invalidation_removes_dask_parquet_artifact_directory(self) -> None:
+    def test_overridden_dask_parquet_artifact_remains_available_by_producer(self) -> None:
         try:
             __import__("dask.dataframe")
         except Exception:
@@ -2269,7 +2271,11 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.run_all()
 
             artifact_dir = tmp_path / "artifacts"
-            self.assertFalse(any(path.is_dir() for path in artifact_dir.rglob("*.parquet")))
+            self.assertTrue(any(path.is_dir() for path in artifact_dir.rglob("*.parquet")))
+            self.assertEqual(pipeline.get_value("shared_df"), "value=3")
+            historical = pipeline.get_node_output("first", "shared_df")
+            self.assertEqual(historical.compute()["value"].tolist(), [3, 4, 5])
+            self.assertEqual(pipeline.get_node_output("second", "shared_df"), "value=3")
 
     def test_describe_pipeline_contains_blocks_functions_and_io(self) -> None:
         with TemporaryDirectory() as temp_dir:
