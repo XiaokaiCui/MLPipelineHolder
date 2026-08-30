@@ -1,12 +1,14 @@
 # MLPipelineHolder
 
-**MLPipelineHolder is a lightweight Python framework for reproducible machine-learning pipelines in Jupyter notebooks.**
+**MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks. It helps you progressively turn mature parts of an exploratory workflow into stable pipeline stages, while keeping configurations, hyperparameters, and pipeline structure flexible and easy to change.**
 
-It helps you persist intermediate results, organise modelling workflows, run reproducible experiments, manage large DataFrames, and track pipeline structure without turning an exploratory project into a full MLOps system.
+I originally developed MLPipelineHolder for my own quantitative investing experiments because I found that the available alternatives were either more complex than I needed or not quite flexible enough for active experimentation.
 
-Although this is currently a personal project that I originally developed for my own quantitative investing experiments, I’d be very happy to see it become useful to a wider group of people. Thank you for your interest in the project — any ideas, issues, suggestions, or feedback are very welcome!
+If those are not concerns for you, I would also recommend looking at [Apache Hamilton](https://hamilton.apache.org/) and [Kedro](https://github.com/kedro-org/kedro) if you have not already considered them. They are mature and capable frameworks with different strengths.
 
-**v0.3.0 will be the first full release**, but **v0.2.14 and later versions are already very close to the planned full version**. If you are currently using an earlier release, I recommend upgrading to v0.2.14 or newer.
+If you have similar concerns to mine, however, MLPipelineHolder may be worth trying. It is designed to be adopted at almost any stage of experimentation without requiring you to rebuild your workflow from scratch. In many cases, an existing notebook can be converted into a pipeline-managed structure in less than 30 minutes while keeping most of its original organisation and logic.
+
+The idea is not to force an exploratory notebook into a rigid workflow, but to let you progressively turn the parts that have become mature into stable pipeline stages while keeping configurations, hyperparameters, functions, and pipeline structure easy to experiment with and change.
 
 ## Installation
 
@@ -45,24 +47,14 @@ The core package requires Python 3.11 or later and includes `termcolor` and NumP
 
 ## At a glance
 
-### Typical use cases
-
-- I run many experiments with different parameters in a notebook and want an easy way to run, record, and compare them consistently.
-- I have a modelling notebook and want to organise it into a safer structure so accidental changes are less likely to break my work (use `strict_mode`).
-- I use the same notebook across different days and do not want to rerun expensive steps every time I reopen it.
-- I have limited RAM and need a convenient way to load and offload DataFrames while exploring the data.
-- I want to focus on analysis and modelling, with logging and pipeline visualisation handled more simply.
-
 ### Key features
 
 MLPipelineHolder organises workflows into explicit execution blocks and nested child pipelines while keeping their runtime structure easy to inspect and modify. It helps you:
 
-- Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes.
-- Persist intermediate and final outputs to disk, then reload them quickly and easily after a kernel restart.
-- Run independent functions concurrently using threads within the same execution block, while keeping cross-block execution explicit and ordered by priority.
-- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed(more effective when used together with `save_to_disk`).
-- Track logs, results, and pipeline state with minimal effort.
-- Improve the stability and reproducibility of modelling and analysis outputs while retaining full flexibility over the pipeline structure.
+- Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes. (use `strict_mode` to make it even safer)
+- Build a pipeline around your existing Jupyter notebook in a straightforward way while retaining most of its original structure and logic.
+- Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed (more effective when used together with `save_to_disk`).
+- Track and record logs, results, and pipeline state with minimal effort by using built-in logger.
 
 ### Example notebook
 

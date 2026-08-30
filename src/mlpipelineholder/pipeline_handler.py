@@ -5,6 +5,7 @@ import builtins
 import copy
 import gc
 import inspect
+import math
 import os
 import pickle
 import platform
@@ -14,7 +15,7 @@ import sys
 import warnings
 from ctypes import CDLL
 from contextlib import redirect_stdout
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
 from importlib import import_module
@@ -47,6 +48,14 @@ from .models import (
     RuntimeValueReference,
     TorchStateArtifactRecord,
 )
+from .naming import validate_registration_name
+from .output_pointers import (
+    OutputAddress,
+    OutputPointer,
+    PointerResolutionError,
+    is_strictly_upstream,
+    resolve_pointer_chain,
+)
 
 if TYPE_CHECKING:
     from .execution_block import ExecutionBlock
@@ -71,6 +80,7 @@ _SAVE_WARNING_PATTERNS = (
 )
 
 _IMMUTABLE_TYPES = (int, float, complex, bool, str, bytes, type(None))
+_MISSING = object()
 _ACTIVE_PACKAGE_ROOT = __name__.rsplit(".", maxsplit=1)[0]
 _PERSISTED_PACKAGE_ROOTS = ("mlpipelineholder", "src.mlpipelineholder")
 
@@ -145,8 +155,12 @@ class PipelineHandler:
         strict_mode: bool = False,
         _allow_existing_root: bool = False,
         _allow_legacy_config_object: bool = False,
+        _preserve_existing_log: bool = False,
     ) -> None:
-        self.registration_name = registration_name
+        self.registration_name = validate_registration_name(
+            registration_name,
+            owner_label="pipeline",
+        )
         self.config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
@@ -180,6 +194,7 @@ class PipelineHandler:
                 log_traceback_to_file=log_traceback_to_file,
                 show_traceback_locals=show_traceback_locals,
                 use_rich_traceback_console=use_rich_traceback_console,
+                truncate=not _preserve_existing_log,
             )
             self.logger._pipeline = self
             self.print_capture_mode = "tee"
@@ -204,6 +219,7 @@ class PipelineHandler:
             self.gate_cleanup_confirmation: bool = False
             self._gate_cleanup_predecided: bool | None = None
             self._is_atom: bool = False
+            self._overridden_outputs: dict[str, OutputAddress] = {}
 
             self.manual_values: dict[str, Any] = {}
             self.para_value_dict: dict[str, Any] = {}
@@ -248,6 +264,7 @@ class PipelineHandler:
     def add_block(
         self, registration_name: str, execution_priority: float, forced: bool = False
     ) -> ExecutionBlock | None:
+        validate_registration_name(registration_name, owner_label="block")
         if self._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{self.registration_name}' is immutable "
@@ -289,6 +306,7 @@ class PipelineHandler:
         return block
 
     def _add_block_strict(self, registration_name: str, execution_priority: float):
+        validate_registration_name(registration_name, owner_label="block")
         if self._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{self.registration_name}' is immutable "
@@ -316,6 +334,7 @@ class PipelineHandler:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
         was_root = child_pipeline.parent_pipeline is None
         if registration_name is not None:
+            validate_registration_name(registration_name, owner_label="pipeline")
             child_pipeline.registration_name = registration_name
         conflicts = self._registration_conflicts(child_pipeline, execution_priority)
         self._raise_on_priority_conflict_with_different_name(
@@ -387,6 +406,7 @@ class PipelineHandler:
         block_priority: float = 10.0,
         *,
         param_mapping: dict[str, str | None] | None = None,
+        overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         if self._is_atom:
             raise RegistrationError(
@@ -412,6 +432,12 @@ class PipelineHandler:
         effective_param_mapping = (
             param_mapping if param_mapping is not None else param_mapping_dct
         )
+        normalized_overrides = self._normalize_overridden_outputs(
+            output_names,
+            overridden_outputs,
+            current_node_name=child_name,
+            current_priority=execution_priority,
+        )
         child_root = self.project_root / "children" / child_name
         temp_pipeline = PipelineHandler(
             registration_name=child_name,
@@ -424,6 +450,7 @@ class PipelineHandler:
         )
         temp_pipeline.logger = self.logger
         temp_pipeline.parent_pipeline = self
+        temp_pipeline._overridden_outputs = normalized_overrides
         if gate_config is not None:
             gate_visible = (
                 set(temp_pipeline.get_full_config())
@@ -569,6 +596,8 @@ class PipelineHandler:
             return False
         if old.execution_priority != new.execution_priority:
             return False
+        if old._overridden_outputs != new._overridden_outputs:
+            return False
         if not self._atom_gates_equal(old, new):
             return False
         if not self._atom_blocks_equal(old, new):
@@ -662,6 +691,7 @@ class PipelineHandler:
                 and old_reg.output_names == new_reg.output_names
                 and old_reg.save_to_disk == new_reg.save_to_disk
                 and old_reg.warn_on_input_mutation == new_reg.warn_on_input_mutation
+                and old_reg.overridden_outputs == new_reg.overridden_outputs
             )
         if old_reg.function_name != new_reg.function_name:
             return False
@@ -678,6 +708,7 @@ class PipelineHandler:
             and old_reg.param_mapping == new_reg.param_mapping
             and old_reg.var_pos_name == new_reg.var_pos_name
             and old_reg.var_kw_name == new_reg.var_kw_name
+            and old_reg.overridden_outputs == new_reg.overridden_outputs
         )
 
     def _atom_used_config_fields_equal(
@@ -731,7 +762,37 @@ class PipelineHandler:
         return True
 
     def _erase_node_outputs(self, node_name: str) -> None:
+        slots = self._public_output_slots()
+        removed_address_values = self.producer_outputs.get(node_name, {})
+        invalidated = {
+            OutputAddress(self.registration_name, node_name, output_name)
+            for output_name in removed_address_values
+        }
+        for address, value in (
+            (OutputAddress(self.registration_name, node_name, name), value)
+            for name, value in removed_address_values.items()
+        ):
+            slots[address] = value
+        self._prepare_pointer_removal(invalidated, slots)
         removed = self.producer_outputs.pop(node_name, {})
+        self._refresh_pointer_visible_state()
+        self._delete_artifacts_from_outputs(removed)
+
+    def _erase_selected_node_outputs(
+        self,
+        node_name: str,
+        output_names: list[str],
+    ) -> None:
+        outputs = self.producer_outputs.get(node_name)
+        if outputs is None:
+            return
+        removed = {
+            output_name: outputs.pop(output_name)
+            for output_name in output_names
+            if output_name in outputs
+        }
+        if not outputs:
+            self.producer_outputs.pop(node_name, None)
         self._rebuild_visible_state(self._incoming_parent_outputs())
         self._delete_artifacts_from_outputs(removed)
 
@@ -742,6 +803,8 @@ class PipelineHandler:
         new_priority: float | None,
         old_output_names: list[str],
         new_output_names: list[str] | None = None,
+        *,
+        erase_output_names: list[str] | None = None,
     ) -> None:
         """Unified erasure for a forced override of an expression, function or atom.
 
@@ -754,7 +817,10 @@ class PipelineHandler:
         and new outputs from the new priority, so a priority change still catches
         consumers between the two positions.
         """
-        self._erase_node_outputs(node_name)
+        if erase_output_names is None:
+            self._erase_node_outputs(node_name)
+        else:
+            self._erase_selected_node_outputs(node_name, erase_output_names)
         if self.parent_pipeline is not None:
             self._resync_mirror_to_parent()
         if self._invalidation_forbidden:
@@ -1057,7 +1123,7 @@ class PipelineHandler:
                 value = upstream_outputs[variable_name]
             else:
                 value = self._descendant_visible_value(variable_name)
-                if value is None:
+                if value is _MISSING:
                     raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         return self._materialize_stored_value(
             value,
@@ -1126,6 +1192,16 @@ class PipelineHandler:
         value: Any,
         placeholder_error: str,
     ) -> Any:
+        if isinstance(value, OutputPointer):
+            try:
+                owner_address, terminal = resolve_pointer_chain(
+                    value.destination,
+                    self._root_pipeline()._read_output_address,
+                )
+            except PointerResolutionError as exc:
+                raise ResolutionError(str(exc)) from exc
+            owner = self._pipeline_by_name(owner_address.pipeline_name)
+            return owner._materialize_stored_value(terminal, placeholder_error)
         if isinstance(value, TorchStateArtifactRecord):
             return value
         if isinstance(value, CallableValueReference):
@@ -1272,30 +1348,31 @@ class PipelineHandler:
                 f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
             )
         previous_value = self.manual_values.get(variable_name)
-        if isinstance(previous_value, ArtifactRecord):
-            self.artifact_store.delete(previous_value)
         if isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
         ):
-            pass
+            replacement = value
         elif to_disk:
-            value = self._save_value_to_disk(
+            replacement = self._save_value_to_disk(
                 variable_name,
                 value,
                 function_name="set_constant_value",
                 verbose=verbose,
             )
         elif copy:
-            value = self._snapshot_value(variable_name, value, verbose=verbose)
-        self.manual_values[variable_name] = value
-        self.para_value_dict[variable_name] = value
-        if isinstance(value, ArtifactRecord):
-            self.artifact_registry[variable_name] = value
+            replacement = self._snapshot_value(variable_name, value, verbose=verbose)
+        else:
+            replacement = value
+        self.manual_values[variable_name] = replacement
+        self.para_value_dict[variable_name] = replacement
+        if isinstance(replacement, ArtifactRecord):
+            self.artifact_registry[variable_name] = replacement
         else:
             self.artifact_registry.pop(variable_name, None)
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
+        self._cleanup_replaced_artifact(previous_value)
 
     def update_value(
         self,
@@ -1314,27 +1391,27 @@ class PipelineHandler:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
         previous_value = self.para_value_dict.get(variable_name)
-        if isinstance(previous_value, ArtifactRecord):
-            self.artifact_store.delete(previous_value)
 
         if isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
         ):
-            pass
+            replacement = value
         elif isinstance(previous_value, ArtifactRecord):
-            value = self._save_value_to_disk(
+            replacement = self._save_value_to_disk(
                 variable_name,
                 value,
                 function_name="update_value",
                 verbose=verbose,
             )
         elif copy:
-            value = self._snapshot_value(variable_name, value, verbose=verbose)
+            replacement = self._snapshot_value(variable_name, value, verbose=verbose)
+        else:
+            replacement = value
 
-        self.para_value_dict[variable_name] = value
-        if isinstance(value, ArtifactRecord):
-            self.artifact_registry[variable_name] = value
+        self.para_value_dict[variable_name] = replacement
+        if isinstance(replacement, ArtifactRecord):
+            self.artifact_registry[variable_name] = replacement
         else:
             self.artifact_registry.pop(variable_name, None)
 
@@ -1342,9 +1419,10 @@ class PipelineHandler:
             outputs = self.producer_outputs.get(node.registration_name)
             if outputs is None or variable_name not in outputs:
                 continue
-            outputs[variable_name] = value
+            outputs[variable_name] = replacement
             break
-        self._sync_value_update_to_parent(variable_name, value)
+        self._sync_value_update_to_parent(variable_name, replacement)
+        self._cleanup_replaced_artifact(previous_value)
 
     def set_value(
         self,
@@ -1360,6 +1438,23 @@ class PipelineHandler:
                 f"Cannot set value '{variable_name}': name is a pipeline constant; use set_constant_value instead"
             )
         if variable_name in self.para_value_dict:
+            current_value = self.para_value_dict[variable_name]
+            if isinstance(current_value, OutputPointer):
+                try:
+                    owner, _ = resolve_pointer_chain(
+                        current_value.destination,
+                        self._root_pipeline()._read_output_address,
+                    )
+                except PointerResolutionError as exc:
+                    raise ResolutionError(str(exc)) from exc
+                raise ResolutionError(
+                    f"Cannot set value '{variable_name}' in pipeline "
+                    f"'{self.registration_name}': this slot is an output pointer. "
+                    f"The real object is stored at "
+                    f"'{owner.pipeline_name}.{owner.node_name}.{owner.output_name}'; "
+                    f"call set_value('{owner.output_name}', ...) on pipeline "
+                    f"'{owner.pipeline_name}' instead"
+                )
             self.update_value(variable_name, value, copy=copy, verbose=verbose)
             return
         if variable_name in self._incoming_parent_outputs():
@@ -1549,18 +1644,8 @@ class PipelineHandler:
             parent_outputs = parent.producer_outputs.get(current.registration_name)
             if parent_outputs is None or variable_name not in parent_outputs:
                 return
-            cached_output = parent_outputs[variable_name]
             parent_outputs[variable_name] = value
-            if (
-                variable_name in parent.para_value_dict
-                and variable_name not in parent.manual_values
-                and parent.para_value_dict[variable_name] is cached_output
-            ):
-                parent.para_value_dict[variable_name] = value
-                if isinstance(value, ArtifactRecord):
-                    parent.artifact_registry[variable_name] = value
-                else:
-                    parent.artifact_registry.pop(variable_name, None)
+            parent._refresh_visible_value(variable_name)
             current = parent
 
     def recover_variable_from_backup(
@@ -2798,9 +2883,13 @@ class PipelineHandler:
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
             _allow_legacy_config_object=True,
+            _preserve_existing_log=parent is not None,
         )
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)
+        if parent is not None:
+            pipeline.parent_pipeline = parent
+            pipeline.logger = parent.logger
         if payload.get("expression_runtime_code") is not None:
             pipeline.define_expression_runtime(payload["expression_runtime_code"])
         pipeline.historical_result_log_path = payload.get("historical_result_log_path")
@@ -2855,6 +2944,9 @@ class PipelineHandler:
                             warn_on_input_mutation=function_payload.get(
                                 "warn_on_input_mutation", False
                             ),
+                            overridden_outputs=function_payload.get(
+                                "overridden_outputs"
+                            ),
                         )
                     else:
                         partial_payload = function_payload.get("partial")
@@ -2887,6 +2979,9 @@ class PipelineHandler:
                             param_mapping=function_payload.get("param_mapping"),
                             var_pos_name=function_payload.get("var_pos_name"),
                             var_kw_name=function_payload.get("var_kw_name"),
+                            overridden_outputs=function_payload.get(
+                                "overridden_outputs"
+                            ),
                         )
                     if registration is None:
                         raise PersistenceError(
@@ -2904,6 +2999,12 @@ class PipelineHandler:
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline
                 child.logger = pipeline.logger
+                child._overridden_outputs = pipeline._normalize_overridden_outputs(
+                    sorted(child.list_declared_outputs()),
+                    node_payload.get("overridden_outputs"),
+                    current_node_name=child.registration_name,
+                    current_priority=child.execution_priority,
+                )
                 pipeline._register_node(child)
         pipeline.producer_outputs = {
             node_name: cls._restore_saved_runtime_mapping(
@@ -2958,6 +3059,8 @@ class PipelineHandler:
             )
         elif not auto_resolve_placeholders and parent is None:
             pipeline._warn_unresolved_placeholders_at_load(verbose=verbose)
+        if parent is None:
+            pipeline._validate_runtime_output_pointers()
         return pipeline
 
     def _restore_dataclass_value_references(
@@ -3803,6 +3906,12 @@ class PipelineHandler:
                 "kind": "pipeline",
                 "registration_name": node.registration_name,
                 "execution_priority": node.execution_priority,
+                "overridden_outputs": {
+                    output_name: (address.pipeline_name, address.node_name)
+                    for output_name, address in sorted(
+                        node._overridden_outputs.items()
+                    )
+                },
                 "payload": node._serialize_payload_for_save(target_root, cache),
             }
         return self._serialize_node(node)
@@ -4490,7 +4599,13 @@ class PipelineHandler:
 
     @staticmethod
     def _config_object_as_dict(config_obj: Any) -> dict[str, Any]:
-        config_dict = asdict(config_obj)
+        # Shallow field extraction: nested dataclass values stay real instances so
+        # the recursive value serializer can preserve their identity (asdict()
+        # would collapse them into plain dicts).
+        config_dict = {
+            field.name: getattr(config_obj, field.name)
+            for field in fields(config_obj)
+        }
         extra_attrs = {
             key: value
             for key, value in vars(config_obj).items()
@@ -4505,6 +4620,12 @@ class PipelineHandler:
                 "kind": "pipeline",
                 "registration_name": node.registration_name,
                 "execution_priority": node.execution_priority,
+                "overridden_outputs": {
+                    output_name: (address.pipeline_name, address.node_name)
+                    for output_name, address in sorted(
+                        node._overridden_outputs.items()
+                    )
+                },
                 "payload": node._serialize_payload(),
             }
         functions = []
@@ -4523,6 +4644,15 @@ class PipelineHandler:
                                 "param_mapping": registration.param_mapping,
                                 "var_pos_name": registration.var_pos_name,
                                 "var_kw_name": registration.var_kw_name,
+                                "overridden_outputs": {
+                                    output_name: (
+                                        address.pipeline_name,
+                                        address.node_name,
+                                    )
+                                    for output_name, address in sorted(
+                                        registration.overridden_outputs.items()
+                                    )
+                                },
                             }
                         )
                         continue
@@ -4542,6 +4672,15 @@ class PipelineHandler:
                             "param_mapping": registration.param_mapping,
                             "var_pos_name": registration.var_pos_name,
                             "var_kw_name": registration.var_kw_name,
+                            "overridden_outputs": {
+                                output_name: (
+                                    address.pipeline_name,
+                                    address.node_name,
+                                )
+                                for output_name, address in sorted(
+                                    registration.overridden_outputs.items()
+                                )
+                            },
                         }
                     )
                 case ExpressionRegistration():
@@ -4552,6 +4691,15 @@ class PipelineHandler:
                             "output_names": registration.output_names,
                             "save_to_disk": sorted(registration.save_to_disk),
                             "warn_on_input_mutation": registration.warn_on_input_mutation,
+                            "overridden_outputs": {
+                                output_name: (
+                                    address.pipeline_name,
+                                    address.node_name,
+                                )
+                                for output_name, address in sorted(
+                                    registration.overridden_outputs.items()
+                                )
+                            },
                         }
                     )
                 case _:
@@ -4726,8 +4874,7 @@ class PipelineHandler:
                         overrides=overrides,
                         parent_config=parent_config or {},
                     )
-                self.producer_outputs[node.registration_name] = produced_outputs
-                self._rebuild_visible_state(upstream_outputs)
+                self._commit_node_outputs(node, produced_outputs, upstream_outputs)
                 if self.memory_profile_logging and not isinstance(node, PipelineHandler):
                     self._log_memory_profile(node.registration_name, phase="after_compute")
                 run_record.executed_blocks.append(node.registration_name)
@@ -4760,6 +4907,224 @@ class PipelineHandler:
             raise ExecutionError("Pipeline execution failed") from exc
         finally:
             run_record.finished_at = datetime.now(UTC).isoformat()
+
+    def _node_overridden_outputs(self, node: Any) -> dict[str, OutputAddress]:
+        if isinstance(node, PipelineHandler):
+            return dict(node._overridden_outputs)
+        overrides: dict[str, OutputAddress] = {}
+        for registration in node.functions:
+            overrides.update(registration.overridden_outputs)
+        return overrides
+
+    def _read_output_address(self, address: OutputAddress) -> Any:
+        pipelines = [
+            pipeline
+            for pipeline in self._root_pipeline()._iter_attached_pipelines()
+            if pipeline.registration_name == address.pipeline_name
+        ]
+        if len(pipelines) != 1:
+            raise KeyError(address)
+        outputs = pipelines[0].producer_outputs.get(address.node_name)
+        if outputs is None or address.output_name not in outputs:
+            raise KeyError(address)
+        return outputs[address.output_name]
+
+    def _public_output_slots(self) -> dict[OutputAddress, Any]:
+        slots: dict[OutputAddress, Any] = {}
+        for pipeline in self._root_pipeline()._iter_attached_pipelines():
+            if pipeline._is_atom:
+                continue
+            for node in pipeline._sorted_nodes():
+                if isinstance(node, PipelineHandler) and not node._is_atom:
+                    continue
+                node_outputs = pipeline.producer_outputs.get(
+                    node.registration_name,
+                    {},
+                )
+                for output_name, value in node_outputs.items():
+                    address = OutputAddress(
+                        pipeline.registration_name,
+                        node.registration_name,
+                        output_name,
+                    )
+                    slots[address] = value
+        return slots
+
+    def _set_output_address(self, address: OutputAddress, value: Any) -> None:
+        pipeline = self._pipeline_by_name(address.pipeline_name)
+        outputs = pipeline.producer_outputs.setdefault(address.node_name, {})
+        outputs[address.output_name] = value
+
+    def _output_address_priority(self, address: OutputAddress) -> tuple[float, ...]:
+        pipeline = self._pipeline_by_name(address.pipeline_name)
+        return pipeline._priority_vector(address.node_name)
+
+    def _repair_pointer_gaps(
+        self,
+        invalidated: set[OutputAddress],
+        slots: dict[OutputAddress, Any],
+    ) -> None:
+        for source, value in slots.items():
+            if source in invalidated or not isinstance(value, OutputPointer):
+                continue
+            destination = value.destination
+            if destination not in invalidated:
+                continue
+            visited: set[OutputAddress] = set()
+            while destination in invalidated:
+                if destination in visited:
+                    raise ResolutionError(
+                        f"Output pointer cycle detected while repairing {source!r}"
+                    )
+                visited.add(destination)
+                next_value = slots.get(destination, _MISSING)
+                if not isinstance(next_value, OutputPointer):
+                    break
+                destination = next_value.destination
+            if destination not in invalidated and destination in slots:
+                self._set_output_address(source, OutputPointer(destination))
+
+    def _promote_pointer_values_before_removal(
+        self,
+        invalidated: set[OutputAddress],
+        slots: dict[OutputAddress, Any],
+    ) -> None:
+        for owner in invalidated:
+            value = slots.get(owner, _MISSING)
+            if value is _MISSING or isinstance(value, OutputPointer):
+                continue
+            survivors: list[OutputAddress] = []
+            for source in slots:
+                if source in invalidated:
+                    continue
+                try:
+                    terminal, _ = resolve_pointer_chain(source, slots.__getitem__)
+                except PointerResolutionError:
+                    continue
+                if terminal == owner:
+                    survivors.append(source)
+            if not survivors:
+                continue
+            destination = max(survivors, key=self._output_address_priority)
+            promoted_value = value
+            if isinstance(value, ArtifactRecord):
+                destination_pipeline = self._pipeline_by_name(
+                    destination.pipeline_name
+                )
+                promoted_value = destination_pipeline.artifact_store.transfer(
+                    value,
+                    destination_pipeline.qualified_node_name(destination.node_name),
+                )
+            self._set_output_address(destination, promoted_value)
+
+    def _prepare_pointer_removal(
+        self,
+        invalidated: set[OutputAddress],
+        slots: dict[OutputAddress, Any],
+    ) -> None:
+        self._repair_pointer_gaps(invalidated, slots)
+        self._promote_pointer_values_before_removal(invalidated, slots)
+
+    def _validate_runtime_output_pointers(self) -> None:
+        slots = self._public_output_slots()
+        for address, value in slots.items():
+            if not isinstance(value, OutputPointer):
+                continue
+            try:
+                resolve_pointer_chain(address, slots.__getitem__)
+            except PointerResolutionError as exc:
+                raise PersistenceError(
+                    f"Saved output pointer graph is invalid: {exc}"
+                ) from exc
+
+    def _refresh_pointer_visible_state(self) -> None:
+        root = self._root_pipeline()
+
+        def refresh(pipeline: PipelineHandler) -> None:
+            pipeline._rebuild_visible_state(pipeline._incoming_parent_outputs())
+            for child in pipeline._sorted_nodes():
+                if isinstance(child, PipelineHandler):
+                    refresh(child)
+
+        refresh(root)
+
+    def _commit_node_outputs(
+        self,
+        node: Any,
+        produced_outputs: dict[str, Any],
+        upstream_outputs: dict[str, Any] | None,
+    ) -> None:
+        overrides = self._node_overridden_outputs(node)
+        targets: list[tuple[str, PipelineHandler, OutputAddress]] = []
+        try:
+            for output_name, address in overrides.items():
+                if output_name not in produced_outputs:
+                    continue
+                target_pipeline = self._pipeline_by_name(address.pipeline_name)
+                if (
+                    address.node_name not in target_pipeline.nodes_by_name
+                    or output_name
+                    not in target_pipeline._node_declared_outputs(
+                        target_pipeline.nodes_by_name[address.node_name]
+                    )
+                ):
+                    raise ExecutionError(
+                        f"Output pointer target is no longer valid: "
+                        f"{address.pipeline_name}.{address.node_name}.{output_name}"
+                    )
+                targets.append((output_name, target_pipeline, address))
+        except BaseException:
+            self._delete_artifacts_from_outputs(produced_outputs)
+            raise
+
+        affected: dict[int, PipelineHandler] = {id(self): self}
+        for _, pipeline, _ in targets:
+            affected[id(pipeline)] = pipeline
+        snapshots = {
+            identity: {
+                name: dict(outputs)
+                for name, outputs in pipeline.producer_outputs.items()
+            }
+            for identity, pipeline in affected.items()
+        }
+        replaced: list[Any] = list(
+            self.producer_outputs.get(node.registration_name, {}).values()
+        )
+        try:
+            self.producer_outputs[node.registration_name] = dict(produced_outputs)
+            for output_name, target_pipeline, address in targets:
+                target_outputs = target_pipeline.producer_outputs.setdefault(
+                    address.node_name,
+                    {},
+                )
+                if output_name in target_outputs:
+                    replaced.append(target_outputs[output_name])
+                target_outputs[output_name] = OutputPointer(
+                    OutputAddress(
+                        self.registration_name,
+                        node.registration_name,
+                        output_name,
+                    )
+                )
+            for _, target_pipeline, _ in targets:
+                target_pipeline._rebuild_visible_state(
+                    target_pipeline._incoming_parent_outputs()
+                )
+                target_pipeline._resync_mirror_to_parent()
+            self._rebuild_visible_state(upstream_outputs)
+            self._resync_mirror_to_parent()
+            self._refresh_pointer_visible_state()
+        except BaseException:
+            for identity, pipeline in affected.items():
+                pipeline.producer_outputs = {
+                    name: dict(outputs)
+                    for name, outputs in snapshots[identity].items()
+                }
+            self._refresh_pointer_visible_state()
+            self._delete_artifacts_from_outputs(produced_outputs)
+            raise
+        for previous in replaced:
+            self._cleanup_replaced_artifact(previous)
 
     def _confirm_gate_cleanup(self, mode: str) -> bool:
         gate_label = (
@@ -5079,6 +5444,109 @@ class PipelineHandler:
             current = current.parent_pipeline
         return current
 
+    def _pipeline_by_name(self, pipeline_name: str) -> "PipelineHandler":
+        matches = [
+            pipeline
+            for pipeline in self._root_pipeline()._iter_attached_pipelines()
+            if pipeline.registration_name == pipeline_name
+        ]
+        if len(matches) != 1:
+            raise RegistrationError(
+                f"Output pointer pipeline must identify one attached pipeline: {pipeline_name!r}"
+            )
+        return matches[0]
+
+    def _priority_vector(
+        self,
+        node_name: str,
+        node_priority: float | None = None,
+    ) -> tuple[float, ...]:
+        priorities: list[float] = []
+        chain: list[PipelineHandler] = []
+        current: PipelineHandler | None = self
+        while current is not None and current.parent_pipeline is not None:
+            chain.append(current)
+            current = current.parent_pipeline
+        for pipeline in reversed(chain):
+            if pipeline.execution_priority is None or not math.isfinite(
+                pipeline.execution_priority
+            ):
+                raise RegistrationError(
+                    f"Pipeline '{pipeline.registration_name}' has an invalid output-pointer priority"
+                )
+            priorities.append(pipeline.execution_priority)
+        priority = node_priority
+        if priority is None:
+            node = self.nodes_by_name.get(node_name)
+            priority = None if node is None else node.execution_priority
+        if priority is None or not math.isfinite(priority):
+            raise RegistrationError(
+                f"Node '{node_name}' has an invalid output-pointer priority"
+            )
+        priorities.append(priority)
+        return tuple(priorities)
+
+    def _normalize_overridden_outputs(
+        self,
+        output_names: list[str],
+        declarations: dict[str, tuple[str, str]] | None,
+        *,
+        current_node_name: str,
+        current_priority: float | None,
+    ) -> dict[str, OutputAddress]:
+        if declarations is None:
+            return {}
+        if not isinstance(declarations, dict):
+            raise RegistrationError("overridden_outputs must be a dict or None")
+        unknown_outputs = sorted(set(declarations).difference(output_names))
+        if unknown_outputs:
+            raise RegistrationError(
+                f"overridden_outputs keys must be declared outputs: {unknown_outputs}"
+            )
+        current_vector = self._priority_vector(
+            current_node_name,
+            current_priority,
+        )
+        normalized: dict[str, OutputAddress] = {}
+        for output_name, target in declarations.items():
+            if (
+                not isinstance(output_name, str)
+                or not isinstance(target, tuple)
+                or len(target) != 2
+                or not all(isinstance(item, str) for item in target)
+            ):
+                raise RegistrationError(
+                    "Each overridden_outputs entry must map a string output name to "
+                    "a (pipeline_name, node_name) tuple of strings"
+                )
+            pipeline_name, node_name = target
+            target_pipeline = self._pipeline_by_name(pipeline_name)
+            target_node = target_pipeline.nodes_by_name.get(node_name)
+            if target_node is None:
+                raise RegistrationError(
+                    f"Output pointer target node does not exist: {pipeline_name}.{node_name}"
+                )
+            if isinstance(target_node, PipelineHandler) and not target_node._is_atom:
+                raise RegistrationError(
+                    f"Output pointer target '{pipeline_name}.{node_name}' must be a block or atom pipeline"
+                )
+            if output_name not in target_pipeline._node_declared_outputs(target_node):
+                raise RegistrationError(
+                    f"Output pointer target '{pipeline_name}.{node_name}' does not declare '{output_name}'"
+                )
+            target_vector = target_pipeline._priority_vector(node_name)
+            if not is_strictly_upstream(target_vector, current_vector):
+                raise RegistrationError(
+                    f"Output pointer target '{pipeline_name}.{node_name}' must be globally upstream of "
+                    f"'{self.registration_name}.{current_node_name}'"
+                )
+            normalized[output_name] = OutputAddress(
+                pipeline_name,
+                node_name,
+                output_name,
+            )
+        return normalized
+
     def _iter_attached_pipelines(self) -> list["PipelineHandler"]:
         pipelines: list[PipelineHandler] = [self]
         for node in self._sorted_nodes():
@@ -5164,14 +5632,10 @@ class PipelineHandler:
         child_priority = child_pipeline.execution_priority
         if child_priority is None:
             raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
-        snapshot = self._snapshot_runtime_state()
-        previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
-        self._invalidate_from_priority(child_priority)
-        child_target_name = path_parts[1]
-        child_target = child_pipeline._get_node_or_raise(child_target_name)
-        child_previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
-        child_pipeline.producer_outputs[child_target.registration_name] = dict(child_previous_outputs)
-        child_pipeline._rebuild_visible_state(child_pipeline._incoming_parent_outputs())
+        self._invalidate_from_priority(
+            child_priority,
+            preserve_pipeline_state=child_pipeline,
+        )
         child_run = child_pipeline.run_from(*path_parts[1:], overrides=overrides)
         self.producer_outputs[child_pipeline.registration_name] = {
             name: value
@@ -5326,7 +5790,11 @@ class PipelineHandler:
         priority: float | None,
         upstream_outputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        visible = dict(upstream_outputs or self._incoming_parent_outputs())
+        visible = dict(
+            self._incoming_parent_outputs()
+            if upstream_outputs is None
+            else upstream_outputs
+        )
         visible.update(self.manual_values)
         if priority is None:
             return visible
@@ -5379,25 +5847,25 @@ class PipelineHandler:
                 visible.update(node.manual_values)
         return visible
 
-    def _descendant_visible_value(self, variable_name: str) -> Any | None:
+    def _descendant_visible_value(self, variable_name: str) -> Any:
         for node in self._sorted_nodes():
             if not isinstance(node, PipelineHandler):
                 continue
             if variable_name in node.para_value_dict:
                 return node.para_value_dict[variable_name]
             descendant_value = node._descendant_visible_value(variable_name)
-            if descendant_value is not None:
+            if descendant_value is not _MISSING:
                 return descendant_value
-        return None
+        return _MISSING
 
-    def _ancestor_descendant_visible_value(self, variable_name: str) -> Any | None:
+    def _ancestor_descendant_visible_value(self, variable_name: str) -> Any:
         current = self.parent_pipeline
         while current is not None:
             descendant_value = current._descendant_visible_value(variable_name)
-            if descendant_value is not None:
+            if descendant_value is not _MISSING:
                 return descendant_value
             current = current.parent_pipeline
-        return None
+        return _MISSING
 
     def _ancestor_config_values(self) -> dict[str, Any]:
         config: dict[str, Any] = {}
@@ -5495,8 +5963,8 @@ class PipelineHandler:
         required_outputs.difference_update(overrides or {})
         for output_name in required_outputs:
             value = materialized.get(output_name)
-            if isinstance(value, ArtifactRecord):
-                materialized[output_name] = self.artifact_store.load(value)
+            if isinstance(value, (ArtifactRecord, OutputPointer)):
+                materialized[output_name] = self._materialize_stored_value(value, "")
         return materialized
 
     def _cleanup_block_memory(self, node_name: str) -> None:
@@ -5818,21 +6286,41 @@ class PipelineHandler:
             return
         setattr(self.config, field_name, value)
 
-    def _invalidate_from_priority(self, priority: float, include_target: bool = True) -> None:
+    def _invalidate_from_priority(
+        self,
+        priority: float,
+        include_target: bool = True,
+        preserve_pipeline_state: PipelineHandler | None = None,
+    ) -> None:
         if priority is None:
             return
+        selected_nodes = [
+            node
+            for node in self._sorted_nodes()
+            if node.execution_priority >= priority
+            and (node.execution_priority != priority or include_target)
+        ]
+        slots = self._public_output_slots()
+        invalidated = {
+            OutputAddress(self.registration_name, node.registration_name, output_name)
+            for node in selected_nodes
+            for output_name in self.producer_outputs.get(
+                node.registration_name,
+                {},
+            )
+        }
+        self._prepare_pointer_removal(invalidated, slots)
         removed_outputs: list[dict[str, Any]] = []
-        for node in list(self._sorted_nodes()):
-            if node.execution_priority < priority:
-                continue
-            if node.execution_priority == priority and not include_target:
-                continue
+        for node in selected_nodes:
             removed_outputs.append(
                 self.producer_outputs.pop(node.registration_name, {})
             )
-            if isinstance(node, PipelineHandler):
+            if (
+                isinstance(node, PipelineHandler)
+                and node is not preserve_pipeline_state
+            ):
                 node._invalidate_all_outputs()
-        self._rebuild_visible_state(self._incoming_parent_outputs())
+        self._refresh_pointer_visible_state()
         for outputs in removed_outputs:
             self._delete_artifacts_from_outputs(outputs)
 
@@ -5852,7 +6340,10 @@ class PipelineHandler:
         active_artifact_paths = self._collect_referenced_artifact_paths()
         for value in outputs.values():
             if isinstance(value, ArtifactRecord):
-                if value.file_path in active_artifact_paths:
+                if (
+                    str(Path(value.file_path).resolve())
+                    in active_artifact_paths
+                ):
                     continue
                 try:
                     self.artifact_store.delete(value)
@@ -5862,22 +6353,41 @@ class PipelineHandler:
                         f"{type(exc).__name__}: {exc}"
                     )
 
+    def _cleanup_replaced_artifact(self, previous_value: Any) -> None:
+        """Retire a replaced artifact file only after its replacement committed.
+
+        Runs after the new value has been saved and every mapping slot has
+        been updated, so a serialization failure can never leave a deleted
+        file behind. The previous file is removed only when no remaining slot
+        (or mirror in this subtree) still references it, so passing the same
+        record as its own replacement keeps the file alive.
+        """
+        if not isinstance(previous_value, ArtifactRecord):
+            return
+        self._delete_artifacts_from_outputs({"_replaced": previous_value})
+
     def _collect_referenced_artifact_paths(self) -> set[str]:
         paths: set[str] = set()
 
         def collect_from_mapping(mapping: dict[str, Any]) -> None:
             for value in mapping.values():
                 if isinstance(value, ArtifactRecord):
-                    paths.add(value.file_path)
+                    paths.add(str(Path(value.file_path).resolve()))
 
-        collect_from_mapping(self.para_value_dict)
-        collect_from_mapping(self.artifact_registry)
-        collect_from_mapping(self.manual_values)
-        for outputs in self.producer_outputs.values():
-            collect_from_mapping(outputs)
-        for node in self._sorted_nodes():
-            if isinstance(node, PipelineHandler):
-                paths.update(node._collect_referenced_artifact_paths())
+        def collect_from_pipeline(pipeline: "PipelineHandler") -> None:
+            collect_from_mapping(pipeline.manual_values)
+            for node in pipeline._sorted_nodes():
+                if isinstance(node, PipelineHandler):
+                    collect_from_pipeline(node)
+                else:
+                    collect_from_mapping(
+                        pipeline.producer_outputs.get(
+                            node.registration_name,
+                            {},
+                        )
+                    )
+
+        collect_from_pipeline(self._root_pipeline())
         return paths
 
     def _persist_config_snapshot(self, path: Path) -> None:
@@ -6254,7 +6764,10 @@ class PipelineHandler:
 
     def config_as_dict(self) -> dict[str, Any]:
         if is_dataclass(self.config) and not isinstance(self.config, type):
-            config_dict = asdict(self.config)
+            config_dict = {
+                field.name: getattr(self.config, field.name)
+                for field in fields(self.config)
+            }
             extra_attrs = {
                 key: value
                 for key, value in vars(self.config).items()

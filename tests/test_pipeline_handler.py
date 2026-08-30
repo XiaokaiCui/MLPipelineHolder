@@ -19,13 +19,26 @@ import weakref
 
 from src import GateBlock as TopLevelGateBlock
 from src.mlpipelineholder import ExecutionError, GateBlock, PersistenceError, PipelineHandler, RegistrationError, ResolutionError
+from src.mlpipelineholder.artifact_store import ArtifactStore
 from src.mlpipelineholder.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
+from src.mlpipelineholder.serializers import choose_serializer
 
 
 @dataclass
 class DemoConfig:
     base: int
     factor: int = 2
+
+
+@dataclass
+class NestedInnerConfig:
+    x: int
+
+
+@dataclass
+class NestedOuterConfig:
+    inner: NestedInnerConfig
+    scale: float = 1.0
 
 
 def produce_seed(base: int) -> int:
@@ -262,6 +275,46 @@ def build_unserializable_object():
 
 def produce_json() -> dict[str, int]:
     return {"value": 1}
+
+
+def produce_mixed_key_mapping() -> dict[int | str, str]:
+    return {1: "integer", "1": "string"}
+
+
+def produce_tuple():
+    return (1, 2)
+
+
+def produce_none():
+    return None
+
+
+def child_result_step(logger) -> str:
+    logger.result("child-result-42")
+    return "child-out"
+
+
+def helper_args_join(*items: str) -> str:
+    return "|".join(items)
+
+
+def helper_kwargs_only(**named: str) -> str:
+    return "|".join(named[key] for key in sorted(named))
+
+
+class StaticMethodContainer:
+    @staticmethod
+    def static_times_two(x: int) -> int:
+        return x * 2
+
+    @classmethod
+    def class_times_three(cls, x: int) -> int:
+        return x * 3
+
+    class Nested:
+        @staticmethod
+        def nested_plus_one(x: int) -> int:
+            return x + 1
 
 
 def original_calc(x: int) -> int:
@@ -1611,6 +1664,78 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(pipeline.get_config_value("selected_close_col"), "Close")
             self.assertIn("selected_close_col", pipeline.get_full_config())
 
+    def test_pipeline_rejects_unsafe_registration_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            for index, bad_name in enumerate((
+                "",
+                ".",
+                "..",
+                "a/b",
+                "a\\b",
+                "/absolute",
+                "multi/part",
+                "\x00nul",
+                "D:relative",
+                "name:stream",
+                "name.",
+                "name ",
+                "CON",
+                "nul.txt",
+            )):
+                with self.subTest(name=bad_name):
+                    with self.assertRaises(RegistrationError):
+                        PipelineHandler(
+                            bad_name,
+                            {},
+                            Path(temp_dir) / f"case-{index}",
+                        )
+
+    def test_pipeline_accepts_safe_registration_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            for ok_name in ("simple", "with-hyphen", "with_underscore", "with.dot"):
+                with self.subTest(name=ok_name):
+                    pipeline = PipelineHandler(ok_name, {}, Path(temp_dir) / ok_name)
+                    self.assertEqual(pipeline.registration_name, ok_name)
+
+    def test_add_block_rejects_unsafe_registration_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("ok", {}, Path(temp_dir) / "ok")
+            for bad_name in ("", ".", "..", "a/b", "a\\b", "/absolute", "\x00nul"):
+                with self.subTest(name=bad_name):
+                    with self.assertRaises(RegistrationError):
+                        pipeline.add_block(bad_name, 1)
+
+    def test_add_child_pipeline_rejects_unsafe_override_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            child = PipelineHandler("child", {}, tmp / "child")
+
+            with self.assertRaises(RegistrationError):
+                parent.add_child_pipeline(child, 1, registration_name="../../evil")
+
+            self.assertEqual(child.registration_name, "child")
+
+    def test_load_pipeline_rejects_payload_with_unsafe_registration_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("safe", DemoConfig(base=2), tmp / "project")
+            setup = pipeline.add_block("setup", 1)
+            assert setup is not None
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline(tmp / "bundle")
+
+            state_path = tmp / "bundle" / "pipeline_state.pkl"
+            with state_path.open("rb") as handle:
+                payload = pickle.load(handle)
+            payload["registration_name"] = ".."
+            with state_path.open("wb") as handle:
+                pickle.dump(payload, handle)
+
+            with self.assertRaises(PersistenceError):
+                PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+
     def test_pipeline_creation_rejects_non_empty_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -1748,6 +1873,80 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline._rebuild_visible_state()
 
             self.assertEqual(pipeline.get_value("seed"), 42)
+
+    def test_update_value_failed_serialization_keeps_previous_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("tx-update", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("b", 2)
+            block.register_function(save_json, ["blob"], save_to_disk=["blob"])
+            pipeline.run_all()
+
+            old_record = pipeline.para_value_dict["blob"]
+            old_path = Path(old_record.file_path)
+            self.assertTrue(old_path.exists())
+
+            with self.assertRaises(PersistenceError):
+                pipeline.update_value("blob", build_unserializable_object())
+
+            self.assertTrue(old_path.exists())
+            self.assertEqual(pipeline.get_value("blob"), {"seed": 3, "double": 6})
+
+    def test_update_value_reusing_same_record_keeps_artifact_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("tx-reuse", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("b", 2)
+            block.register_function(save_json, ["blob"], save_to_disk=["blob"])
+            pipeline.run_all()
+
+            record = pipeline.para_value_dict["blob"]
+            record_path = Path(record.file_path)
+
+            pipeline.update_value("blob", record)
+
+            self.assertTrue(record_path.exists())
+            self.assertEqual(pipeline.get_value("blob"), {"seed": 3, "double": 6})
+
+    def test_update_value_success_removes_previous_artifact_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("tx-commit", DemoConfig(base=2), tmp_path)
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            block = pipeline.add_block("b", 2)
+            block.register_function(save_json, ["blob"], save_to_disk=["blob"])
+            pipeline.run_all()
+
+            old_path = Path(pipeline.para_value_dict["blob"].file_path)
+            self.assertTrue(old_path.exists())
+
+            pipeline.update_value("blob", {"current": 9})
+
+            self.assertFalse(old_path.exists())
+            self.assertEqual(pipeline.get_value("blob"), {"current": 9})
+
+    def test_set_constant_value_failed_serialization_keeps_previous_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("tx-const", {}, tmp_path)
+            pipeline.set_constant_value("big", {"a": 1}, to_disk=True)
+
+            old_record = pipeline.manual_values["big"]
+            old_path = Path(old_record.file_path)
+            self.assertTrue(old_path.exists())
+
+            with self.assertRaises(PersistenceError):
+                pipeline.set_constant_value(
+                    "big", build_unserializable_object(), to_disk=True
+                )
+
+            self.assertTrue(old_path.exists())
+            self.assertEqual(pipeline.get_constant_value("big"), {"a": 1})
 
     def test_update_value_rejects_unknown_name(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2120,6 +2319,64 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(artifact.serializer, "json")
             self.assertEqual(pipeline.get_value("json_blob"), {"seed": 3, "double": 6})
 
+    def test_json_serializer_excludes_tuple(self) -> None:
+        self.assertNotEqual(choose_serializer((1, 2)), "json")
+
+    def test_json_serializer_excludes_mixed_type_dict_keys(self) -> None:
+        self.assertEqual(choose_serializer({1: "integer", "1": "string"}), "pickle")
+
+    def test_json_serializer_excludes_non_string_dict_keys(self) -> None:
+        self.assertEqual(choose_serializer({1: "value"}), "pickle")
+
+    def test_json_serializer_excludes_set_and_non_finite_floats(self) -> None:
+        self.assertEqual(choose_serializer({1, 2, 3}), "pickle")
+        self.assertEqual(choose_serializer(float("nan")), "pickle")
+        self.assertEqual(choose_serializer([float("inf")]), "pickle")
+
+    def test_json_serializer_accepts_exact_json_safe_values(self) -> None:
+        safe_value = {
+            "name": "x",
+            "count": 3,
+            "ratio": 1.5,
+            "ok": True,
+            "none": None,
+            "items": [1, "two", 3.0, None, False, ["nested"]],
+        }
+        self.assertEqual(choose_serializer(safe_value), "json")
+
+    def test_tuple_disk_artifact_round_trips_preserving_type(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("tuple", {}, tmp_path)
+            block = pipeline.add_block("tuple_write", 1)
+            block.register_function(produce_tuple, ["pair_blob"], save_to_disk=["pair_blob"])
+            pipeline.run_all()
+
+            artifact = pipeline.para_value_dict["pair_blob"]
+            self.assertEqual(artifact.serializer, "pickle")
+            value = pipeline.get_value("pair_blob")
+            self.assertIsInstance(value, tuple)
+            self.assertEqual(value, (1, 2))
+
+    def test_mixed_key_dict_disk_artifact_round_trips_without_entry_loss(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("mixed-keys", {}, tmp_path)
+            block = pipeline.add_block("producer", 1)
+            block.register_function(
+                produce_mixed_key_mapping,
+                ["mapping_blob"],
+                save_to_disk=["mapping_blob"],
+            )
+            pipeline.run_all()
+
+            artifact = pipeline.para_value_dict["mapping_blob"]
+            self.assertEqual(artifact.serializer, "pickle")
+            value = pipeline.get_value("mapping_blob")
+            self.assertEqual(len(value), 2)
+            self.assertEqual(value[1], "integer")
+            self.assertEqual(value["1"], "string")
+
     def test_numpy_artifact_uses_numpy_serializer(self) -> None:
         from importlib import import_module
 
@@ -2276,6 +2533,89 @@ class PipelineHandlerTests(unittest.TestCase):
             historical = pipeline.get_node_output("first", "shared_df")
             self.assertEqual(historical.compute()["value"].tolist(), [3, 4, 5])
             self.assertEqual(pipeline.get_node_output("second", "shared_df"), "value=3")
+
+    def test_feather_artifact_preserves_range_index(self) -> None:
+        from importlib import import_module
+
+        pd = import_module("pandas")
+        with TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir))
+            frame = pd.DataFrame({"value": [1, 2, 3]}, index=pd.RangeIndex(5, 8))
+
+            record = store.save("frame", frame, "block", "function", "run1")
+
+            self.assertEqual(record.serializer, "feather")
+            loaded = store.load(record)
+            pd.testing.assert_frame_equal(frame, loaded, check_index_type=False)
+            self.assertEqual(loaded.index.tolist(), [5, 6, 7])
+            self.assertEqual(loaded.index.name, frame.index.name)
+
+    def test_feather_artifact_preserves_datetime_index(self) -> None:
+        from importlib import import_module
+
+        pd = import_module("pandas")
+        with TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir))
+            frame = pd.DataFrame(
+                {"value": [1.0, 2.0, 3.0]},
+                index=pd.DatetimeIndex(["2024-01-01", "2024-01-02", "2024-01-03"], name="date"),
+            )
+
+            record = store.save("frame", frame, "block", "function", "run1")
+
+            self.assertEqual(record.serializer, "feather")
+            loaded = store.load(record)
+            pd.testing.assert_frame_equal(frame, loaded)
+
+    def test_feather_artifact_preserves_string_index(self) -> None:
+        from importlib import import_module
+
+        pd = import_module("pandas")
+        with TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir))
+            frame = pd.DataFrame(
+                {"value": [10, 20, 30]},
+                index=pd.Index(["alpha", "beta", "gamma"], name="symbol"),
+            )
+
+            record = store.save("frame", frame, "block", "function", "run1")
+
+            self.assertEqual(record.serializer, "feather")
+            loaded = store.load(record)
+            pd.testing.assert_frame_equal(frame, loaded)
+
+    def test_feather_artifact_preserves_named_index(self) -> None:
+        from importlib import import_module
+
+        pd = import_module("pandas")
+        with TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir))
+            frame = pd.DataFrame({"value": [7, 8, 9]}, index=pd.Index([0, 1, 2], name="row_id"))
+
+            record = store.save("frame", frame, "block", "function", "run1")
+
+            self.assertEqual(record.serializer, "feather")
+            loaded = store.load(record)
+            pd.testing.assert_frame_equal(frame, loaded)
+
+    def test_feather_artifact_preserves_multi_index(self) -> None:
+        from importlib import import_module
+
+        pd = import_module("pandas")
+        with TemporaryDirectory() as temp_dir:
+            store = ArtifactStore(Path(temp_dir))
+            frame = pd.DataFrame(
+                {"value": [100, 200, 300]},
+                index=pd.MultiIndex.from_tuples(
+                    [("a", 1), ("b", 2), ("c", 3)], names=["letter", "number"]
+                ),
+            )
+
+            record = store.save("frame", frame, "block", "function", "run1")
+
+            self.assertEqual(record.serializer, "feather")
+            loaded = store.load(record)
+            pd.testing.assert_frame_equal(frame, loaded)
 
     def test_describe_pipeline_contains_blocks_functions_and_io(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4532,3 +4872,274 @@ class StrictModeTests(unittest.TestCase):
             block = pipeline.add_block("b", 1)
             block.register_function(produce_seed, ["out"])
             self.assertIn("unmapped input", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def test_forged_artifact_record_outside_root_is_not_deleted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("forge", {}, tmp / "project")
+            outside = tmp / "outside.pkl"
+            outside.write_bytes(b"important")
+
+            forged = ArtifactRecord(
+                variable_name="x",
+                serializer="pickle",
+                file_path=str(outside),
+                produced_by_block="b",
+                produced_by_function="f",
+                run_id="r",
+            )
+            pipeline._delete_artifacts_from_outputs({"x": forged})
+
+            self.assertTrue(outside.exists())
+
+    def test_replaced_artifact_keeps_sibling_reference_alive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = PipelineHandler("parent", {}, tmp / "parent")
+            producer = PipelineHandler("producer", {}, tmp / "producer")
+            producer.set_constant_value("blob", {"old": 1}, to_disk=True)
+            parent.add_child_pipeline(producer, 1)
+            consumer = PipelineHandler("consumer", {}, tmp / "consumer")
+            parent.add_child_pipeline(consumer, 2)
+            previous = producer.manual_values["blob"]
+            consumer.set_constant_value("shared", previous)
+
+            producer.set_constant_value("blob", {"new": 2}, to_disk=True)
+
+            self.assertTrue(Path(previous.file_path).exists())
+            self.assertEqual(consumer.get_constant_value("shared"), {"old": 1})
+
+    def test_replaced_artifact_keeps_equivalent_path_reference_alive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("aliases", {}, tmp / "project")
+            pipeline.set_constant_value("source", {"old": 1}, to_disk=True)
+            previous = pipeline.manual_values["source"]
+            previous_path = Path(previous.file_path)
+            equivalent_path = (
+                previous_path.parent
+                / ".."
+                / previous_path.parent.name
+                / previous_path.name
+            )
+            pipeline.set_constant_value(
+                "alias",
+                ArtifactRecord(
+                    variable_name="alias",
+                    serializer=previous.serializer,
+                    file_path=str(equivalent_path),
+                    produced_by_block=previous.produced_by_block,
+                    produced_by_function=previous.produced_by_function,
+                    run_id=previous.run_id,
+                ),
+            )
+
+            pipeline.set_constant_value("source", {"new": 2}, to_disk=True)
+
+            self.assertTrue(previous_path.exists())
+            self.assertEqual(pipeline.get_constant_value("alias"), {"old": 1})
+
+    def test_get_value_returns_none_when_descendant_output_is_none(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {}, tmp / "root")
+            child = PipelineHandler("child", {}, tmp / "child")
+            block = child.add_block("producer", 1)
+            block.register_function(produce_none, ["out"])
+            root.add_child_pipeline(child, 1)
+            child.producer_outputs["producer"] = {"out": None}
+            child._rebuild_visible_state({})
+
+            self.assertIsNone(root.get_value("out"))
+
+    def test_nested_dataclass_config_field_keeps_identity(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "nested-cfg",
+                NestedOuterConfig(inner=NestedInnerConfig(x=5)),
+                tmp / "project",
+            )
+
+            inner = pipeline.get_config_value("inner")
+            self.assertIsInstance(inner, NestedInnerConfig)
+            self.assertEqual(inner.x, 5)
+
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+
+            self.assertIsInstance(loaded.config.inner, NestedInnerConfig)
+            self.assertEqual(loaded.config.inner.x, 5)
+            loaded_inner = loaded.get_config_value("inner")
+            self.assertIsInstance(loaded_inner, NestedInnerConfig)
+            self.assertEqual(loaded_inner.x, 5)
+
+    def test_static_method_registration_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("static-method", {"x": 5}, tmp / "project")
+            block = pipeline.add_block("calc", 1)
+            block.register_function(StaticMethodContainer.static_times_two, ["out"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("out"), 10)
+
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+
+            self.assertEqual(loaded.get_value("out"), 10)
+
+    def test_classmethod_registration_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("class-method", {"x": 5}, tmp / "project")
+            block = pipeline.add_block("calc", 1)
+            block.register_function(StaticMethodContainer.class_times_three, ["out"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("out"), 15)
+
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+
+            self.assertEqual(loaded.get_value("out"), 15)
+
+    def test_nested_class_method_registration_round_trips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("nested-method", {"x": 5}, tmp / "project")
+            block = pipeline.add_block("calc", 1)
+            block.register_function(
+                StaticMethodContainer.Nested.nested_plus_one,
+                ["out"],
+            )
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("out"), 6)
+
+            pipeline.save_pipeline(tmp / "bundle")
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+
+            self.assertEqual(loaded.get_value("out"), 6)
+
+    def test_loaded_child_pipeline_keeps_previous_result_history(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            child = PipelineHandler("child", {}, tmp / "child_root")
+            block = child.add_block("setup", 1)
+            block.register_function(child_result_step, ["child_out"])
+            child.run_all()
+
+            parent = PipelineHandler("parent", {}, tmp / "parent_root")
+            parent.add_child_pipeline(child, 1)
+            parent.save_pipeline(tmp / "bundle")
+
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded_child = loaded.get_child_pipeline("child")
+            history = loaded_child.get_result_history()
+
+            self.assertTrue(any("child-result-42" in entry for entry in history))
+
+    def test_changed_args_helper_invalidates_consuming_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("helper-args", {}, tmp / "project")
+            pipeline.set_constant_value("head_a", "a")
+            pipeline.set_constant_value("head_b", "b")
+            block = pipeline.add_block("b", 1)
+            assert block is not None
+            block.register_args("items", ["head_a"])
+            registration = block.register_function(
+                helper_args_join,
+                ["out"],
+                var_pos_name="items",
+            )
+            block.register_function(produce_tuple, ["unrelated"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("out"), "a")
+            self.assertEqual(pipeline.get_value("unrelated"), (1, 2))
+
+            block.register_args("items", ["head_b"], forced=True)
+            self.assertNotIn("out", pipeline.para_value_dict)
+            self.assertEqual(pipeline.get_value("unrelated"), (1, 2))
+
+            pipeline.run_block("b")
+            self.assertEqual(pipeline.get_value("out"), "b")
+
+            repeated = block.register_function(
+                helper_args_join,
+                ["out"],
+                var_pos_name="items",
+                forced=True,
+            )
+            self.assertIs(repeated, registration)
+            self.assertEqual(pipeline.get_value("out"), "b")
+
+    def test_changed_kwargs_helper_invalidates_consuming_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("helper-kwargs", {}, tmp / "project")
+            pipeline.set_constant_value("tail_a", "z")
+            pipeline.set_constant_value("tail_b", "y")
+            block = pipeline.add_block("b", 1)
+            assert block is not None
+            block.register_kwargs("extra", {"suffix": "tail_a"})
+            registration = block.register_function(
+                helper_kwargs_only,
+                ["out"],
+                var_kw_name="extra",
+            )
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("out"), "z")
+
+            block.register_kwargs("extra", {"suffix": "tail_b"}, forced=True)
+            self.assertNotIn("out", pipeline.para_value_dict)
+
+            pipeline.run_block("b")
+            self.assertEqual(pipeline.get_value("out"), "y")
+
+            repeated = block.register_function(
+                helper_kwargs_only,
+                ["out"],
+                var_kw_name="extra",
+                forced=True,
+            )
+            self.assertIs(repeated, registration)
+            self.assertEqual(pipeline.get_value("out"), "y")
+
+    def test_unused_args_helper_preserves_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("unused-args", {}, Path(temp_dir) / "project")
+            block = pipeline.add_block("b", 1)
+            assert block is not None
+            block.register_function(produce_tuple, ["out"])
+            pipeline.run_all()
+
+            block.register_args("unused", [])
+
+            self.assertEqual(pipeline.get_value("out"), (1, 2))
+
+    def test_unused_kwargs_helper_preserves_outputs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("unused-kwargs", {}, Path(temp_dir) / "project")
+            block = pipeline.add_block("b", 1)
+            assert block is not None
+            block.register_function(produce_tuple, ["out"])
+            pipeline.run_all()
+
+            block.register_kwargs("unused", {})
+
+            self.assertEqual(pipeline.get_value("out"), (1, 2))
+
+    def test_visible_outputs_before_priority_respects_explicit_empty_upstream(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", {"base": 2}, tmp / "root")
+            setup = root.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+            root.run_all()
+
+            child = PipelineHandler("child", {}, tmp / "child")
+            root.add_child_pipeline(child, 2)
+
+            self.assertNotIn("seed", child._visible_outputs_before_priority(None, {}))
+            self.assertIn("seed", child._visible_outputs_before_priority(None))

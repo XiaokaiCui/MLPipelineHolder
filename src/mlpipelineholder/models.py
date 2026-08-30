@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .output_pointers import OutputAddress
+
 
 @dataclass(slots=True)
 class ArtifactRecord:
@@ -38,6 +40,7 @@ class FunctionRegistration:
     var_kw_name: str | None = None
     args_registration_state: list[str] | None = None
     kwargs_registration_state: dict[str, str] | None = None
+    overridden_outputs: dict[str, OutputAddress] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -47,6 +50,7 @@ class ExpressionRegistration:
     output_names: list[str]
     save_to_disk: set[str]
     warn_on_input_mutation: bool = False
+    overridden_outputs: dict[str, OutputAddress] = field(default_factory=dict)
 
     @property
     def function_name(self) -> str:
