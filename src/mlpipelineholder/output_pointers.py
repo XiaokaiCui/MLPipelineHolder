@@ -52,4 +52,11 @@ def is_strictly_upstream(
     target_priority: tuple[float, ...],
     current_priority: tuple[float, ...],
 ) -> bool:
-    return target_priority < current_priority
+    for target_part, current_part in zip(target_priority, current_priority):
+        target_group = int(target_part)
+        current_group = int(current_part)
+        if target_group < current_group:
+            return True
+        if target_group > current_group:
+            return False
+    return False

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import shutil
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -56,26 +56,31 @@ class ArtifactStore:
             torch_weights_only=getattr(artifact, "torch_load_weights_only", False),
         )
 
+    def _assert_managed_artifact_path(self, path: Path) -> Path:
+        resolved = path.resolve()
+        artifact_root = self.artifact_root.resolve()
+        if artifact_root not in resolved.parents:
+            raise PersistenceError(
+                f"Refusing to operate on artifact outside artifact root: {resolved}"
+            )
+        return resolved
+
     def delete(self, artifact: ArtifactRecord) -> None:
         path = Path(artifact.file_path).resolve()
         if not path.exists():
             return
-        artifact_root = self.artifact_root.resolve()
-        if artifact_root not in path.parents:
-            raise PersistenceError(
-                f"Refusing to delete artifact outside artifact root: {path}"
-            )
-        if path.is_dir():
-            shutil.rmtree(path)
+        managed_path = self._assert_managed_artifact_path(path)
+        if managed_path.is_dir():
+            shutil.rmtree(managed_path)
         else:
-            path.unlink()
+            managed_path.unlink()
 
     def transfer(
         self,
         artifact: ArtifactRecord,
         block_name: str,
     ) -> ArtifactRecord:
-        source = Path(artifact.file_path).resolve()
+        source = self._assert_managed_artifact_path(Path(artifact.file_path))
         if not source.is_file():
             raise PersistenceError(
                 f"Cannot transfer missing artifact: {source}"

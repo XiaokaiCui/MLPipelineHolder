@@ -1644,18 +1644,8 @@ class PipelineHandler:
             parent_outputs = parent.producer_outputs.get(current.registration_name)
             if parent_outputs is None or variable_name not in parent_outputs:
                 return
-            cached_output = parent_outputs[variable_name]
             parent_outputs[variable_name] = value
-            if (
-                variable_name in parent.para_value_dict
-                and variable_name not in parent.manual_values
-                and parent.para_value_dict[variable_name] is cached_output
-            ):
-                parent.para_value_dict[variable_name] = value
-                if isinstance(value, ArtifactRecord):
-                    parent.artifact_registry[variable_name] = value
-                else:
-                    parent.artifact_registry.pop(variable_name, None)
+            parent._refresh_visible_value(variable_name)
             current = parent
 
     def recover_variable_from_backup(
@@ -4969,7 +4959,7 @@ class PipelineHandler:
         pipeline = self._pipeline_by_name(address.pipeline_name)
         return pipeline._priority_vector(address.node_name)
 
-    def _repair_forbidden_pointer_gaps(
+    def _repair_pointer_gaps(
         self,
         invalidated: set[OutputAddress],
         slots: dict[OutputAddress, Any],
@@ -5032,8 +5022,7 @@ class PipelineHandler:
         invalidated: set[OutputAddress],
         slots: dict[OutputAddress, Any],
     ) -> None:
-        if self._invalidation_forbidden:
-            self._repair_forbidden_pointer_gaps(invalidated, slots)
+        self._repair_pointer_gaps(invalidated, slots)
         self._promote_pointer_values_before_removal(invalidated, slots)
 
     def _validate_runtime_output_pointers(self) -> None:
@@ -5067,22 +5056,26 @@ class PipelineHandler:
     ) -> None:
         overrides = self._node_overridden_outputs(node)
         targets: list[tuple[str, PipelineHandler, OutputAddress]] = []
-        for output_name, address in overrides.items():
-            if output_name not in produced_outputs:
-                continue
-            target_pipeline = self._pipeline_by_name(address.pipeline_name)
-            if (
-                address.node_name not in target_pipeline.nodes_by_name
-                or output_name
-                not in target_pipeline._node_declared_outputs(
-                    target_pipeline.nodes_by_name[address.node_name]
-                )
-            ):
-                raise ExecutionError(
-                    f"Output pointer target is no longer valid: "
-                    f"{address.pipeline_name}.{address.node_name}.{output_name}"
-                )
-            targets.append((output_name, target_pipeline, address))
+        try:
+            for output_name, address in overrides.items():
+                if output_name not in produced_outputs:
+                    continue
+                target_pipeline = self._pipeline_by_name(address.pipeline_name)
+                if (
+                    address.node_name not in target_pipeline.nodes_by_name
+                    or output_name
+                    not in target_pipeline._node_declared_outputs(
+                        target_pipeline.nodes_by_name[address.node_name]
+                    )
+                ):
+                    raise ExecutionError(
+                        f"Output pointer target is no longer valid: "
+                        f"{address.pipeline_name}.{address.node_name}.{output_name}"
+                    )
+                targets.append((output_name, target_pipeline, address))
+        except BaseException:
+            self._delete_artifacts_from_outputs(produced_outputs)
+            raise
 
         affected: dict[int, PipelineHandler] = {id(self): self}
         for _, pipeline, _ in targets:
@@ -5639,14 +5632,10 @@ class PipelineHandler:
         child_priority = child_pipeline.execution_priority
         if child_priority is None:
             raise RegistrationError(f"Child pipeline '{child_name}' has no priority")
-        snapshot = self._snapshot_runtime_state()
-        previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
-        self._invalidate_from_priority(child_priority)
-        child_target_name = path_parts[1]
-        child_target = child_pipeline._get_node_or_raise(child_target_name)
-        child_previous_outputs = snapshot[0].get(child_pipeline.registration_name, {})
-        child_pipeline.producer_outputs[child_target.registration_name] = dict(child_previous_outputs)
-        child_pipeline._rebuild_visible_state(child_pipeline._incoming_parent_outputs())
+        self._invalidate_from_priority(
+            child_priority,
+            preserve_pipeline_state=child_pipeline,
+        )
         child_run = child_pipeline.run_from(*path_parts[1:], overrides=overrides)
         self.producer_outputs[child_pipeline.registration_name] = {
             name: value
@@ -5974,8 +5963,8 @@ class PipelineHandler:
         required_outputs.difference_update(overrides or {})
         for output_name in required_outputs:
             value = materialized.get(output_name)
-            if isinstance(value, ArtifactRecord):
-                materialized[output_name] = self.artifact_store.load(value)
+            if isinstance(value, (ArtifactRecord, OutputPointer)):
+                materialized[output_name] = self._materialize_stored_value(value, "")
         return materialized
 
     def _cleanup_block_memory(self, node_name: str) -> None:
@@ -6297,7 +6286,12 @@ class PipelineHandler:
             return
         setattr(self.config, field_name, value)
 
-    def _invalidate_from_priority(self, priority: float, include_target: bool = True) -> None:
+    def _invalidate_from_priority(
+        self,
+        priority: float,
+        include_target: bool = True,
+        preserve_pipeline_state: PipelineHandler | None = None,
+    ) -> None:
         if priority is None:
             return
         selected_nodes = [
@@ -6321,7 +6315,10 @@ class PipelineHandler:
             removed_outputs.append(
                 self.producer_outputs.pop(node.registration_name, {})
             )
-            if isinstance(node, PipelineHandler):
+            if (
+                isinstance(node, PipelineHandler)
+                and node is not preserve_pipeline_state
+            ):
                 node._invalidate_all_outputs()
         self._refresh_pointer_visible_state()
         for outputs in removed_outputs:

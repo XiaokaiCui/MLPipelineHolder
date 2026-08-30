@@ -36,10 +36,18 @@ def identity(value: list[int]) -> list[int]:
     return value
 
 
+def produce_none(seed: int) -> None:
+    return None
+
+
+def preserve_none(value: None) -> None:
+    return value
+
+
 def add_block(
     pipeline: PipelineHandler,
     registration_name: str,
-    execution_priority: int,
+    execution_priority: float,
 ) -> ExecutionBlock:
     block = pipeline.add_block(registration_name, execution_priority)
     assert block is not None
@@ -126,6 +134,113 @@ class OutputPointerRegistrationTests(unittest.TestCase):
                     ["value"],
                     overridden_outputs={"value": ("root", "second")},
                 )
+
+    def test_registration_rejects_unknown_output_key(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "root",
+                {"seed": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            first = add_block(pipeline, "first", 1)
+            first.register_function(make_value, ["value"])
+            second = add_block(pipeline, "second", 2)
+
+            # When / Then
+            with self.assertRaisesRegex(RegistrationError, "declared outputs"):
+                second.register_function(
+                    append_two,
+                    ["value"],
+                    overridden_outputs={"unknown": ("root", "first")},
+                )
+
+    def test_registration_rejects_unknown_pipeline_or_node(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "root",
+                {"seed": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            first = add_block(pipeline, "first", 1)
+            first.register_function(make_value, ["value"])
+
+            # When / Then
+            for priority, block_name, target, message in (
+                (2, "unknown_pipeline", ("missing", "first"), "one attached pipeline"),
+                (3, "unknown_node", ("root", "missing"), "does not exist"),
+            ):
+                with self.subTest(block_name=block_name):
+                    block = add_block(pipeline, block_name, priority)
+                    with self.assertRaisesRegex(RegistrationError, message):
+                        block.register_function(
+                            append_two,
+                            ["value"],
+                            overridden_outputs={"value": target},
+                        )
+
+    def test_registration_rejects_target_without_output(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "root",
+                {"seed": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            first = add_block(pipeline, "first", 1)
+            first.register_function(make_value, ["source"])
+            second = add_block(pipeline, "second", 2)
+
+            # When / Then
+            with self.assertRaisesRegex(RegistrationError, "does not declare"):
+                second.register_function(
+                    append_two,
+                    ["value"],
+                    param_mapping={"value": "source"},
+                    overridden_outputs={"value": ("root", "first")},
+                )
+
+    def test_registration_rejects_target_in_same_priority_group(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "root",
+                {"seed": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            first = add_block(pipeline, "first", 1.1)
+            first.register_function(make_value, ["value"])
+            second = add_block(pipeline, "second", 1.2)
+
+            # When / Then
+            with self.assertRaisesRegex(RegistrationError, "globally upstream"):
+                second.register_function(
+                    append_two,
+                    ["value"],
+                    overridden_outputs={"value": ("root", "first")},
+                )
+
+    def test_attaching_ambiguous_nested_pipeline_name_is_rejected(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            parent = PipelineHandler("parent", {}, root / "parent")
+            left = PipelineHandler("left", {}, root / "left")
+            left_leaf = PipelineHandler("shared", {}, root / "left_leaf")
+            left.add_child_pipeline(left_leaf, 1)
+            parent.add_child_pipeline(left, 1)
+            right = PipelineHandler("right", {}, root / "right")
+            right_leaf = PipelineHandler("shared", {}, root / "right_leaf")
+            right.add_child_pipeline(right_leaf, 1)
+
+            # When / Then
+            with self.assertRaisesRegex(RegistrationError, "unique"):
+                parent.add_child_pipeline(right, 2)
 
 
 class OutputPointerRuntimeTests(unittest.TestCase):
@@ -234,6 +349,52 @@ class OutputPointerRuntimeTests(unittest.TestCase):
                 r"root\.second\.value.*set_value.*pipeline 'root'",
             ):
                 child.set_value("value", [99])
+
+    def test_none_terminal_value_resolves_through_pointer(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", {"seed": 1}, Path(temp_dir))
+            first = add_block(pipeline, "first", 1)
+            first.register_function(produce_none, ["value"])
+            second = add_block(pipeline, "second", 2)
+            second.register_function(
+                preserve_none,
+                ["value"],
+                overridden_outputs={"value": ("root", "first")},
+            )
+
+            # When
+            pipeline.run_all()
+
+            # Then
+            self.assertIsNone(pipeline.get_node_output("first", "value"))
+            self.assertIsNone(pipeline.get_node_output("second", "value"))
+            self.assertIsNone(pipeline.get_value("value"))
+
+    def test_pointer_override_remains_visible_in_conflict_report(self) -> None:
+        # Given
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", {"seed": 1}, Path(temp_dir))
+            first = add_block(pipeline, "first", 1)
+            first.register_function(make_value, ["value"])
+            second = add_block(pipeline, "second", 2)
+            second.register_function(
+                append_two,
+                ["value"],
+                overridden_outputs={"value": ("root", "first")},
+            )
+
+            # When
+            conflicts = pipeline.get_output_conflicts()
+
+            # Then
+            self.assertEqual(
+                conflicts["value"],
+                {
+                    "created_by": "root/first",
+                    "overridden_by": ["root/second"],
+                },
+            )
 
 
 if __name__ == "__main__":
