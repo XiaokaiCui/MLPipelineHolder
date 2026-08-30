@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import shutil
 from typing import Any
 from uuid import uuid4
@@ -68,3 +69,29 @@ class ArtifactStore:
             shutil.rmtree(path)
         else:
             path.unlink()
+
+    def transfer(
+        self,
+        artifact: ArtifactRecord,
+        block_name: str,
+    ) -> ArtifactRecord:
+        source = Path(artifact.file_path).resolve()
+        if not source.is_file():
+            raise PersistenceError(
+                f"Cannot transfer missing artifact: {source}"
+            )
+        safe_block = block_name.replace("/", "_")
+        destination_dir = self.artifact_root / safe_block
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / f"promoted__{uuid4().hex}{source.suffix}"
+        os.replace(source, destination)
+        return ArtifactRecord(
+            variable_name=artifact.variable_name,
+            serializer=artifact.serializer,
+            file_path=str(destination),
+            produced_by_block=block_name,
+            produced_by_function=artifact.produced_by_function,
+            run_id=artifact.run_id,
+            created_at=artifact.created_at,
+            torch_load_weights_only=artifact.torch_load_weights_only,
+        )

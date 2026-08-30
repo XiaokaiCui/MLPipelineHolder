@@ -55,6 +55,7 @@ class ExecutionBlock:
         save_to_disk: bool = False,
         forced: bool = False,
         warn_on_input_mutation: bool = False,
+        overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
         if self.parent._is_atom:
             raise RegistrationError(
@@ -67,6 +68,7 @@ class ExecutionBlock:
             save_to_disk=save_to_disk,
             forced=forced,
             warn_on_input_mutation=warn_on_input_mutation,
+            overridden_outputs=overridden_outputs,
         )
 
     def _register_expression_strict(
@@ -77,6 +79,7 @@ class ExecutionBlock:
         save_to_disk: bool,
         forced: bool,
         warn_on_input_mutation: bool,
+        overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> ExpressionRegistration:
         if any(
             isinstance(registration, FunctionRegistration)
@@ -106,6 +109,12 @@ class ExecutionBlock:
             raise RegistrationError("save_to_disk=True requires an output variable")
         if output_names:
             self.parent._validate_output_names_against_config(output_names)
+        normalized_overrides = self.parent._normalize_overridden_outputs(
+            output_names,
+            overridden_outputs,
+            current_node_name=self.registration_name,
+            current_priority=self.execution_priority,
+        )
         identity = final_output or code
         existing = next(
             (
@@ -147,6 +156,7 @@ class ExecutionBlock:
                 and existing.output_names == output_names
                 and existing.save_to_disk == new_save_to_disk
                 and existing.warn_on_input_mutation == warn_on_input_mutation
+                and existing.overridden_outputs == normalized_overrides
             ):
                 return existing
             if self.parent._invalidation_forbidden:
@@ -174,6 +184,7 @@ class ExecutionBlock:
             output_names=output_names,
             save_to_disk={final_output} if save_to_disk and final_output is not None else set(),
             warn_on_input_mutation=warn_on_input_mutation,
+            overridden_outputs=normalized_overrides,
         )
         if warn_on_input_mutation and input_names:
             self.parent.logger.info(
@@ -366,6 +377,7 @@ class ExecutionBlock:
         var_pos_name: str | None = None,
         var_kw_name: str | None = None,
         forced: bool = False,
+        overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
         if self.parent._is_atom:
             raise RegistrationError(
@@ -396,6 +408,7 @@ class ExecutionBlock:
                 param_mapping,
                 var_pos_name,
                 var_kw_name,
+                overridden_outputs,
             ):
                 return existing_registration
         try:
@@ -407,6 +420,7 @@ class ExecutionBlock:
                 var_pos_name=var_pos_name,
                 var_kw_name=var_kw_name,
                 forced=forced,
+                overridden_outputs=overridden_outputs,
                 replacing=existing_registration,
                 commit=existing_registration is None,
             )
@@ -440,6 +454,7 @@ class ExecutionBlock:
         param_mapping: dict[str, str | None] | None,
         var_pos_name: str | None,
         var_kw_name: str | None,
+        overridden_outputs: dict[str, tuple[str, str]] | None,
     ) -> bool:
         if not callable_identity_matches(
             existing.import_path,
@@ -458,6 +473,12 @@ class ExecutionBlock:
             var_pos_name,
             var_kw_name,
         )
+        normalized_overrides = self.parent._normalize_overridden_outputs(
+            new_output_names,
+            overridden_outputs,
+            current_node_name=self.registration_name,
+            current_priority=self.execution_priority,
+        )
         return (
             existing.output_names == new_output_names
             and existing.save_to_disk == set(save_to_disk or [])
@@ -466,6 +487,7 @@ class ExecutionBlock:
             and existing.var_kw_name == var_kw_name
             and existing.args_registration_state == args_state
             and existing.kwargs_registration_state == kwargs_state
+            and existing.overridden_outputs == normalized_overrides
         )
 
     def _variadic_registration_state(
@@ -503,6 +525,7 @@ class ExecutionBlock:
         forced: bool = False,
         replacing: FunctionRegistration | None = None,
         commit: bool = True,
+        overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> FunctionRegistration:
         del forced
         if any(
@@ -540,6 +563,12 @@ class ExecutionBlock:
                 "Disk-saved output names must be a subset of output variable names"
             )
         self.parent._validate_output_names_against_config(output_names)
+        normalized_overrides = self.parent._normalize_overridden_outputs(
+            output_names,
+            overridden_outputs,
+            current_node_name=self.registration_name,
+            current_priority=self.execution_priority,
+        )
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         declared_output_count = infer_declared_output_count(callable_obj)
@@ -578,6 +607,7 @@ class ExecutionBlock:
             var_kw_name=var_kw_name,
             args_registration_state=args_state,
             kwargs_registration_state=kwargs_state,
+            overridden_outputs=normalized_overrides,
         )
         self._strict_validate_registration(registration)
         self._warn_on_unmapped_resolvable_inputs(callable_obj, registration)

@@ -74,6 +74,7 @@ Organize variables and configurations by their scope:
 Handle large objects and memory settings based on these rules:
 - **Large Objects**: Use a proposal and confirmation workflow for disk backing. Identify likely candidates based on object type, estimated size, reuse frequency, and recomputation cost. Explain the RAM-vs-I/O trade-off and ask the user to confirm. Never infer actual size without evidence. The `save_to_disk` option applies only to declared produced outputs of a block, not to arbitrary inputs set via `set_constant_value`.
 - **Memory Settings**: An attached child pipeline's settings are overwritten by and inherit the existing parent settings. Changing the root parent affects the attached tree, so do not silently enable memory settings. Ask the user first. If the user is not sure, recommend a default based on the observed workload and disclose it.
+- **Output Pointer Chains**: When successive expression, function, or atom stages intentionally replace the same large output, propose <code>overridden_outputs={"name": ("pipeline_name", "upstream_node")}</code>. This keeps one terminal completed object or artifact after the full suffix runs while preserving addressable upstream stages. Never point to constants, config, ordinary pipeline containers, atom internals, detached trees, or downstream nodes.
 - **Implicit Promotion**: Do not silently promote memory flags, disk-backed outputs, exact priorities, comments, or logger output to requirements unless they are explicitly requested or delegated.
 
 ## Expression and Persistence Constraints
@@ -95,6 +96,9 @@ field must be picklable. Put non-picklable inputs in pipeline constants instead.
 `create_atom_child_pipeline` creates an immutable child: structural mutation (blocks,
 children, functions, expressions, args/kwargs helpers, gates, or removals) raises
 `RegistrationError`; config, constants, execution, and persistence remain available.
+
+**Output Override Rules**
+Use the exact spelling `overridden_outputs`. Each key must be one of the current stage's declared outputs and each value must be an existing globally-upstream `(pipeline_name, node_name)` that declares the same output. A declaration is metadata until the downstream stage commits successfully. Public reads and downstream inputs resolve the terminal real object automatically. Normal invalidation promotes a surviving owner; forbidden invalidation may splice a removed middle link; save/load preserves both declarations and active pointers. Explain that an incomplete partial rerun may temporarily retain multiple generations, while the complete missing suffix converges to one retained terminal value. If `set_value` reports that the selected slot is a pointer, follow its terminal owner message and set the value on that pipeline instead of bypassing the guard.
 
 Forced re-registration of an atom, function, or expression is a no-op when its definition
 is unchanged. Atom equality covers priority, gate, inner registrations/helpers, and only
@@ -148,6 +152,7 @@ Before returning code, verify:
 - Functions that need the pipeline logger declare a `logger` parameter and are not wired to it through `param_mapping` or wrappers.
 - Imports needed by expressions are in `define_expression_runtime`.
 - Data and parameter tables are stored with `set_constant_value`.
+- Repeated same-name large outputs use `overridden_outputs` only when the target is a verified public upstream block or atom.
 - No dependent expressions share a block.
 - `None` arguments use `param_mapping={...: None}`.
 - Long expressions use triple-quoted strings.

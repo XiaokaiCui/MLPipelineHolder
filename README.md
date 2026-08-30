@@ -6,7 +6,7 @@ It helps you persist intermediate results, organise modelling workflows, run rep
 
 Although this is currently a personal project that I originally developed for my own quantitative investing experiments, I’d be very happy to see it become useful to a wider group of people. Thank you for your interest in the project — any ideas, issues, suggestions, or feedback are very welcome!
 
-**v0.3.0 will be the first full release**, but **v0.2.14 and later versions are already very close to the planned full version**. If you are currently using an earlier release, I recommend upgrading to v0.2.14 or newer.
+**v0.3.0 will be the first full release**, there won't be a new feature to add after v0.2.18, once I believe all of the features are working properly, I will release v0.3.0.
 
 ## Installation
 

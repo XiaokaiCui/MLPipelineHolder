@@ -139,7 +139,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.2.15) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.2.18) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -296,13 +296,15 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   forced: <span class="arg">bool</span> = True,
   block_priority: <span class="arg">float</span> = 10.0,
   *,
-  param_mapping: <span class="arg">dict[str, str | None] | None</span> = None
+  param_mapping: <span class="arg">dict[str, str | None] | None</span> = None,
+  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
 <p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, or gates to it raises <code>RegistrationError</code>; only config and constant values remain mutable (so gates keep toggling through config).</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
 <p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers), and the same effective values for the config fields the atom consumes (gate field, <code>param_mapping</code> values, <code>kwargs_dct</code> values, <code>args_lst</code> entries). Unused config fields and their counts are ignored. Any difference in the compared fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
+<p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
 <h4 class="method-name" id="PipelineHandler.run_all">run_all()</h4>
 <div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
@@ -346,6 +348,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet).</p>
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
+<p>If the selected slot is an output pointer, <code>set_value()</code> raises <code>ResolutionError</code> without changing state. The message identifies the terminal <code>pipeline.node.output</code> that stores the real object and tells the caller which pipeline should receive <code>set_value()</code> instead.</p>
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produces the name registered it with <code>save_to_disk</code>, the value is saved to disk automatically, otherwise it stays in memory.</p>
 
 <h4 class="method-name" id="PipelineHandler.update_value">update_value()</h4>
@@ -568,7 +571,8 @@ print(pipeline.describe_pipeline())</pre>
   param_mapping: <span class="arg">dict[str, str | None] | None</span> = None,
   var_pos_name: <span class="arg">str | None</span> = None,
   var_kw_name: <span class="arg">str | None</span> = None,
-  forced: <span class="arg">bool</span> = False
+  forced: <span class="arg">bool</span> = False,
+  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
 ) -&gt; <span class="ret">FunctionRegistration | None</span>
 </div>
 <p>Registers a function in this block. Inputs are resolved at execution time from explicit overrides, <code>para_value_dict</code>, config fields, and function defaults, in that order.</p>
@@ -577,6 +581,7 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>param_mapping</code> exposes safer pipeline-facing parameter names without changing the callable.</li>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
+  <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
   <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
   <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
 </ul>
@@ -603,16 +608,24 @@ block.register_function(
   output_variable_name: <span class="arg">str | None</span> = None,
   save_to_disk: <span class="arg">bool</span> = False,
   forced: <span class="arg">bool</span> = False,
-  warn_on_input_mutation: <span class="arg">bool</span> = False
+  warn_on_input_mutation: <span class="arg">bool</span> = False,
+  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
 ) -&gt; <span class="ret">ExpressionRegistration</span>
 </div>
 <p>Registers a single-statement expression. Must be an assignment (<code>NAME = EXPR</code>) or a print/logger call. No semicolons, imports, <code>eval</code>/<code>exec</code>/<code>__import__</code>, comprehensions, walrus operators, or nested definitions.</p>
 <ul>
   <li>Returns <code>None</code> when the registration is rejected (for example output name conflicts).</li>
   <li>Imports used by expressions are supplied through <code>define_expression_runtime()</code>.</li>
+  <li><code>overridden_outputs</code> uses the same upstream-address contract as function and atom registrations.</li>
   <li>A block holds <strong>at most one expression</strong>: a second assignment, a second logging expression, or a mixed pair raises <code>RegistrationError</code>; re-registering the existing expression with <code>forced=True</code> replaces it.</li>
   <li>Forced replacement follows the same unified rule as <code>register_function</code> and <code>create_atom_child_pipeline</code>: an <strong>identical</strong> re-registration is a no-op that preserves all outputs; any real change erases the expression's own output, then invalidates from the earliest downstream block that consumes any affected output name (old outputs plus new outputs colliding with downstream inputs), warning about the consumers. Unrelated downstream blocks and consumers shielded by a later same-name producer are left untouched.</li>
 </ul>
+
+<h4 class="method-name" id="output-pointers">Persisted output pointers</h4>
+<p>Expression blocks, function blocks, and atom pipelines may replace a same-named upstream output with a pointer to their own committed output. Addresses use globally unique pipeline names and immediate public node names; ordinary pipeline containers, atom implementation blocks, constants, configuration fields, missing outputs, detached roots, and downstream targets are rejected.</p>
+<p>Public reads and function/expression inputs follow the chain recursively and return the terminal object or loaded disk artifact, never the pointer. A chain such as A → B → C therefore retains the real completed value at C while A and B contain small pointers, reducing retained memory and duplicate disk generations during complete experimental runs.</p>
+<p>Normal invalidation promotes a terminal value to the latest surviving upstream pointer slot without copying the in-memory object. Disk-backed promotion moves the managed artifact to the surviving owner. With <code>forbid_invalidate_objects()</code>, removing an intermediate pointer instead splices the broken link to a surviving downstream owner while preserving unrelated caches. A partial rerun can temporarily represent more than one generation; rerunning the complete missing suffix converges the chain again.</p>
+<p>Pointer declarations and active runtime links are preserved by <code>save_pipeline()</code> and <code>load_pipeline()</code>. Missing destinations and cycles are rejected during loading.</p>
 
 <h4 class="method-name" id="ExecutionBlock.register_args">register_args()</h4>
 <div class="sig"><span class="kw">register_args</span>(name: <span class="arg">str</span>, ordered_items: <span class="arg">tuple[str, ...] | list[str]</span>, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">BlockArgsRegistration | None</span></div>

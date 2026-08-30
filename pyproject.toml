@@ -1,6 +1,6 @@
 [project]
 name = "mlpipelineholder"
-version = "0.2.17"
+version = "0.2.18"
 description = "A lightweight Python framework for reproducible machine-learning pipelines in Jupyter notebook."
 authors = []
 readme = "README.md"
