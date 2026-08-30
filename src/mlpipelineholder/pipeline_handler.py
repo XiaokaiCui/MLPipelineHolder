@@ -14,7 +14,7 @@ import sys
 import warnings
 from ctypes import CDLL
 from contextlib import redirect_stdout
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
 from importlib import import_module
@@ -47,6 +47,7 @@ from .models import (
     RuntimeValueReference,
     TorchStateArtifactRecord,
 )
+from .naming import validate_registration_name
 
 if TYPE_CHECKING:
     from .execution_block import ExecutionBlock
@@ -71,6 +72,7 @@ _SAVE_WARNING_PATTERNS = (
 )
 
 _IMMUTABLE_TYPES = (int, float, complex, bool, str, bytes, type(None))
+_MISSING = object()
 _ACTIVE_PACKAGE_ROOT = __name__.rsplit(".", maxsplit=1)[0]
 _PERSISTED_PACKAGE_ROOTS = ("mlpipelineholder", "src.mlpipelineholder")
 
@@ -145,8 +147,12 @@ class PipelineHandler:
         strict_mode: bool = False,
         _allow_existing_root: bool = False,
         _allow_legacy_config_object: bool = False,
+        _preserve_existing_log: bool = False,
     ) -> None:
-        self.registration_name = registration_name
+        self.registration_name = validate_registration_name(
+            registration_name,
+            owner_label="pipeline",
+        )
         self.config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
@@ -180,6 +186,7 @@ class PipelineHandler:
                 log_traceback_to_file=log_traceback_to_file,
                 show_traceback_locals=show_traceback_locals,
                 use_rich_traceback_console=use_rich_traceback_console,
+                truncate=not _preserve_existing_log,
             )
             self.logger._pipeline = self
             self.print_capture_mode = "tee"
@@ -248,6 +255,7 @@ class PipelineHandler:
     def add_block(
         self, registration_name: str, execution_priority: float, forced: bool = False
     ) -> ExecutionBlock | None:
+        validate_registration_name(registration_name, owner_label="block")
         if self._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{self.registration_name}' is immutable "
@@ -289,6 +297,7 @@ class PipelineHandler:
         return block
 
     def _add_block_strict(self, registration_name: str, execution_priority: float):
+        validate_registration_name(registration_name, owner_label="block")
         if self._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{self.registration_name}' is immutable "
@@ -316,6 +325,7 @@ class PipelineHandler:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
         was_root = child_pipeline.parent_pipeline is None
         if registration_name is not None:
+            validate_registration_name(registration_name, owner_label="pipeline")
             child_pipeline.registration_name = registration_name
         conflicts = self._registration_conflicts(child_pipeline, execution_priority)
         self._raise_on_priority_conflict_with_different_name(
@@ -735,6 +745,24 @@ class PipelineHandler:
         self._rebuild_visible_state(self._incoming_parent_outputs())
         self._delete_artifacts_from_outputs(removed)
 
+    def _erase_selected_node_outputs(
+        self,
+        node_name: str,
+        output_names: list[str],
+    ) -> None:
+        outputs = self.producer_outputs.get(node_name)
+        if outputs is None:
+            return
+        removed = {
+            output_name: outputs.pop(output_name)
+            for output_name in output_names
+            if output_name in outputs
+        }
+        if not outputs:
+            self.producer_outputs.pop(node_name, None)
+        self._rebuild_visible_state(self._incoming_parent_outputs())
+        self._delete_artifacts_from_outputs(removed)
+
     def _erase_overridden_node_outputs(
         self,
         node_name: str,
@@ -742,6 +770,8 @@ class PipelineHandler:
         new_priority: float | None,
         old_output_names: list[str],
         new_output_names: list[str] | None = None,
+        *,
+        erase_output_names: list[str] | None = None,
     ) -> None:
         """Unified erasure for a forced override of an expression, function or atom.
 
@@ -754,7 +784,10 @@ class PipelineHandler:
         and new outputs from the new priority, so a priority change still catches
         consumers between the two positions.
         """
-        self._erase_node_outputs(node_name)
+        if erase_output_names is None:
+            self._erase_node_outputs(node_name)
+        else:
+            self._erase_selected_node_outputs(node_name, erase_output_names)
         if self.parent_pipeline is not None:
             self._resync_mirror_to_parent()
         if self._invalidation_forbidden:
@@ -1057,7 +1090,7 @@ class PipelineHandler:
                 value = upstream_outputs[variable_name]
             else:
                 value = self._descendant_visible_value(variable_name)
-                if value is None:
+                if value is _MISSING:
                     raise ResolutionError(f"Unknown pipeline value: {variable_name}")
         return self._materialize_stored_value(
             value,
@@ -1272,30 +1305,31 @@ class PipelineHandler:
                 f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
             )
         previous_value = self.manual_values.get(variable_name)
-        if isinstance(previous_value, ArtifactRecord):
-            self.artifact_store.delete(previous_value)
         if isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
         ):
-            pass
+            replacement = value
         elif to_disk:
-            value = self._save_value_to_disk(
+            replacement = self._save_value_to_disk(
                 variable_name,
                 value,
                 function_name="set_constant_value",
                 verbose=verbose,
             )
         elif copy:
-            value = self._snapshot_value(variable_name, value, verbose=verbose)
-        self.manual_values[variable_name] = value
-        self.para_value_dict[variable_name] = value
-        if isinstance(value, ArtifactRecord):
-            self.artifact_registry[variable_name] = value
+            replacement = self._snapshot_value(variable_name, value, verbose=verbose)
+        else:
+            replacement = value
+        self.manual_values[variable_name] = replacement
+        self.para_value_dict[variable_name] = replacement
+        if isinstance(replacement, ArtifactRecord):
+            self.artifact_registry[variable_name] = replacement
         else:
             self.artifact_registry.pop(variable_name, None)
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
+        self._cleanup_replaced_artifact(previous_value)
 
     def update_value(
         self,
@@ -1314,27 +1348,27 @@ class PipelineHandler:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
         previous_value = self.para_value_dict.get(variable_name)
-        if isinstance(previous_value, ArtifactRecord):
-            self.artifact_store.delete(previous_value)
 
         if isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
         ):
-            pass
+            replacement = value
         elif isinstance(previous_value, ArtifactRecord):
-            value = self._save_value_to_disk(
+            replacement = self._save_value_to_disk(
                 variable_name,
                 value,
                 function_name="update_value",
                 verbose=verbose,
             )
         elif copy:
-            value = self._snapshot_value(variable_name, value, verbose=verbose)
+            replacement = self._snapshot_value(variable_name, value, verbose=verbose)
+        else:
+            replacement = value
 
-        self.para_value_dict[variable_name] = value
-        if isinstance(value, ArtifactRecord):
-            self.artifact_registry[variable_name] = value
+        self.para_value_dict[variable_name] = replacement
+        if isinstance(replacement, ArtifactRecord):
+            self.artifact_registry[variable_name] = replacement
         else:
             self.artifact_registry.pop(variable_name, None)
 
@@ -1342,9 +1376,10 @@ class PipelineHandler:
             outputs = self.producer_outputs.get(node.registration_name)
             if outputs is None or variable_name not in outputs:
                 continue
-            outputs[variable_name] = value
+            outputs[variable_name] = replacement
             break
-        self._sync_value_update_to_parent(variable_name, value)
+        self._sync_value_update_to_parent(variable_name, replacement)
+        self._cleanup_replaced_artifact(previous_value)
 
     def set_value(
         self,
@@ -2798,6 +2833,7 @@ class PipelineHandler:
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
             _allow_legacy_config_object=True,
+            _preserve_existing_log=parent is not None,
         )
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)
@@ -4490,7 +4526,13 @@ class PipelineHandler:
 
     @staticmethod
     def _config_object_as_dict(config_obj: Any) -> dict[str, Any]:
-        config_dict = asdict(config_obj)
+        # Shallow field extraction: nested dataclass values stay real instances so
+        # the recursive value serializer can preserve their identity (asdict()
+        # would collapse them into plain dicts).
+        config_dict = {
+            field.name: getattr(config_obj, field.name)
+            for field in fields(config_obj)
+        }
         extra_attrs = {
             key: value
             for key, value in vars(config_obj).items()
@@ -5326,7 +5368,11 @@ class PipelineHandler:
         priority: float | None,
         upstream_outputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        visible = dict(upstream_outputs or self._incoming_parent_outputs())
+        visible = dict(
+            self._incoming_parent_outputs()
+            if upstream_outputs is None
+            else upstream_outputs
+        )
         visible.update(self.manual_values)
         if priority is None:
             return visible
@@ -5379,25 +5425,25 @@ class PipelineHandler:
                 visible.update(node.manual_values)
         return visible
 
-    def _descendant_visible_value(self, variable_name: str) -> Any | None:
+    def _descendant_visible_value(self, variable_name: str) -> Any:
         for node in self._sorted_nodes():
             if not isinstance(node, PipelineHandler):
                 continue
             if variable_name in node.para_value_dict:
                 return node.para_value_dict[variable_name]
             descendant_value = node._descendant_visible_value(variable_name)
-            if descendant_value is not None:
+            if descendant_value is not _MISSING:
                 return descendant_value
-        return None
+        return _MISSING
 
-    def _ancestor_descendant_visible_value(self, variable_name: str) -> Any | None:
+    def _ancestor_descendant_visible_value(self, variable_name: str) -> Any:
         current = self.parent_pipeline
         while current is not None:
             descendant_value = current._descendant_visible_value(variable_name)
-            if descendant_value is not None:
+            if descendant_value is not _MISSING:
                 return descendant_value
             current = current.parent_pipeline
-        return None
+        return _MISSING
 
     def _ancestor_config_values(self) -> dict[str, Any]:
         config: dict[str, Any] = {}
@@ -5852,7 +5898,10 @@ class PipelineHandler:
         active_artifact_paths = self._collect_referenced_artifact_paths()
         for value in outputs.values():
             if isinstance(value, ArtifactRecord):
-                if value.file_path in active_artifact_paths:
+                if (
+                    str(Path(value.file_path).resolve())
+                    in active_artifact_paths
+                ):
                     continue
                 try:
                     self.artifact_store.delete(value)
@@ -5862,22 +5911,41 @@ class PipelineHandler:
                         f"{type(exc).__name__}: {exc}"
                     )
 
+    def _cleanup_replaced_artifact(self, previous_value: Any) -> None:
+        """Retire a replaced artifact file only after its replacement committed.
+
+        Runs after the new value has been saved and every mapping slot has
+        been updated, so a serialization failure can never leave a deleted
+        file behind. The previous file is removed only when no remaining slot
+        (or mirror in this subtree) still references it, so passing the same
+        record as its own replacement keeps the file alive.
+        """
+        if not isinstance(previous_value, ArtifactRecord):
+            return
+        self._delete_artifacts_from_outputs({"_replaced": previous_value})
+
     def _collect_referenced_artifact_paths(self) -> set[str]:
         paths: set[str] = set()
 
         def collect_from_mapping(mapping: dict[str, Any]) -> None:
             for value in mapping.values():
                 if isinstance(value, ArtifactRecord):
-                    paths.add(value.file_path)
+                    paths.add(str(Path(value.file_path).resolve()))
 
-        collect_from_mapping(self.para_value_dict)
-        collect_from_mapping(self.artifact_registry)
-        collect_from_mapping(self.manual_values)
-        for outputs in self.producer_outputs.values():
-            collect_from_mapping(outputs)
-        for node in self._sorted_nodes():
-            if isinstance(node, PipelineHandler):
-                paths.update(node._collect_referenced_artifact_paths())
+        def collect_from_pipeline(pipeline: "PipelineHandler") -> None:
+            collect_from_mapping(pipeline.manual_values)
+            for node in pipeline._sorted_nodes():
+                if isinstance(node, PipelineHandler):
+                    collect_from_pipeline(node)
+                else:
+                    collect_from_mapping(
+                        pipeline.producer_outputs.get(
+                            node.registration_name,
+                            {},
+                        )
+                    )
+
+        collect_from_pipeline(self._root_pipeline())
         return paths
 
     def _persist_config_snapshot(self, path: Path) -> None:
@@ -6254,7 +6322,10 @@ class PipelineHandler:
 
     def config_as_dict(self) -> dict[str, Any]:
         if is_dataclass(self.config) and not isinstance(self.config, type):
-            config_dict = asdict(self.config)
+            config_dict = {
+                field.name: getattr(self.config, field.name)
+                for field in fields(self.config)
+            }
             extra_attrs = {
                 key: value
                 for key, value in vars(self.config).items()

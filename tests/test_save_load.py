@@ -587,7 +587,7 @@ class SaveLoadTests(unittest.TestCase):
             if hasattr(__main__, "main_increment"):
                 delattr(__main__, "main_increment")
 
-    def test_static_method_callable_value_loads_as_reference_placeholder_when_not_round_trippable(self) -> None:
+    def test_static_method_callable_value_round_trips(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist-static-callable", SaveConfig(value=2), tmp_path / "project")
@@ -597,8 +597,9 @@ class SaveLoadTests(unittest.TestCase):
             pipeline.save_project(save_dir)
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
-            with self.assertRaises(ResolutionError):
-                loaded.get_constant_value("callable_value")
+            restored = loaded.get_constant_value("callable_value")
+            self.assertTrue(callable(restored))
+            self.assertEqual(restored(41), 42)
 
     def test_save_pipeline_archives_timestamped_log_snapshot_in_history_logs(self) -> None:
         with TemporaryDirectory() as temp_dir:

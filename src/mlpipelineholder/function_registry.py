@@ -30,16 +30,10 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
     """Resolve a callable object or import path into a callable plus persistence metadata."""
 
     if isinstance(function_or_path, str):
-        module_path, _, attr_name = function_or_path.rpartition(".")
-        if not module_path or not attr_name:
-            raise RegistrationError(f"Invalid import path: {function_or_path}")
-        module = importlib.import_module(module_path)
-        try:
-            callable_obj = getattr(module, attr_name)
-        except AttributeError as exc:
-            raise RegistrationError(f"Cannot import callable: {function_or_path}") from exc
+        callable_obj = _resolve_import_path_object(function_or_path)
         if not callable(callable_obj):
             raise RegistrationError(f"Imported object is not callable: {function_or_path}")
+        _, _, attr_name = function_or_path.rpartition(".")
         return callable_obj, function_or_path, attr_name
 
     if not callable(function_or_path):
@@ -58,7 +52,51 @@ def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
         and function_name != "<lambda>"
     ):
         import_path = f"{module_name}.{qualname}"
+    elif (
+        inspect.ismethod(function_or_path)
+        and isinstance(function_or_path.__self__, type)
+        and "<locals>" not in qualname
+    ):
+        owner_class = function_or_path.__self__
+        import_path = (
+            f"{owner_class.__module__}."
+            f"{owner_class.__qualname__}.{function_or_path.__func__.__name__}"
+        )
     return function_or_path, import_path, function_name
+
+
+def _resolve_import_path_object(function_or_path: str) -> Any:
+    """Import the longest module prefix of a dotted path, then traverse attributes.
+
+    Import paths may be qualified by classes (e.g. ``mypkg.module.MyClass.method``
+    for a static method), so the resolver imports the longest prefix that is a real
+    module and walks the remaining components with ``getattr``. A prefix that fails
+    to import because it is simply not a module is skipped; a module that fails to
+    import because of a missing dependency propagates its original error.
+    """
+    parts = function_or_path.split(".")
+    if len(parts) < 2:
+        raise RegistrationError(f"Invalid import path: {function_or_path}")
+    for index in range(len(parts) - 1, 0, -1):
+        candidate_module = ".".join(parts[:index])
+        try:
+            module = importlib.import_module(candidate_module)
+        except ModuleNotFoundError as exc:
+            # exc.name is the first non-importable prefix, which may be an
+            # ancestor of the candidate when its parent is a plain module
+            # rather than a package; only a genuinely broken module
+            # (a missing dependency) should propagate.
+            if exc.name != candidate_module and not candidate_module.startswith(f"{exc.name}."):
+                raise
+            continue
+        obj: Any = module
+        try:
+            for attribute in parts[index:]:
+                obj = getattr(obj, attribute)
+        except AttributeError as exc:
+            raise RegistrationError(f"Cannot import callable: {function_or_path}") from exc
+        return obj
+    raise RegistrationError(f"Invalid import path: {function_or_path}")
 
 
 def callable_identity_matches(

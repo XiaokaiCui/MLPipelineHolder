@@ -34,10 +34,11 @@ class PipelineLogger:
         log_traceback_to_file: bool = True,
         show_traceback_locals: bool = False,
         use_rich_traceback_console: bool = True,
+        truncate: bool = True,
     ) -> None:
         self.log_file_path = Path(log_file_path)
         self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.log_file_path.exists():
+        if truncate and self.log_file_path.exists():
             self.log_file_path.unlink()
         self.log_file_path.touch()
         self._lock = Lock()

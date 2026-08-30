@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 from importlib.util import find_spec
 from pathlib import Path
@@ -21,7 +22,7 @@ def choose_serializer(value: Any) -> str:
     except Exception:
         pass
 
-    if _is_json_serializable(value):
+    if _is_json_safe(value):
         return "json"
 
     try:
@@ -59,12 +60,51 @@ def choose_serializer(value: Any) -> str:
     return "pickle"
 
 
-def _is_json_serializable(value: Any) -> bool:
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError):
-        return False
-    return True
+def _is_json_safe(value: Any) -> bool:
+    """True only when a JSON round-trip preserves the exact Python value.
+
+    ``json.dumps`` accepts values it cannot round-trip faithfully — tuples and
+    sets collapse to lists, non-string dict keys are coerced to strings (so
+    ``{1: "a", "1": "b"}`` loses an entry), non-finite floats emit invalid
+    JSON, and integer-like scalars (e.g. ``numpy`` ints) load back as plain
+    ``int``. Acceptance is therefore decided by exact-type recursion instead:
+    only ``None``/``bool``/``int``/``str``/finite-``float`` leaves and
+    ``list``/``dict[str, ...]`` containers qualify; everything else falls
+    back to a lossless serializer.
+    """
+    return _json_safe_check(value, set())
+
+
+def _json_safe_check(value: Any, ancestors: set[int]) -> bool:
+    value_type = type(value)
+    if value_type is str or value_type is bool or value is None:
+        return True
+    if value_type is int:
+        return True
+    if value_type is float:
+        return math.isfinite(value)
+    if value_type is list:
+        value_id = id(value)
+        if value_id in ancestors:
+            return False
+        ancestors.add(value_id)
+        try:
+            return all(_json_safe_check(item, ancestors) for item in value)
+        finally:
+            ancestors.remove(value_id)
+    if value_type is dict:
+        value_id = id(value)
+        if value_id in ancestors:
+            return False
+        ancestors.add(value_id)
+        try:
+            return all(
+                type(key) is str and _json_safe_check(item, ancestors)
+                for key, item in value.items()
+            )
+        finally:
+            ancestors.remove(value_id)
+    return False
 
 
 def extension_for(serializer: str) -> str:
@@ -104,7 +144,7 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
         import pyarrow as pa  # type: ignore
         import pyarrow.ipc as ipc  # type: ignore
 
-        table = pa.Table.from_pandas(value, preserve_index=False)
+        table = pa.Table.from_pandas(value, preserve_index=True)
         with path.open("wb") as handle:
             with ipc.new_file(handle, table.schema) as writer:
                 writer.write_table(table)

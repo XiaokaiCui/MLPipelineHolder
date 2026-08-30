@@ -18,6 +18,7 @@ from .models import (
     FunctionExecutionResult,
     FunctionRegistration,
 )
+from .naming import validate_registration_name
 
 if TYPE_CHECKING:
     from .pipeline_handler import PipelineHandler
@@ -37,7 +38,10 @@ class ExecutionBlock:
         self, parent: PipelineHandler, registration_name: str, execution_priority: float
     ) -> None:
         self.parent = parent
-        self.registration_name = registration_name
+        self.registration_name = validate_registration_name(
+            registration_name,
+            owner_label="block",
+        )
         self.execution_priority = execution_priority
         self.functions: list[FunctionRegistration | ExpressionRegistration] = []
         self.registered_args: dict[str, BlockArgsRegistration] = {}
@@ -272,12 +276,17 @@ class ExecutionBlock:
                 "and cannot accept new args helpers"
             )
         try:
-            if name in self.registered_args and not forced:
-                raise RegistrationError(
-                    f"Args helper '{name}' is already registered in block '{self.registration_name}'"
-                )
+            if name in self.registered_args:
+                if not forced:
+                    raise RegistrationError(
+                        f"Args helper '{name}' is already registered in block '{self.registration_name}'"
+                    )
+                existing = self.registered_args[name]
+                if list(existing.ordered_items) == list(ordered_items):
+                    return existing
             registration = BlockArgsRegistration(name=name, ordered_items=list(ordered_items))
             self.registered_args[name] = registration
+            self._invalidate_helper_consumers(name, is_args=True)
             return registration
         except RegistrationError as exc:
             self.parent.logger.warning(
@@ -294,18 +303,59 @@ class ExecutionBlock:
                 "and cannot accept new kwargs helpers"
             )
         try:
-            if name in self.registered_kwargs and not forced:
-                raise RegistrationError(
-                    f"Kwargs helper '{name}' is already registered in block '{self.registration_name}'"
-                )
+            if name in self.registered_kwargs:
+                if not forced:
+                    raise RegistrationError(
+                        f"Kwargs helper '{name}' is already registered in block '{self.registration_name}'"
+                    )
+                existing = self.registered_kwargs[name]
+                if dict(existing.mapping_dct) == dict(mapping_dct):
+                    return existing
             registration = BlockKwargsRegistration(name=name, mapping_dct=dict(mapping_dct))
             self.registered_kwargs[name] = registration
+            self._invalidate_helper_consumers(name, is_args=False)
             return registration
         except RegistrationError as exc:
             self.parent.logger.warning(
                 f"Skipped kwargs helper registration in block '{self.registration_name}': {exc}"
             )
             return None
+
+    def _invalidate_helper_consumers(self, name: str, *, is_args: bool) -> None:
+        consumers = [
+            registration
+            for registration in self.functions
+            if isinstance(registration, FunctionRegistration)
+            and (
+                registration.var_pos_name == name
+                if is_args
+                else registration.var_kw_name == name
+            )
+        ]
+        output_names = [
+            output_name
+            for registration in consumers
+            for output_name in registration.output_names
+        ]
+        if not output_names:
+            return
+        for registration in consumers:
+            if is_args:
+                registration.args_registration_state = list(
+                    self.registered_args[name].ordered_items
+                )
+            else:
+                registration.kwargs_registration_state = dict(
+                    self.registered_kwargs[name].mapping_dct
+                )
+        self.parent._erase_overridden_node_outputs(
+            self.registration_name,
+            self.execution_priority,
+            self.execution_priority,
+            output_names,
+            output_names,
+            erase_output_names=output_names,
+        )
 
     def register_function(
         self,
