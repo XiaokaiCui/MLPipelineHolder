@@ -79,9 +79,9 @@ Atom children are structurally immutable after creation. Use them only when that
 
 Do not infer object size without evidence. Propose likely disk-backed candidates using type, expected size, reuse frequency, and recomputation cost, explain the RAM-versus-I/O trade-off, and ask the user to confirm.
 
-- Use `save_to_disk` only for outputs declared by a block.
+- Use disk-backed output options only for outputs declared by the corresponding stage.
 - Use `set_constant_value(..., to_disk=True)` for a confirmed large direct input.
-- Ask before enabling `memory_saving_mode` or `memory_profile_logging`; attached children inherit the root's settings.
+- Ask before enabling memory_saving_mode or memory_profile_logging unless the user has already delegated the choice.
 - Use `overridden_outputs` only when successive stages intentionally replace the same large output. The target must be an existing globally upstream block or atom that declares the same output; alternatives in the same integer priority group cannot point to each other.
 
 For partial reruns, use `run_from(...)` directly, including nested paths. Earlier producers remain available, the target may consume its previous output, and later producers stay hidden until they rerun; do not manually reconstruct upstream state.

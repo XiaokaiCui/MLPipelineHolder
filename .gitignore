@@ -1,3 +1,7 @@
-/note
-/example_run
-/examples
+.idea/
+*.iml
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
