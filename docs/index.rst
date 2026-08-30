@@ -1,13 +1,9 @@
 MLPipelineHolder
 ================
 
-MLPipelineHolder 0.2.18 is a lightweight Python framework for reproducible
-machine-learning experimentation in Jupyter notebooks.
+MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks.
 
-It provides explicit blocks and nested pipeline scopes, strict registration,
-partial reruns, disk-backed outputs, restart-safe save/load, persisted output
-pointers, structured logging, and recovery helpers without requiring a full
-production MLOps stack.
+It is designed to be adopted at almost any stage of experimentation without requiring you to rebuild your workflow from scratch. The idea is not to force an exploratory notebook into a rigid workflow, but to let you progressively turn the parts that have become mature into stable pipeline stages while keeping configurations, hyperparameters, functions, and pipeline structure easy to experiment with and change.
 
 Documentation
 -------------
