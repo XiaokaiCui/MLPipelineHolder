@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.0) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.1) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -400,6 +400,19 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </ul>
 <p>An atom with one internal producer returns that value directly; if multiple internal priorities produced the same name, the return value is a <code>dict[float, Any]</code> keyed by internal priority. Unknown nodes and missing outputs raise <code>ResolutionError</code>.</p>
 
+<h4 class="method-name" id="PipelineHandler.set_node_output">set_node_output()</h4>
+<div class="sig"><span class="kw">set_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
+<p>Replaces an already-produced output of one named immediate block or atom child. Unlike <a class="anchor" href="#PipelineHandler.set_value"><code>set_value()</code></a>, this method does not select the currently visible producer when several nodes produced the same output name; it changes only <code>node_name</code>'s slot and then recomputes the visible winner by execution priority.</p>
+<div class="field-label">Parameters</div>
+<ul class="param-desc">
+  <li><code>node_name</code>: immediate block or atom-child name in this pipeline.</li>
+  <li><code>output_name</code>: output already produced by that node.</li>
+  <li><code>value</code>: replacement object.</li>
+  <li><code>copy</code>: deep-copy supported mutable values before assignment when <code>True</code>.</li>
+  <li><code>verbose</code>: log copy or reference-fallback details.</li>
+</ul>
+<p>For an atom, the replacement is written to its internal authoritative producer and synchronized through the parent tree. An atom with multiple internal producers for the same name is rejected as ambiguous. Ordinary child-pipeline containers, unknown immediate nodes, outputs that have not been produced, and output-pointer slots raise <code>ResolutionError</code> without changing state. Disk-backing is retained when the selected slot currently contains an artifact.</p>
+
 <h4 class="method-name" id="PipelineHandler.get_constant_value">get_constant_value()</h4>
 <div class="sig"><span class="kw">get_constant_value</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns a <em>pipeline constant</em> set via <a class="anchor" href="#PipelineHandler.set_constant_value"><code>set_constant_value()</code></a>, resolving the nearest definition in the visibility chain: own constant, then earlier-priority sibling, then parent, then grandparent. Disk-backed values are loaded from disk.</p>
@@ -429,7 +442,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHandler.set_value">set_value()</h4>
 <div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
-<p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet).</p>
+<p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet). When several nodes produced the same name, the currently visible winning producer is updated; use <a class="anchor" href="#PipelineHandler.set_node_output"><code>set_node_output()</code></a> to select a specific immediate block or atom.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>variable_name</code>: existing or declared produced-output name to assign.</li>
@@ -443,7 +456,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHandler.update_value">update_value()</h4>
 <div class="sig"><span class="kw">update_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
-<p>Updates an existing produced value only. Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
+<p>Updates an existing produced value only. When several nodes produced the same name, the currently visible winning producer is updated. Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>variable_name</code>: currently materialized produced-output name to replace.</li>
@@ -1064,7 +1077,7 @@ block.register_function(
 
 <h3 class="class-name" id="resolutionerror">ResolutionError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.ResolutionError(PipelineError)</div>
-<p>Raised when a value, constant, or configuration field cannot be resolved: unknown names, missing configuration keys, or using <code>get_value()</code>/<code>update_value()</code>/<code>set_value()</code> on a pipeline constant.</p>
+<p>Raised when a value, node output, constant, or configuration field cannot be resolved: unknown names, missing configuration keys, ambiguous node outputs, or using <code>get_value()</code>/<code>update_value()</code>/<code>set_value()</code> on a pipeline constant.</p>
 
 <h3 class="class-name" id="executionerror">ExecutionError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.ExecutionError(PipelineError)</div>
