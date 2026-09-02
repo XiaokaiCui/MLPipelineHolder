@@ -1187,6 +1187,67 @@ class PipelineHandler:
             else "",
         )
 
+    def set_node_output(
+        self,
+        node_name: str,
+        output_name: str,
+        value: Any,
+        *,
+        copy: bool = True,
+        verbose: bool = False,
+    ) -> None:
+        """Replace one output produced by an immediate block or atom."""
+        self._validate_builtin_name_conflict(output_name, owner_label="pipeline value")
+        node = self.nodes_by_name.get(node_name)
+        if node is None:
+            raise ResolutionError(
+                f"Unknown immediate child node '{node_name}' in pipeline '{self.registration_name}'"
+            )
+        if isinstance(node, PipelineHandler):
+            if not node._is_atom:
+                raise ResolutionError(
+                    f"Node '{node_name}' is not a block or atom pipeline"
+                )
+            producers = [
+                internal_node
+                for internal_node in node._sorted_nodes()
+                if output_name
+                in node.producer_outputs.get(internal_node.registration_name, {})
+            ]
+            if not producers:
+                raise ResolutionError(
+                    f"Node '{node_name}' has no produced output named '{output_name}'"
+                )
+            if len(producers) > 1:
+                priorities = [
+                    internal_node.execution_priority for internal_node in producers
+                ]
+                raise ResolutionError(
+                    f"Node '{node_name}' has multiple produced outputs named "
+                    f"'{output_name}' at priorities {priorities}; cannot set it "
+                    "unambiguously"
+                )
+            node._replace_local_node_output(
+                producers[0],
+                output_name,
+                value,
+                copy=copy,
+                verbose=verbose,
+            )
+            return
+        outputs = self.producer_outputs.get(node_name, {})
+        if output_name not in outputs:
+            raise ResolutionError(
+                f"Node '{node_name}' has no produced output named '{output_name}'"
+            )
+        self._replace_local_node_output(
+            node,
+            output_name,
+            value,
+            copy=copy,
+            verbose=verbose,
+        )
+
     def _materialize_stored_value(
         self,
         value: Any,
@@ -1390,8 +1451,60 @@ class PipelineHandler:
         if variable_name not in self.para_value_dict:
             raise ResolutionError(f"Unknown pipeline value: {variable_name}")
 
-        previous_value = self.para_value_dict.get(variable_name)
+        producing_node = next(
+            (
+                node
+                for node in reversed(self._sorted_nodes())
+                if variable_name
+                in self.producer_outputs.get(node.registration_name, {})
+            ),
+            None,
+        )
+        if isinstance(producing_node, PipelineHandler):
+            producing_node.update_value(
+                variable_name,
+                value,
+                copy=copy,
+                verbose=verbose,
+            )
+            return
+        if producing_node is None:
+            raise ResolutionError(f"Unknown produced value owner for: {variable_name}")
+        self._replace_local_node_output(
+            producing_node,
+            variable_name,
+            value,
+            copy=copy,
+            verbose=verbose,
+        )
 
+    def _replace_local_node_output(
+        self,
+        node: Any,
+        variable_name: str,
+        value: Any,
+        *,
+        copy: bool,
+        verbose: bool,
+    ) -> None:
+        outputs = self.producer_outputs[node.registration_name]
+        previous_value = outputs[variable_name]
+        if isinstance(previous_value, OutputPointer):
+            try:
+                owner, _ = resolve_pointer_chain(
+                    previous_value.destination,
+                    self._root_pipeline()._read_output_address,
+                )
+            except PointerResolutionError as exc:
+                raise ResolutionError(str(exc)) from exc
+            raise ResolutionError(
+                f"Cannot set node output '{node.registration_name}.{variable_name}' "
+                f"in pipeline '{self.registration_name}': this slot is an output "
+                f"pointer. The real object is stored at "
+                f"'{owner.pipeline_name}.{owner.node_name}.{owner.output_name}'; "
+                f"call set_node_output('{owner.node_name}', '{owner.output_name}', ...) "
+                f"on pipeline '{owner.pipeline_name}' instead"
+            )
         if isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
@@ -1408,20 +1521,9 @@ class PipelineHandler:
             replacement = self._snapshot_value(variable_name, value, verbose=verbose)
         else:
             replacement = value
-
-        self.para_value_dict[variable_name] = replacement
-        if isinstance(replacement, ArtifactRecord):
-            self.artifact_registry[variable_name] = replacement
-        else:
-            self.artifact_registry.pop(variable_name, None)
-
-        for node in reversed(self._sorted_nodes()):
-            outputs = self.producer_outputs.get(node.registration_name)
-            if outputs is None or variable_name not in outputs:
-                continue
-            outputs[variable_name] = replacement
-            break
-        self._sync_value_update_to_parent(variable_name, replacement)
+        outputs[variable_name] = replacement
+        self._refresh_visible_value(variable_name)
+        self._sync_value_to_ancestors_without_invalidation(variable_name)
         self._cleanup_replaced_artifact(previous_value)
 
     def set_value(

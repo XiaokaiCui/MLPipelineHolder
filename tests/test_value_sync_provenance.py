@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import ExecutionBlock, PipelineHandler
+from src.mlpipelineholder import ExecutionBlock, PipelineHandler, ResolutionError
 
 
 def produce_value(seed: int) -> int:
@@ -73,6 +73,93 @@ class ValueSyncProvenanceTests(unittest.TestCase):
             # Then: the child's new value propagates to the parent's slot.
             self.assertEqual(parent.get_value("x"), 5)
             self.assertEqual(child.get_value("x"), 5)
+
+    def test_parent_set_value_updates_atom_output_consumed_by_run_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "pipeline",
+                {"seed": 1},
+                Path(temp_dir) / "pipeline",
+            )
+            pipeline.create_atom_child_pipeline(
+                "producer",
+                24,
+                produce_value,
+                output_variable_names="x",
+            )
+            consumer = add_block(pipeline, "consumer", 26)
+            consumer.register_expression("y = x")
+            _ = pipeline.run_all()
+
+            pipeline.set_value("x", 9)
+            _ = pipeline.run_block("consumer")
+
+            self.assertEqual(pipeline.get_value("x"), 9)
+            self.assertEqual(pipeline.get_value("y"), 9)
+
+    def test_set_node_output_updates_only_the_named_producer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "pipeline",
+                {"seed": 1},
+                Path(temp_dir) / "pipeline",
+            )
+            first = add_block(pipeline, "first", 1)
+            first.register_function(produce_value, ["x"])
+            second = add_block(pipeline, "second", 2)
+            second.register_function(produce_value, ["x"])
+            _ = pipeline.run_all()
+
+            pipeline.set_node_output("first", "x", 9)
+
+            self.assertEqual(pipeline.get_node_output("first", "x"), 9)
+            self.assertEqual(pipeline.get_node_output("second", "x"), 1)
+            self.assertEqual(pipeline.get_value("x"), 1)
+
+    def test_set_node_output_updates_atom_value_consumed_by_run_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "pipeline",
+                {"seed": 1},
+                Path(temp_dir) / "pipeline",
+            )
+            pipeline.create_atom_child_pipeline(
+                "producer",
+                24,
+                produce_value,
+                output_variable_names="x",
+            )
+            consumer = add_block(pipeline, "consumer", 26)
+            consumer.register_expression("y = x")
+            _ = pipeline.run_all()
+
+            pipeline.set_node_output("producer", "x", 9)
+            _ = pipeline.run_block("consumer")
+
+            self.assertEqual(pipeline.get_node_output("producer", "x"), 9)
+            self.assertEqual(pipeline.get_value("y"), 9)
+
+    def test_set_node_output_rejects_unknown_node_or_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "pipeline",
+                {"seed": 1},
+                Path(temp_dir) / "pipeline",
+            )
+            producer = add_block(pipeline, "producer", 1)
+            producer.register_function(produce_value, ["x"])
+            _ = pipeline.run_all()
+
+            with self.assertRaisesRegex(
+                ResolutionError,
+                "Unknown immediate child node 'missing'",
+            ):
+                pipeline.set_node_output("missing", "x", 9)
+            with self.assertRaisesRegex(
+                ResolutionError,
+                "Node 'producer' has no produced output named 'missing'",
+            ):
+                pipeline.set_node_output("producer", "missing", 9)
 
     def test_none_valued_child_update_propagates_to_parent(self) -> None:
         # Given: the child produces None and owns the visible slot.
