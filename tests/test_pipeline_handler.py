@@ -1641,7 +1641,7 @@ class PipelineHandlerTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
-            pipeline.update_config({"factor": 9})
+            pipeline.update_configs({"factor": 9})
 
             self.assertEqual(getattr(pipeline.config, "factor"), 9)
 
@@ -1650,7 +1650,7 @@ class PipelineHandlerTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("config", None, tmp_path)
 
-            pipeline.set_config({"new_value": 9})
+            pipeline.set_configs({"new_value": 9})
 
             self.assertEqual(pipeline.config, {"new_value": 9})
 
@@ -1659,7 +1659,7 @@ class PipelineHandlerTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
 
-            pipeline.set_config({"selected_close_col": "Close"})
+            pipeline.set_configs({"selected_close_col": "Close"})
 
             self.assertEqual(pipeline.get_config_value("selected_close_col"), "Close")
             self.assertIn("selected_close_col", pipeline.get_full_config())
@@ -1816,7 +1816,7 @@ class PipelineHandlerTests(unittest.TestCase):
             block = pipeline.add_block("setup", 1)
             block.register_function(produce_seed, ["seed"])
 
-            pipeline.set_config({"seed": 99})
+            pipeline.set_configs({"seed": 99})
 
             self.assertFalse(hasattr(pipeline.config, "seed"))
 
@@ -1825,7 +1825,7 @@ class PipelineHandlerTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
 
-            pipeline.set_config({"missing": 9})
+            pipeline.set_configs({"missing": 9})
 
             self.assertEqual(getattr(pipeline.config, "missing"), 9)
 
@@ -1835,7 +1835,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline = PipelineHandler("config", DemoConfig(base=1, factor=2), tmp_path)
 
             with self.assertRaises(ResolutionError):
-                pipeline.update_config({"missing": 9})
+                pipeline.update_configs({"missing": 9})
 
     def test_get_value_loads_disk_backed_artifact(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3625,7 +3625,7 @@ class PipelineHandlerTests(unittest.TestCase):
             root.add_child_pipeline(producer_child, 10)
             root.add_child_pipeline(consumer_child, 20)
 
-            producer_child.set_config({"selected_close_col": "Close"})
+            producer_child.set_configs({"selected_close_col": "Close"})
 
             with self.assertRaises(ResolutionError):
                 root.get_config_value("selected_close_col")
@@ -3741,7 +3741,7 @@ class PipelineHandlerTests(unittest.TestCase):
                     forced=True,
                 )
 
-    def test_create_atom_child_pipeline_keeps_legacy_positional_arguments_compatible(self) -> None:
+    def test_create_atom_child_pipeline_supports_positional_arguments_without_configuration(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             parent = PipelineHandler("parent", {"base_value": 7}, tmp_path / "parent")
@@ -3756,7 +3756,6 @@ class PipelineHandlerTests(unittest.TestCase):
                 ["result"],
                 None,
                 {"base": "base_value", "optional_value": None},
-                None,
                 None,
                 None,
                 True,
@@ -4090,7 +4089,7 @@ class PipelineHandlerTests(unittest.TestCase):
             setup.register_function(produce_seed, ["seed"])
             pipeline.run_all()
             self.assertEqual(pipeline.get_value("seed"), 3)
-            pipeline.set_config({"base": 99})
+            pipeline.set_configs({"base": 99})
 
             with patch("builtins.input", side_effect=AssertionError("should not prompt")):
                 run_record = pipeline.run_all()
@@ -4110,7 +4109,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.run_all()
             artifact_dir = tmp_path / "artifacts"
             self.assertTrue(any(path.is_file() for path in artifact_dir.rglob("*")))
-            pipeline.set_config({"base": 99})
+            pipeline.set_configs({"base": 99})
             pipeline.gate_cleanup_confirmation = True
 
             with patch("builtins.input", return_value="y"):
@@ -4132,7 +4131,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.run_all()
             artifact_dir = tmp_path / "artifacts"
             self.assertTrue(any(path.is_file() for path in artifact_dir.rglob("*")))
-            pipeline.set_config({"base": 99})
+            pipeline.set_configs({"base": 99})
             pipeline.gate_cleanup_confirmation = True
 
             with patch("builtins.input", return_value="n"):
@@ -4233,7 +4232,7 @@ class StrictModeTests(unittest.TestCase):
     def test_strict_mode_registration_check7_kwargs_without_kwargs_raises(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_kwargs("default_kwargs", {"neg_exp": "src_col"})
             with self.assertRaises(RegistrationError):
@@ -4248,7 +4247,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("loose", {}, tmp_path)
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_kwargs("default_kwargs", {"neg_exp": "src_col"})
             block.register_function(
@@ -4262,7 +4261,7 @@ class StrictModeTests(unittest.TestCase):
     def test_strict_mode_registration_check8_kwargs_key_conflicts_with_explicit_param(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_kwargs("default_kwargs", {"target_col": "src_col"})
             with self.assertRaises(RegistrationError):
@@ -4316,7 +4315,7 @@ class StrictModeTests(unittest.TestCase):
     def test_strict_mode_registration_check10_none_mapping_exempt(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_function(
                 strict_target,
@@ -4327,7 +4326,7 @@ class StrictModeTests(unittest.TestCase):
     def test_strict_mode_registration_check11_kwargs_value_not_found_raises(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_kwargs("default_kwargs", {"neg_exp": "nonexistent_kwarg_value"})
             with self.assertRaises(RegistrationError):
@@ -4341,7 +4340,7 @@ class StrictModeTests(unittest.TestCase):
     def test_strict_mode_registration_check12_param_mapping_key_not_in_function_raises(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = self._strict_pipeline(Path(temp_dir))
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             with self.assertRaises(RegistrationError):
                 block.register_function(
@@ -4354,7 +4353,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("loose", {}, tmp_path)
-            pipeline.set_config({"src_col": "x"})
+            pipeline.set_configs({"src_col": "x"})
             block = pipeline.add_block("b", 1)
             block.register_function(
                 strict_target,
@@ -4409,7 +4408,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = self._strict_pipeline(tmp / "project")
-            pipeline.set_config({"src_col": "x", "real_col": "y"})
+            pipeline.set_configs({"src_col": "x", "real_col": "y"})
             block = pipeline.add_block("b", 1)
             block.register_function(
                 strict_target,
@@ -4425,7 +4424,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             parent = self._strict_pipeline(tmp / "parent")
-            parent.set_config({"shared_name": 1})
+            parent.set_configs({"shared_name": 1})
             child = PipelineHandler("child", {}, tmp / "children" / "child")
             child.set_constant_value("shared_name", 2)
             with self.assertRaises(RegistrationError):
@@ -4436,7 +4435,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             parent = self._strict_pipeline(tmp / "parent")
-            parent.set_config({"shared": 1})
+            parent.set_configs({"shared": 1})
             child = PipelineHandler("child", {"shared": 2}, tmp / "children" / "child")
             parent.add_child_pipeline(child, 10.0)
             self.assertEqual(child.parent_pipeline, parent)
@@ -4567,7 +4566,7 @@ class StrictModeTests(unittest.TestCase):
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("cfg", {}, tmp_path)
             pipeline.set_constant_value("manual_name", 1)
-            pipeline.set_config({"manual_name": 2})
+            pipeline.set_configs({"manual_name": 2})
             self.assertIn("manual value", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))
             self.assertEqual(pipeline.get_constant_value("manual_name"), 1)
 
@@ -4771,13 +4770,13 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("cfg", {}, Path(temp_dir))
             with self.assertRaises(RegistrationError):
-                pipeline.set_config({"bad": build_unserializable_object()})
+                pipeline.set_configs({"bad": build_unserializable_object()})
 
     def test_update_config_rejects_unpicklable_field(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("cfg", {"good": 1}, Path(temp_dir))
             with self.assertRaises(RegistrationError):
-                pipeline.update_config({"good": build_unserializable_object()})
+                pipeline.update_configs({"good": build_unserializable_object()})
 
     def test_constructor_accepts_pure_dataclass_config(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.1) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.2) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -315,7 +315,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   param_mapping_dct: <span class="arg">dict[str, str | None] | None</span> = None,
   kwargs_dct: <span class="arg">dict[str, str] | None</span> = None,
   args_lst: <span class="arg">tuple[str, ...] | list[str] | None</span> = None,
-  child_configuration: <span class="arg">Any | None</span> = None,
   allow_existing_root: <span class="arg">bool</span> = True,
   forced: <span class="arg">bool</span> = True,
   block_priority: <span class="arg">float</span> = 10.0,
@@ -332,22 +331,22 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>target_function</code>: callable or import path executed by the atom.</li>
   <li><code>gate_config</code>: optional configuration field used as the atom's gate.</li>
   <li><code>expected_value</code>: value the gate must produce for the atom to run.</li>
-  <li><code>default_config_value</code>: local value created for <code>gate_config</code> when that field is not already visible.</li>
+  <li><code>default_config_value</code>: value created in the parent configuration for <code>gate_config</code> when that field is not already visible.</li>
   <li><code>output_variable_names</code>: zero, one, or multiple declared output names for the target function.</li>
   <li><code>save_to_disk_lst</code>: declared outputs that should be stored as artifacts.</li>
   <li><code>param_mapping_dct</code>: legacy parameter-to-pipeline-name mapping; cannot be combined with <code>param_mapping</code>.</li>
   <li><code>kwargs_dct</code>: keyword name to pipeline value mapping used to supply the target's <code>**kwargs</code>.</li>
   <li><code>args_lst</code>: ordered pipeline value names used to supply the target's <code>*args</code>.</li>
-  <li><code>child_configuration</code>: optional dict or fields-only dataclass used as the atom's local config.</li>
   <li><code>allow_existing_root</code>: allow reuse of an existing atom working directory when <code>True</code>.</li>
   <li><code>forced</code>: replace a conflicting atom definition; identical definitions remain a no-op.</li>
   <li><code>block_priority</code>: priority of the atom's internal implementation block.</li>
   <li><code>param_mapping</code>: preferred keyword-only parameter-to-pipeline-name mapping.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
 </ul>
-<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, or gates to it raises <code>RegistrationError</code>; only config and constant values remain mutable (so gates keep toggling through config).</p>
+<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable.</p>
+<p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
-<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers), and the same effective values for the config fields the atom consumes (gate field, <code>param_mapping</code> values, <code>kwargs_dct</code> values, <code>args_lst</code> entries). Unused config fields and their counts are ignored. Any difference in the compared fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
+<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
 <h4 class="method-name" id="PipelineHandler.run_all">run_all()</h4>
@@ -467,16 +466,40 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produced the name registered it with <code>save_to_disk</code>, the updated value is saved to disk automatically (a non-serializable value raises <code>PersistenceError</code>), otherwise it stays in memory.</p>
 
 <h4 class="method-name" id="PipelineHandler.set_config">set_config()</h4>
-<div class="sig"><span class="kw">set_config</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
-<p>Adds new configuration fields or updates existing ones. Writes that would conflict with declared output names are rejected.</p>
+<div class="sig"><span class="kw">set_config</span>(config_name: <span class="arg">str</span>, new_config_value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
+<p>Adds or updates one configuration field. Writes that would conflict with declared output names or manual values are skipped. Atom pipelines own no configuration, so calling this method on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
+<div class="field-label">Parameters</div>
+<ul class="param-desc">
+  <li><code>config_name</code>: local configuration field to add or update.</li>
+  <li><code>new_config_value</code>: replacement value for that field.</li>
+</ul>
+
+<h4 class="method-name" id="PipelineHandler.set_configs">set_configs()</h4>
+<div class="sig"><span class="kw">set_configs</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
+<p>Adds or updates multiple configuration fields in one call. This is the plural form of <code>set_config()</code> and applies the same validation to every mapping entry. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: local configuration names and replacement values to merge into this pipeline.</li></ul>
 
 <h4 class="method-name" id="PipelineHandler.update_config">update_config()</h4>
-<div class="sig"><span class="kw">update_config</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
-<p>Updates existing local configuration fields only; unknown fields are rejected rather than created.</p>
+<div class="sig"><span class="kw">update_config</span>(config_name: <span class="arg">str</span>, new_config_value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
+<p>Updates one existing local configuration field. Unlike <code>set_config()</code>, this method rejects an unknown field rather than creating it. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
+<div class="field-label">Parameters</div>
+<ul class="param-desc">
+  <li><code>config_name</code>: existing local or inherited configuration field to update.</li>
+  <li><code>new_config_value</code>: replacement value for that field.</li>
+</ul>
+
+<h4 class="method-name" id="PipelineHandler.update_configs">update_configs()</h4>
+<div class="sig"><span class="kw">update_configs</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
+<p>Updates multiple existing configuration fields. This is the plural form of <code>update_config()</code>; every unknown field is rejected rather than created. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: existing local configuration names and their replacement values.</li></ul>
+
+<h4 class="method-name" id="PipelineHandler.get_config">get_config()</h4>
+<div class="sig"><span class="kw">get_config</span>(config_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
+<p>Returns one local or inherited configuration value. This method mirrors <code>get_config_value()</code>, including its placeholder and unknown-field errors.</p>
+<div class="field-label">Parameters</div>
+<ul class="param-desc"><li><code>config_name</code>: local or inherited configuration field to resolve.</li></ul>
 
 <h4 class="method-name" id="PipelineHandler.get_config_value">get_config_value()</h4>
 <div class="sig"><span class="kw">get_config_value</span>(field_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
@@ -486,11 +509,11 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHandler.get_full_config">get_full_config()</h4>
 <div class="sig"><span class="kw">get_full_config</span>() -&gt; <span class="ret">dict[str, Any]</span></div>
-<p>Returns the visible merged configuration for this pipeline, including parent configs recursively. The current pipeline's config overrides same-named parent values.</p>
+<p>Returns the visible merged configuration for this pipeline, including parent configs recursively. Local config normally overrides same-named parent values. An atom owns no local configuration and returns its parent's current visible configuration.</p>
 
 <h4 class="method-name" id="PipelineHandler.config_as_dict">config_as_dict()</h4>
 <div class="sig"><span class="kw">config_as_dict</span>() -&gt; <span class="ret">dict[str, Any]</span></div>
-<p>Returns the local configuration as a plain dictionary (without parent inheritance).</p>
+<p>Returns the local configuration as a plain dictionary (without parent inheritance). For an atom, this reflects its direct parent's local configuration because the atom owns none.</p>
 
 <h4 class="method-name" id="PipelineHandler.save_pipeline">save_pipeline()</h4>
 <div class="sig"><span class="kw">save_pipeline</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None, *, verbose: <span class="arg">bool</span> = False, cleanup: <span class="arg">str</span> = "auto") -&gt; <span class="ret">Path</span></div>
