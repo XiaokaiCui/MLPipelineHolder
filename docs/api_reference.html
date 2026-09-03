@@ -276,7 +276,12 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li>Attached child pipelines inherit <code>memory_saving_mode</code> and <code>memory_profile_logging</code> from their parent.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
+  <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
 </ul>
+
+<h4 class="method-name" id="PipelineHandler.optuna_studies_db_path">optuna_studies_db_path</h4>
+<div class="sig"><span class="kw">property</span> optuna_studies_db_path -&gt; <span class="ret">Path</span></div>
+<p>Returns the dynamic default path <code>project_root / "optuna_studies.db"</code> for this non-atom pipeline. Reading the property does not create the database file. The path follows <code>project_root</code> when a temporary pipeline is relocated, a child is attached, or a saved project is loaded. Atom pipelines own no Optuna database path; their study outputs use the direct parent pipeline's database.</p>
 
 <h4 class="method-name" id="PipelineHandler.add_block">add_block()</h4>
 <div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">ExecutionBlock | None</span></div>
@@ -526,6 +531,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>cleanup</code>: obsolete saved-object policy for in-place saves: <code>"auto"</code> deletes automatically, <code>"confirm"</code> prompts first, and <code>"none"</code> retains obsolete framework-generated artifacts and child trees.</li>
 </ul>
 <p>Cleanup runs only after the new state payload commits and treats that payload as the liveness authority. Referenced artifacts are retained; inspection or deletion failures are logged without invalidating the successful save.</p>
+<p>When Optuna is installed, live <code>optuna.study.Study</code> values are persisted to the owning pipeline's lazily created <code>optuna_studies.db</code>; the study name and a separately pickled <code>study.sampler</code> are recorded in the artifact metadata. <code>optuna.samplers.BaseSampler</code> values are stored as pickle artifacts and do not create the study database. Pipelines without Optuna values neither import Optuna as a required dependency nor create the database file.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, an in-place save also refreshes the backup copy.</p>
 <p>Every call also archives a timestamped copy of the current <code>pipeline.log</code> into <code>history_logs/</code> inside the project root (e.g. <code>history_logs/2026-08-18_16-38-14.857.log</code>, UTC, <code>yyyy-mm-dd_hh-mm-ss.mmm</code>), preserving the save-time log snapshot even though loading a pipeline starts a fresh <code>pipeline.log</code>.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, the refreshed backup copy also receives the updated <code>history_logs/</code> folder. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
@@ -552,6 +558,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>verbose=True</code> logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored; silent by default.</li>
   <li><code>auto_resolve_placeholders=True</code> (the default) re-runs producing blocks to recover produced values that were saved as placeholders. Exactly one block is executed per placeholder recovery, in upstream-to-downstream order, and fresh values are injected without invalidating downstream outputs. Each recovery appends a <code>RunRecord</code> labelled <code>auto_resolve_placeholder:&lt;block&gt;</code>. With <code>verbose=True</code>, outputs that stay unrecoverable log the reason (unresolvable input, placeholder constant input, input only produced by a gate-off block, or no registered producing block); a block that raises during re-execution always logs an unrecoverable warning. Gate-off pipelines are skipped silently. Pass <code>False</code> to keep legacy placeholder behaviour: saved placeholders raise <code>ResolutionError</code> when read.</li>
   <li>Pure-dataclass values (config objects, constants, and produced values) that could not be pickled are saved as structured references and reconstructed at load regardless of <code>auto_resolve_placeholders</code>: a real dataclass instance when the class is importable and reconstructible from the saved fields, including dataclasses with non-init fields; a <code>SimpleNamespace</code> fallback is used otherwise (verbose-gated warning).</li>
+  <li>Optuna study artifacts are loaded with their saved study name, SQLite storage URL, and separately pickled sampler. Install the optional <code>optuna</code> extra before materializing an Optuna artifact.</li>
 </ul>
 <p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
@@ -1116,17 +1123,18 @@ block.register_function(
 
 <h3 class="class-name" id="artifactrecord">ArtifactRecord</h3>
 <p class="class-desc">Metadata for one disk-backed pipeline value.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name: str, serializer: str, file_path: str, produced_by_block: str, produced_by_function: str, run_id: str, created_at: str = &lt;generated UTC timestamp&gt;, torch_load_weights_only: bool = False)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name: str, serializer: str, file_path: str, produced_by_block: str, produced_by_function: str, run_id: str, created_at: str = &lt;generated UTC timestamp&gt;, torch_load_weights_only: bool = False, metadata: dict[str, Any] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>variable_name</code></td><td>str</td><td>Pipeline-facing name of the value.</td></tr>
-  <tr><td><code>serializer</code></td><td>str</td><td>Serializer key used (for example <code>json</code>, <code>numpy</code>, <code>torch</code>, <code>feather</code>, <code>parquet</code>, <code>pickle</code>).</td></tr>
+  <tr><td><code>serializer</code></td><td>str</td><td>Serializer key used (for example <code>json</code>, <code>numpy</code>, <code>torch</code>, <code>feather</code>, <code>parquet</code>, <code>pickle</code>, or <code>optuna-study</code>).</td></tr>
   <tr><td><code>file_path</code></td><td>str</td><td>Path to the artifact file.</td></tr>
   <tr><td><code>produced_by_block</code></td><td>str</td><td>Block that produced the value.</td></tr>
   <tr><td><code>produced_by_function</code></td><td>str</td><td>Function that produced the value.</td></tr>
   <tr><td><code>run_id</code></td><td>str</td><td>Run that produced the value.</td></tr>
   <tr><td><code>created_at</code></td><td>str</td><td>UTC ISO timestamp of creation.</td></tr>
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Whether this torch artifact must be loaded with <code>weights_only=True</code>.</td></tr>
+  <tr><td><code>metadata</code></td><td>dict[str, Any]</td><td>Serializer-specific metadata. Optuna study artifacts record <code>study_name</code> and the dynamic <code>db_path</code>; their <code>file_path</code> points to the sampler pickle.</td></tr>
 </table>
 <h4 class="method-name">path()</h4>
 <div class="sig"><span class="kw">path</span>() -&gt; <span class="ret">Path</span></div>

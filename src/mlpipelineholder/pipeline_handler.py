@@ -13,8 +13,8 @@ import re
 import shutil
 import sys
 import warnings
-from ctypes import CDLL
 from contextlib import redirect_stdout
+from ctypes import CDLL
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .artifact_store import ArtifactStore
-from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
+from .exceptions import (
+    ExecutionError,
+    PersistenceError,
+    RegistrationError,
+    ResolutionError,
+)
 from .function_registry import (
     _values_equal,
     callable_signature,
@@ -49,6 +54,11 @@ from .models import (
     TorchStateArtifactRecord,
 )
 from .naming import validate_registration_name
+from .optuna_support import (
+    OPTUNA_STUDIES_DB_NAME,
+    is_optuna_sampler,
+    is_optuna_study,
+)
 from .output_pointers import (
     OutputAddress,
     OutputPointer,
@@ -89,7 +99,12 @@ _SAVED_GENERATION_RE = re.compile(
     r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
 )
 _MANAGED_CHILD_DIR_NAMES = ("artifacts", "children", "metadata", "history_logs")
-_MANAGED_CHILD_FILE_NAMES = ("pipeline_state.pkl", "config.pkl", "pipeline_meta.pkl")
+_MANAGED_CHILD_FILE_NAMES = (
+    "pipeline_state.pkl",
+    "config.pkl",
+    "pipeline_meta.pkl",
+    OPTUNA_STUDIES_DB_NAME,
+)
 
 
 class _MissingClassUnpickler(pickle.Unpickler):
@@ -242,6 +257,18 @@ class PipelineHandler:
     def config(self, configuration: Any) -> None:
         self._require_owned_config()
         self._config = configuration
+
+    @property
+    def optuna_studies_db_path(self) -> Path:
+        if getattr(self, "_is_atom", False):
+            raise AttributeError("Atom pipelines do not own Optuna study storage")
+        return self.project_root / OPTUNA_STUDIES_DB_NAME
+
+    def _optuna_studies_db_path_for_storage(self) -> Path:
+        current = self
+        while current._is_atom and current.parent_pipeline is not None:
+            current = current.parent_pipeline
+        return current.optuna_studies_db_path
 
     def __del__(self) -> None:
         try:
@@ -684,8 +711,8 @@ class PipelineHandler:
 
     @staticmethod
     def _atom_registration_equal(old_reg: Any, new_reg: Any) -> bool:
-        from .models import ExpressionRegistration
         from .function_registry import callable_identity_matches
+        from .models import ExpressionRegistration
 
         if isinstance(old_reg, ExpressionRegistration) != isinstance(
             new_reg, ExpressionRegistration
@@ -1308,7 +1335,7 @@ class PipelineHandler:
                 RuntimeValueReference,
                 RuntimeCallableReference,
             ),
-        ) or callable(value):
+        ) or callable(value) or is_optuna_study(value) or is_optuna_sampler(value):
             return value
         if not self._is_mutable_value(value):
             return value
@@ -1339,6 +1366,7 @@ class PipelineHandler:
                 function_name=function_name,
                 run_id=uuid4().hex,
                 torch_load_weights_only=self.torch_load_weights_only,
+                optuna_db_path=self._optuna_studies_db_path_for_storage(),
             )
         except Exception as exc:
             raise PersistenceError(
@@ -3990,7 +4018,10 @@ class PipelineHandler:
                         node._overridden_outputs.items()
                     )
                 },
-                "payload": node._serialize_payload_for_save(target_root, cache),
+                "payload": node._serialize_payload_for_save(
+                    target_root / "children" / node.registration_name,
+                    cache,
+                ),
             }
         return self._serialize_node(node)
 
@@ -4028,6 +4059,16 @@ class PipelineHandler:
         output_name: str,
         sibling_outputs: dict[str, Any] | None = None,
     ) -> Any:
+        if is_optuna_study(value) or is_optuna_sampler(value):
+            save_store = ArtifactStore(target_root)
+            return save_store.save(
+                variable_name=output_name,
+                value=value,
+                block_name=self.qualified_node_name(node_name),
+                function_name="save_pipeline_runtime",
+                run_id="save_pipeline",
+                optuna_db_path=self._optuna_target_db_path(target_root),
+            )
         try:
             torch = import_module("torch")
         except ModuleNotFoundError:
@@ -4106,6 +4147,11 @@ class PipelineHandler:
                 repr_text=repr(value),
                 reason="not directly serializable during save_pipeline",
             )
+
+    def _optuna_target_db_path(self, target_root: Path) -> Path:
+        if self._is_atom:
+            return target_root.parent.parent / OPTUNA_STUDIES_DB_NAME
+        return target_root / OPTUNA_STUDIES_DB_NAME
 
     def _serialize_callable_runtime_value(
         self,
@@ -6560,6 +6606,17 @@ class PipelineHandler:
         def rewrite_value(value: Any) -> Any:
             if isinstance(value, ArtifactRecord) and value.file_path.startswith(old_prefix):
                 value.file_path = value.file_path.replace(old_prefix, new_prefix, 1)
+            if isinstance(value, ArtifactRecord):
+                metadata = getattr(value, "metadata", None)
+                if not isinstance(metadata, dict):
+                    return value
+                db_path = metadata.get("db_path")
+                if isinstance(db_path, str) and db_path.startswith(old_prefix):
+                    metadata["db_path"] = db_path.replace(
+                        old_prefix,
+                        new_prefix,
+                        1,
+                    )
             return value
 
         for outputs in self.producer_outputs.values():

@@ -25,6 +25,7 @@ pip install "mlpipelineholder[dataframe]"
 pip install "mlpipelineholder[torch]"
 pip install "mlpipelineholder[rich]"
 pip install "mlpipelineholder[memory]"
+pip install "mlpipelineholder[optuna]"
 pip install "mlpipelineholder[all]"
 ```
 
@@ -41,6 +42,7 @@ Each extra adds:
 - `torch`: PyTorch model, tensor, and optimiser persistence
 - `rich`: Rich-rendered console tracebacks (console tracebacks fall back to plain stdlib text when Rich is not installed)
 - `memory`: `psutil`-based memory profiling logs (useful when you utilise disk-backed features)
+- `optuna`: SQLite-backed Optuna `Study` artifacts and pickle-backed `BaseSampler` artifacts
 - `all`: all optional features listed above (**recommended**)
 
 The core package requires Python 3.11 or later and includes `termcolor` and NumPy.
@@ -119,4 +121,3 @@ It covers:
 - functions and decorators: `rename_args`
 - exceptions: `PipelineError`, `RegistrationError`, `ResolutionError`, `ExecutionError`, `PersistenceError`
 - data models in `mlpipelineholder.models` (e.g. `ArtifactRecord`, `RunRecord`, function/expression/block registrations, runtime value and callable references)
-

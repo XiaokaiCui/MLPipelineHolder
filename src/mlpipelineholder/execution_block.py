@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import ast
 import builtins
-from concurrent.futures import ThreadPoolExecutor
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
 from .exceptions import ExecutionError, RegistrationError, ResolutionError
-from .function_registry import callable_signature, infer_declared_output_count, inspect_input_names, rename_args, resolve_callable
-from .function_registry import callable_identity_matches
-from .function_registry import inspect_exposed_input_names
+from .function_registry import (
+    callable_identity_matches,
+    callable_signature,
+    infer_declared_output_count,
+    inspect_exposed_input_names,
+    inspect_input_names,
+    rename_args,
+    resolve_callable,
+)
 from .models import (
     BlockArgsRegistration,
     BlockKwargsRegistration,
@@ -893,6 +899,7 @@ class ExecutionBlock:
                         function_name=result.function_name,
                         run_id=run_id,
                         torch_load_weights_only=self.parent.torch_load_weights_only,
+                        optuna_db_path=self.parent._optuna_studies_db_path_for_storage(),
                     )
                 produced_outputs[output_name] = output_value
         return produced_outputs
