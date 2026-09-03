@@ -8,6 +8,13 @@ from uuid import uuid4
 
 from .exceptions import PersistenceError
 from .models import ArtifactRecord
+from .optuna_support import (
+    OPTUNA_STUDIES_DB_NAME,
+    OPTUNA_STUDY_SERIALIZER,
+    is_optuna_study,
+    load_study_artifact,
+    save_study_artifact,
+)
 from .serializers import choose_serializer, dump_value, extension_for, load_value
 
 
@@ -27,7 +34,17 @@ class ArtifactStore:
         function_name: str,
         run_id: str,
         torch_load_weights_only: bool = False,
+        optuna_db_path: str | Path | None = None,
     ) -> ArtifactRecord:
+        if is_optuna_study(value):
+            return self._save_optuna_study(
+                variable_name,
+                value,
+                block_name,
+                function_name,
+                run_id,
+                optuna_db_path,
+            )
         serializer = choose_serializer(value)
         suffix = extension_for(serializer)
         safe_block = block_name.replace("/", "_")
@@ -49,7 +66,45 @@ class ArtifactStore:
             torch_load_weights_only=torch_load_weights_only,
         )
 
+    def _save_optuna_study(
+        self,
+        variable_name: str,
+        value: Any,
+        block_name: str,
+        function_name: str,
+        run_id: str,
+        optuna_db_path: str | Path | None,
+    ) -> ArtifactRecord:
+        safe_block = block_name.replace("/", "_")
+        safe_function = function_name.replace("/", "_")
+        safe_variable = variable_name.replace("/", "_")
+        sampler_path = (
+            self.artifact_root
+            / safe_block
+            / f"{safe_function}__{safe_variable}__{run_id}__{uuid4().hex}.pkl"
+        )
+        db_path = (
+            self.project_root / OPTUNA_STUDIES_DB_NAME
+            if optuna_db_path is None
+            else Path(optuna_db_path)
+        )
+        metadata = save_study_artifact(value, sampler_path, db_path)
+        return ArtifactRecord(
+            variable_name=variable_name,
+            serializer=OPTUNA_STUDY_SERIALIZER,
+            file_path=str(sampler_path),
+            produced_by_block=block_name,
+            produced_by_function=function_name,
+            run_id=run_id,
+            metadata=metadata,
+        )
+
     def load(self, artifact: ArtifactRecord) -> Any:
+        if artifact.serializer == OPTUNA_STUDY_SERIALIZER:
+            return load_study_artifact(
+                Path(artifact.file_path),
+                getattr(artifact, "metadata", {}),
+            )
         return load_value(
             artifact.serializer,
             Path(artifact.file_path),
@@ -99,4 +154,5 @@ class ArtifactStore:
             run_id=artifact.run_id,
             created_at=artifact.created_at,
             torch_load_weights_only=artifact.torch_load_weights_only,
+            metadata=dict(getattr(artifact, "metadata", {})),
         )

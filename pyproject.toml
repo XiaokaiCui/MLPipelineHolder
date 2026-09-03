@@ -1,6 +1,6 @@
 [project]
 name = "mlpipelineholder"
-version = "0.3.2"
+version = "0.3.3"
 description = "MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks."
 authors = []
 readme = "README.md"
@@ -35,7 +35,8 @@ dataframe = ["pandas", "pyarrow", "dask[dataframe]"]
 torch = ["torch"]
 rich = ["rich"]
 memory = ["psutil"]
-all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "rich", "psutil"]
+optuna = ["optuna"]
+all = ["pandas", "pyarrow", "dask[dataframe]", "torch", "rich", "psutil", "optuna"]
 
 [tool.poetry]
 packages = [{ include = "mlpipelineholder", from = "src" }]
@@ -47,6 +48,7 @@ dask = { version = "*", extras = ["dataframe"] }
 torch = "*"
 rich = "*"
 psutil = "*"
+optuna = "*"
 build = "*"
 
 [build-system]

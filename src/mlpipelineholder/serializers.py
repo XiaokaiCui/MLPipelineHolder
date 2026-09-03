@@ -7,12 +7,16 @@ from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Final
 
+from .optuna_support import is_optuna_sampler
 
 _DASK_TARGET_PARTITION_SIZE: Final = "256MiB"
 
 
 def choose_serializer(value: Any) -> str:
     """Pick the lightest supported serializer for a runtime value."""
+
+    if is_optuna_sampler(value):
+        return "pickle"
 
     try:
         import dask.dataframe as dd  # type: ignore

@@ -13,8 +13,8 @@ import re
 import shutil
 import sys
 import warnings
-from ctypes import CDLL
 from contextlib import redirect_stdout
+from ctypes import CDLL
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .artifact_store import ArtifactStore
-from .exceptions import ExecutionError, PersistenceError, RegistrationError, ResolutionError
+from .exceptions import (
+    ExecutionError,
+    PersistenceError,
+    RegistrationError,
+    ResolutionError,
+)
 from .function_registry import (
     _values_equal,
     callable_signature,
@@ -49,6 +54,21 @@ from .models import (
     TorchStateArtifactRecord,
 )
 from .naming import validate_registration_name
+from .object_storage import (
+    StoredObjectRecord,
+    create_record,
+    metadata_frame,
+    record_from_payload,
+    resolve_record,
+    validate_object_description,
+    validate_object_name,
+    warn_for_pickle_fallback,
+)
+from .optuna_support import (
+    OPTUNA_STUDIES_DB_NAME,
+    is_optuna_sampler,
+    is_optuna_study,
+)
 from .output_pointers import (
     OutputAddress,
     OutputPointer,
@@ -56,6 +76,7 @@ from .output_pointers import (
     is_strictly_upstream,
     resolve_pointer_chain,
 )
+from .serializers import choose_serializer
 
 if TYPE_CHECKING:
     from .execution_block import ExecutionBlock
@@ -89,7 +110,12 @@ _SAVED_GENERATION_RE = re.compile(
     r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
 )
 _MANAGED_CHILD_DIR_NAMES = ("artifacts", "children", "metadata", "history_logs")
-_MANAGED_CHILD_FILE_NAMES = ("pipeline_state.pkl", "config.pkl", "pipeline_meta.pkl")
+_MANAGED_CHILD_FILE_NAMES = (
+    "pipeline_state.pkl",
+    "config.pkl",
+    "pipeline_meta.pkl",
+    OPTUNA_STUDIES_DB_NAME,
+)
 
 
 class _MissingClassUnpickler(pickle.Unpickler):
@@ -226,6 +252,7 @@ class PipelineHandler:
             self.artifact_registry: dict[str, ArtifactRecord] = {}
             self.producer_outputs: dict[str, dict[str, Any]] = {}
             self.run_history: list[RunRecord] = []
+            self._stored_objects: dict[str, StoredObjectRecord] = {}
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:
             if generated_temp_root and self.project_root.exists():
@@ -242,6 +269,154 @@ class PipelineHandler:
     def config(self, configuration: Any) -> None:
         self._require_owned_config()
         self._config = configuration
+
+    @property
+    def optuna_studies_db_path(self) -> Path:
+        if getattr(self, "_is_atom", False):
+            raise AttributeError("Atom pipelines do not own Optuna study storage")
+        return self.project_root / OPTUNA_STUDIES_DB_NAME
+
+    def _optuna_studies_db_path_for_storage(self) -> Path:
+        current = self
+        while current._is_atom and current.parent_pipeline is not None:
+            current = current.parent_pipeline
+        return current.optuna_studies_db_path
+
+    def list_stored_objects(self) -> Any:
+        """Return metadata for objects held by this root pipeline."""
+        self._require_root_storage_owner()
+        return metadata_frame(self._stored_objects)
+
+    def save_to_storage(
+        self,
+        object_name: str,
+        object_value: Any,
+        object_description: str | None = None,
+    ) -> str:
+        """Keep an object outside pipeline execution state and return its hash ID."""
+        self._require_root_storage_owner()
+        record = create_record(object_name, object_value, object_description)
+        self._stored_objects[record.hash_id] = record
+        return record.hash_id
+
+    def update_storage(
+        self,
+        hash_id: str,
+        object_value: Any,
+        object_name: str | None = None,
+        object_description: str | None = None,
+        to_disk: bool = False,
+    ) -> None:
+        """Replace a stored value and optionally persist it immediately."""
+        self._require_root_storage_owner()
+        record = resolve_record(self._stored_objects, hash_id=hash_id, object_name=None)
+        if object_name is not None:
+            validate_object_name(object_name)
+            record.object_name = object_name
+        if object_description is not None:
+            validate_object_description(object_description)
+            record.object_description = object_description
+        warn_for_pickle_fallback(object_value)
+        record.object_type = type(object_value).__name__
+        record.value = object_value
+        record.value_is_loaded = True
+        record.dirty = True
+        record.last_modified_at_utc = datetime.now(UTC)
+        if to_disk:
+            self._persist_stored_object(record, self.project_root)
+
+    def get_from_storage(
+        self,
+        hash_id: str | None = None,
+        object_name: str | None = None,
+    ) -> Any:
+        """Return one stored object, preferring hash ID when both selectors exist."""
+        self._require_root_storage_owner()
+        record = resolve_record(
+            self._stored_objects,
+            hash_id=hash_id,
+            object_name=object_name,
+        )
+        return self._load_stored_object_value(record)
+
+    def remove_from_storage(
+        self,
+        hash_id: str | None = None,
+        object_name: str | None = None,
+    ) -> None:
+        """Remove one stored object and its managed artifact, when present."""
+        self._require_root_storage_owner()
+        record = resolve_record(
+            self._stored_objects,
+            hash_id=hash_id,
+            object_name=object_name,
+        )
+        if record.artifact is not None:
+            self.artifact_store.delete(record.artifact)
+        del self._stored_objects[record.hash_id]
+
+    def _require_root_storage_owner(self) -> None:
+        if self.parent_pipeline is not None:
+            raise RegistrationError(
+                "Object storage APIs are available only on the root pipeline"
+            )
+
+    def _load_stored_object_value(self, record: StoredObjectRecord) -> Any:
+        if record.value_is_loaded:
+            return record.value
+        if record.artifact is None:
+            raise PersistenceError(
+                f"Stored object '{record.object_name}' has no persisted artifact"
+            )
+        record.value = self.artifact_store.load(record.artifact)
+        record.value_is_loaded = True
+        return record.value
+
+    def _persist_stored_object(
+        self,
+        record: StoredObjectRecord,
+        target_root: Path,
+    ) -> ArtifactRecord | None:
+        if record.artifact is not None and not record.dirty:
+            return record.artifact
+        previous_artifact = record.artifact
+        value = self._load_stored_object_value(record)
+        if not is_optuna_study(value) and choose_serializer(value) == "pickle":
+            try:
+                pickle.dumps(value)
+            except Exception as exc:
+                warnings.warn(
+                    f"Stored object '{record.object_name}' could not be pickled and "
+                    f"will not be included in the saved pipeline: {type(exc).__name__}: {exc}",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return None
+        artifact = ArtifactStore(target_root).save(
+            variable_name=record.hash_id,
+            value=value,
+            block_name="storage",
+            function_name="object",
+            run_id=record.hash_id,
+            torch_load_weights_only=self.torch_load_weights_only,
+            optuna_db_path=target_root / OPTUNA_STUDIES_DB_NAME,
+        )
+        if self._normalized_path(target_root) == self._normalized_path(self.project_root):
+            record.artifact = artifact
+            record.dirty = False
+            self._cleanup_replaced_artifact(previous_artifact)
+        return artifact
+
+    def _serialize_stored_objects_for_save(
+        self,
+        target_root: Path,
+    ) -> dict[str, dict[str, Any]]:
+        payload: dict[str, dict[str, Any]] = {}
+        for hash_id, record in self._stored_objects.items():
+            artifact = self._persist_stored_object(record, target_root)
+            if artifact is not None:
+                payload[hash_id] = record.to_payload(artifact)
+        return payload
 
     def __del__(self) -> None:
         try:
@@ -684,8 +859,8 @@ class PipelineHandler:
 
     @staticmethod
     def _atom_registration_equal(old_reg: Any, new_reg: Any) -> bool:
-        from .models import ExpressionRegistration
         from .function_registry import callable_identity_matches
+        from .models import ExpressionRegistration
 
         if isinstance(old_reg, ExpressionRegistration) != isinstance(
             new_reg, ExpressionRegistration
@@ -1308,7 +1483,7 @@ class PipelineHandler:
                 RuntimeValueReference,
                 RuntimeCallableReference,
             ),
-        ) or callable(value):
+        ) or callable(value) or is_optuna_study(value) or is_optuna_sampler(value):
             return value
         if not self._is_mutable_value(value):
             return value
@@ -1339,6 +1514,7 @@ class PipelineHandler:
                 function_name=function_name,
                 run_id=uuid4().hex,
                 torch_load_weights_only=self.torch_load_weights_only,
+                optuna_db_path=self._optuna_studies_db_path_for_storage(),
             )
         except Exception as exc:
             raise PersistenceError(
@@ -2626,10 +2802,22 @@ class PipelineHandler:
             "producer_outputs",
             "para_value_dict",
             "artifact_registry",
+            "object_storage",
         ):
             if mapping_key in payload and not isinstance(payload[mapping_key], dict):
                 raise PersistenceError(
                     f"Saved pipeline payload has a non-mapping '{mapping_key}' entry"
+                )
+        for hash_id, record_payload in payload.get("object_storage", {}).items():
+            if not isinstance(hash_id, str):
+                raise PersistenceError(
+                    "Saved object storage contains a non-string hash key"
+                )
+            record = record_from_payload(record_payload)
+            if record.hash_id != hash_id:
+                raise PersistenceError(
+                    f"Saved object storage hash key '{hash_id}' does not match "
+                    f"record hash_id '{record.hash_id}'"
                 )
         for node_payload in payload["nodes"]:
             if not isinstance(node_payload, dict):
@@ -3104,6 +3292,13 @@ class PipelineHandler:
             payload.get("artifact_registry", {}),
             owner_label="artifact registry value",
         )
+        pipeline._stored_objects = {
+            record.hash_id: record
+            for record in (
+                record_from_payload(record_payload)
+                for record_payload in payload.get("object_storage", {}).values()
+            )
+        }
         pipeline.run_history = payload.get("run_history", [])
         saved_project_root = payload.get("saved_project_root")
         if saved_project_root is not None:
@@ -3970,6 +4165,7 @@ class PipelineHandler:
                 )
                 for output_name, value in self.artifact_registry.items()
             },
+            "object_storage": self._serialize_stored_objects_for_save(target_root),
             "run_history": self.run_history,
         }
 
@@ -3990,7 +4186,10 @@ class PipelineHandler:
                         node._overridden_outputs.items()
                     )
                 },
-                "payload": node._serialize_payload_for_save(target_root, cache),
+                "payload": node._serialize_payload_for_save(
+                    target_root / "children" / node.registration_name,
+                    cache,
+                ),
             }
         return self._serialize_node(node)
 
@@ -4028,6 +4227,16 @@ class PipelineHandler:
         output_name: str,
         sibling_outputs: dict[str, Any] | None = None,
     ) -> Any:
+        if is_optuna_study(value) or is_optuna_sampler(value):
+            save_store = ArtifactStore(target_root)
+            return save_store.save(
+                variable_name=output_name,
+                value=value,
+                block_name=self.qualified_node_name(node_name),
+                function_name="save_pipeline_runtime",
+                run_id="save_pipeline",
+                optuna_db_path=self._optuna_target_db_path(target_root),
+            )
         try:
             torch = import_module("torch")
         except ModuleNotFoundError:
@@ -4106,6 +4315,11 @@ class PipelineHandler:
                 repr_text=repr(value),
                 reason="not directly serializable during save_pipeline",
             )
+
+    def _optuna_target_db_path(self, target_root: Path) -> Path:
+        if self._is_atom:
+            return target_root.parent.parent / OPTUNA_STUDIES_DB_NAME
+        return target_root / OPTUNA_STUDIES_DB_NAME
 
     def _serialize_callable_runtime_value(
         self,
@@ -6468,6 +6682,9 @@ class PipelineHandler:
 
         def collect_from_pipeline(pipeline: "PipelineHandler") -> None:
             collect_from_mapping(pipeline.manual_values)
+            for record in pipeline._stored_objects.values():
+                if record.artifact is not None:
+                    paths.add(str(Path(record.artifact.file_path).resolve()))
             for node in pipeline._sorted_nodes():
                 if isinstance(node, PipelineHandler):
                     collect_from_pipeline(node)
@@ -6543,7 +6760,33 @@ class PipelineHandler:
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)
+        self._merge_storage_into_root()
         self._cleanup_temporary_root_handle()
+
+    def _merge_storage_into_root(self) -> None:
+        if self.parent_pipeline is None or not self._stored_objects:
+            return
+        root = self.parent_pipeline._root_pipeline()
+        for hash_id, source_record in self._stored_objects.items():
+            if hash_id in root._stored_objects:
+                if source_record.artifact is not None:
+                    self.artifact_store.delete(source_record.artifact)
+                continue
+            value = self._load_stored_object_value(source_record)
+            adopted_record = StoredObjectRecord(
+                hash_id=source_record.hash_id,
+                object_name=source_record.object_name,
+                object_type=source_record.object_type,
+                object_description=source_record.object_description,
+                created_at_utc=source_record.created_at_utc,
+                last_modified_at_utc=source_record.last_modified_at_utc,
+                value=value,
+            )
+            if source_record.artifact is not None:
+                root._persist_stored_object(adopted_record, root.project_root)
+                self.artifact_store.delete(source_record.artifact)
+            root._stored_objects[hash_id] = adopted_record
+        self._stored_objects.clear()
 
     def _sync_attached_outputs_to_parent(self) -> None:
         if self.parent_pipeline is None or self.execution_priority is None:
@@ -6560,6 +6803,17 @@ class PipelineHandler:
         def rewrite_value(value: Any) -> Any:
             if isinstance(value, ArtifactRecord) and value.file_path.startswith(old_prefix):
                 value.file_path = value.file_path.replace(old_prefix, new_prefix, 1)
+            if isinstance(value, ArtifactRecord):
+                metadata = getattr(value, "metadata", None)
+                if not isinstance(metadata, dict):
+                    return value
+                db_path = metadata.get("db_path")
+                if isinstance(db_path, str) and db_path.startswith(old_prefix):
+                    metadata["db_path"] = db_path.replace(
+                        old_prefix,
+                        new_prefix,
+                        1,
+                    )
             return value
 
         for outputs in self.producer_outputs.values():
@@ -6569,6 +6823,9 @@ class PipelineHandler:
             self.para_value_dict[key] = rewrite_value(value)
         for key, value in list(self.artifact_registry.items()):
             self.artifact_registry[key] = rewrite_value(value)
+        for record in self._stored_objects.values():
+            if record.artifact is not None:
+                record.artifact = rewrite_value(record.artifact)
         if self.historical_result_log_path and self.historical_result_log_path.startswith(
             old_prefix
         ):
