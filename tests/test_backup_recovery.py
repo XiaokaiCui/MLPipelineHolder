@@ -235,7 +235,7 @@ class BackupRecoveryTests(unittest.TestCase):
             child.add_child_pipeline(overriding, 2)
             root.add_child_pipeline(child, 1)
             root.save_pipeline()
-            child.update_config({"choice": "current"})
+            child.update_configs({"choice": "current"})
 
             result = child.recover_config_from_backup(name="choice")
 
@@ -256,7 +256,7 @@ class BackupRecoveryTests(unittest.TestCase):
             )
             root.save_pipeline()
             previous_config = root.config
-            root.update_config({"factor": 9})
+            root.update_configs({"factor": 9})
 
             root.recover_config_from_backup(name="factor")
 
@@ -285,7 +285,7 @@ class BackupRecoveryTests(unittest.TestCase):
                     temp_dir, {"target_callable": runtime_callable}
                 )
                 root.save_pipeline()
-                root.update_config({"target_callable": current_callable})
+                root.update_configs({"target_callable": current_callable})
 
                 root.recover_config_from_backup(name="target_callable")
 

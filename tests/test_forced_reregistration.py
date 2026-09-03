@@ -1561,7 +1561,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
 
             self.assertNotIn("x", pipeline.para_value_dict)
 
-    def test_atom_used_config_field_change_replaces(self) -> None:
+    def test_atom_parent_config_field_change_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("p", {"base": 5}, tmp / "p")
@@ -1573,9 +1573,10 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 param_mapping={"base": "base"},
             )
             pipeline.run_all()
+            first_atom = pipeline.get_child_pipeline("atom")
             self.assertEqual(pipeline.get_value("x"), 10)
 
-            pipeline.set_config({"base": 7})
+            pipeline.set_configs({"base": 7})
             pipeline.create_atom_child_pipeline(
                 "atom",
                 1,
@@ -1584,9 +1585,10 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 param_mapping={"base": "base"},
             )
 
-            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
+            self.assertEqual(pipeline.get_value("x"), 10)
 
-    def test_atom_direct_config_input_change_replaces(self) -> None:
+    def test_atom_direct_parent_config_input_change_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("p", {"base": 5}, tmp / "p")
@@ -1599,7 +1601,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
             pipeline.run_all()
             first_atom = pipeline.get_child_pipeline("atom")
             self.assertEqual(pipeline.get_value("x"), 10)
-            pipeline.set_config({"base": 7})
+            pipeline.set_configs({"base": 7})
 
             pipeline.create_atom_child_pipeline(
                 "atom",
@@ -1608,10 +1610,10 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 output_variable_names=["x"],
             )
 
-            self.assertIsNot(pipeline.get_child_pipeline("atom"), first_atom)
-            self.assertNotIn("x", pipeline.para_value_dict)
+            self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
+            self.assertEqual(pipeline.get_value("x"), 10)
 
-    def test_atom_consumed_runtime_callable_change_replaces(self) -> None:
+    def test_atom_parent_runtime_callable_change_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             exec(
@@ -1637,7 +1639,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                     "def atom_runtime_callback() -> int:\n    return 2\n",
                     __main__.__dict__,
                 )
-                pipeline.set_config(
+                pipeline.set_configs(
                     {"callback": getattr(__main__, "atom_runtime_callback")}
                 )
 
@@ -1648,8 +1650,8 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                     output_variable_names=["x"],
                 )
 
-                self.assertIsNot(pipeline.get_child_pipeline("atom"), first_atom)
-                self.assertNotIn("x", pipeline.para_value_dict)
+                self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
+                self.assertEqual(pipeline.get_value("x"), 1)
             finally:
                 if hasattr(__main__, "atom_runtime_callback"):
                     delattr(__main__, "atom_runtime_callback")
@@ -1657,14 +1659,17 @@ class AtomPipelineEqualityTests(unittest.TestCase):
     def test_equal_dataclass_numpy_used_config_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
-            pipeline = PipelineHandler("p", {}, tmp / "p")
+            pipeline = PipelineHandler(
+                "p",
+                {"spec": ArraySpec(np.array([1, 2]))},
+                tmp / "p",
+            )
             pipeline.create_atom_child_pipeline(
                 "atom",
                 1,
                 consume_spec,
                 output_variable_names=["x"],
                 param_mapping={"spec": "spec"},
-                child_configuration={"spec": ArraySpec(np.array([1, 2]))},
             )
             pipeline.run_all()
             first_atom = pipeline.get_child_pipeline("atom")
@@ -1676,7 +1681,6 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 consume_spec,
                 output_variable_names=["x"],
                 param_mapping={"spec": "spec"},
-                child_configuration={"spec": ArraySpec(np.array([1, 2]))},
             )
 
             self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
@@ -1707,7 +1711,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
             self.assertIs(pipeline.get_child_pipeline("atom"), original)
             self.assertEqual(pipeline.get_value("x"), 1)
 
-    def test_atom_used_config_missing_and_none_are_different(self) -> None:
+    def test_atom_parent_config_missing_then_none_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("p", {}, tmp / "p")
@@ -1719,6 +1723,7 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 param_mapping={"base": "base"},
             )
             first_atom = pipeline.get_child_pipeline("atom")
+            pipeline.set_configs({"base": None})
 
             pipeline.create_atom_child_pipeline(
                 "atom",
@@ -1726,10 +1731,9 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 produce_with_config,
                 output_variable_names=["x"],
                 param_mapping={"base": "base"},
-                child_configuration={"base": None},
             )
 
-            self.assertIsNot(pipeline.get_child_pipeline("atom"), first_atom)
+            self.assertIs(pipeline.get_child_pipeline("atom"), first_atom)
 
     def test_atom_unused_config_field_change_is_noop(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1742,12 +1746,12 @@ class AtomPipelineEqualityTests(unittest.TestCase):
                 output_variable_names=["x"],
                 param_mapping={"base": "base"},
             )
-            pipeline.set_config({"unused": 1, "base": 5})
+            pipeline.set_configs({"unused": 1, "base": 5})
             pipeline.run_all()
             self.assertEqual(pipeline.get_value("x"), 10)
             first_atom = pipeline.get_child_pipeline("atom")
 
-            pipeline.set_config({"unused": 99, "base": 5})
+            pipeline.set_configs({"unused": 99, "base": 5})
             pipeline.create_atom_child_pipeline(
                 "atom",
                 1,
@@ -1841,10 +1845,16 @@ class AtomLockTests(unittest.TestCase):
             with self.assertRaises(RegistrationError):
                 block.remove_function("produce")
 
-    def test_atom_allows_config_and_value_mutations(self) -> None:
+    def test_atom_rejects_config_and_allows_value_mutations(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline, atom = self._locked_atom(temp_dir)
-            atom.set_config({"extra": 1})
+            with self.assertRaises(RegistrationError):
+                atom.set_config("extra", 1)
+            with self.assertRaises(RegistrationError):
+                atom.update_config("extra", 1)
+            with self.assertRaises(RegistrationError):
+                atom.update_configs({"extra": 1})
+            pipeline.set_configs({"extra": 1})
             atom.set_constant_value("const", 3)
             self.assertEqual(atom.get_config_value("extra"), 1)
             self.assertEqual(atom.get_constant_value("const"), 3)

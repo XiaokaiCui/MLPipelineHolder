@@ -161,7 +161,7 @@ class PipelineHandler:
             registration_name,
             owner_label="pipeline",
         )
-        self.config = {} if configuration is None else configuration
+        self._config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHandler | None = None
         self._temporary_root_handle: TemporaryDirectory[str] | None = None
@@ -231,6 +231,17 @@ class PipelineHandler:
             if generated_temp_root and self.project_root.exists():
                 shutil.rmtree(self.project_root, ignore_errors=True)
             raise
+
+    @property
+    def config(self) -> Any:
+        if getattr(self, "_is_atom", False) and self.parent_pipeline is not None:
+            return self.parent_pipeline.config
+        return self._config
+
+    @config.setter
+    def config(self, configuration: Any) -> None:
+        self._require_owned_config()
+        self._config = configuration
 
     def __del__(self) -> None:
         try:
@@ -400,7 +411,6 @@ class PipelineHandler:
         param_mapping_dct: dict[str, str | None] | None = None,
         kwargs_dct: dict[str, str] | None = None,
         args_lst: tuple[str, ...] | list[str] | None = None,
-        child_configuration: Any | None = None,
         allow_existing_root: bool = True,
         forced: bool = True,
         block_priority: float = 10.0,
@@ -441,7 +451,6 @@ class PipelineHandler:
         child_root = self.project_root / "children" / child_name
         temp_pipeline = PipelineHandler(
             registration_name=child_name,
-            configuration=self.get_full_config() if child_configuration is None else child_configuration,
             local_folder_path=child_root,
             execution_priority=execution_priority,
             forced=forced,
@@ -468,7 +477,7 @@ class PipelineHandler:
                     temp_pipeline.logger.warning(
                         f"Gate config '{gate_config}' is not found in config, visible output values, or visible manual values; auto-creating config field with default value"
                     )
-                temp_pipeline.set_config({gate_config: default_config_value})
+                self.set_config(gate_config, default_config_value)
             temp_pipeline.set_gate_block(
                 gate_config,
                 expected_value=expected_value,
@@ -585,10 +594,9 @@ class PipelineHandler:
     ) -> bool:
         """Whether a re-created atom pipeline is structurally identical to the old one.
 
-        Compares registration identity, gate, inner blocks (functions, args and
-        kwargs helpers) and the effective values of the config fields the atom
-        actually consumes. Unused config fields and their counts are ignored, so
-        parent-config drift never blocks a no-op.
+        Compares registration identity, gate, and inner blocks, including their
+        functions and args/kwargs helpers. Parent configuration is runtime state
+        and therefore does not affect the atom definition.
         """
         if not old._is_atom:
             return False
@@ -601,8 +609,6 @@ class PipelineHandler:
         if not self._atom_gates_equal(old, new):
             return False
         if not self._atom_blocks_equal(old, new):
-            return False
-        if not self._atom_used_config_fields_equal(old, new):
             return False
         return True
 
@@ -710,56 +716,6 @@ class PipelineHandler:
             and old_reg.var_kw_name == new_reg.var_kw_name
             and old_reg.overridden_outputs == new_reg.overridden_outputs
         )
-
-    def _atom_used_config_fields_equal(
-        self,
-        old: "PipelineHandler",
-        new: "PipelineHandler",
-    ) -> bool:
-        from .models import ExpressionRegistration
-
-        used_names: set[str] = set()
-        for pipeline in (old, new):
-            if (
-                pipeline.gate_block is not None
-                and pipeline.gate_block.config_field_name is not None
-            ):
-                used_names.add(pipeline.gate_block.config_field_name)
-            for node in pipeline._sorted_nodes():
-                if isinstance(node, PipelineHandler):
-                    continue
-                for registration in node.functions:
-                    if isinstance(registration, ExpressionRegistration):
-                        continue
-                    helper_names = {
-                        registration.var_pos_name,
-                        registration.var_kw_name,
-                    }
-                    used_names.update(
-                        name
-                        for name in registration.input_names
-                        if name != "logger" and name not in helper_names
-                    )
-                    for mapped_name in registration.param_mapping.values():
-                        if mapped_name is not None:
-                            used_names.add(mapped_name)
-                for args_registration in node.registered_args.values():
-                    used_names.update(args_registration.ordered_items)
-                for kwargs_registration in node.registered_kwargs.values():
-                    used_names.update(kwargs_registration.mapping_dct.values())
-        old_config = old.get_full_config()
-        new_config = new.get_full_config()
-        missing = object()
-        for name in used_names:
-            old_value = old_config.get(name, missing)
-            new_value = new_config.get(name, missing)
-            if old_value is missing or new_value is missing:
-                if old_value is not new_value:
-                    return False
-                continue
-            if not _values_equal(old_value, new_value):
-                return False
-        return True
 
     def _erase_node_outputs(self, node_name: str) -> None:
         slots = self._public_output_slots()
@@ -1071,7 +1027,11 @@ class PipelineHandler:
     ) -> Any:
         return self.add_gate_block(function_or_path, expected_value=expected_value, forced=forced)
 
-    def set_config(self, overrides: dict[str, Any]) -> None:
+    def set_config(self, config_name: str, new_config_value: Any) -> None:
+        self.set_configs({config_name: new_config_value})
+
+    def set_configs(self, overrides: dict[str, Any]) -> None:
+        self._require_owned_config()
         declared_outputs = self.list_declared_outputs()
         manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
         for field_name, value in overrides.items():
@@ -1089,7 +1049,11 @@ class PipelineHandler:
                 continue
             self._set_config_value(field_name, value)
 
-    def update_config(self, overrides: dict[str, Any]) -> None:
+    def update_config(self, config_name: str, new_config_value: Any) -> None:
+        self.update_configs({config_name: new_config_value})
+
+    def update_configs(self, overrides: dict[str, Any]) -> None:
+        self._require_owned_config()
         config_names = self.get_full_config()
         declared_outputs = self.list_declared_outputs()
         manual_names = set(self.manual_values) | set(self._ancestor_manual_values())
@@ -1761,6 +1725,8 @@ class PipelineHandler:
         recover_variable_from_backup(self, name, pipeline_name=pipeline_name)
 
     def get_full_config(self) -> dict[str, Any]:
+        if self._is_atom and self.parent_pipeline is not None:
+            return self.parent_pipeline.get_full_config()
         return dict(self._ancestor_config_values(), **self.config_as_dict())
 
     def get_config_value(self, field_name: str) -> Any:
@@ -1775,7 +1741,11 @@ class PipelineHandler:
             )
         return value
 
+    def get_config(self, config_name: str) -> Any:
+        return self.get_config_value(config_name)
+
     def recover_config_from_backup(self, name: str) -> None:
+        self._require_owned_config()
         from .backup_recovery_service import recover_config_from_backup
 
         recover_config_from_backup(self, name)
@@ -3142,6 +3112,8 @@ class PipelineHandler:
         pipeline.suppress_registration_advisories = False
         pipeline._suppress_strict_validation = False
         pipeline._is_atom = bool(payload.get("is_atom", False))
+        if pipeline._is_atom:
+            pipeline._config = {}
         if parent is not None:
             pipeline.parent_pipeline = parent
             pipeline.logger = parent.logger
@@ -3927,7 +3899,11 @@ class PipelineHandler:
         traceback_settings = self.logger.get_traceback_settings()
         return {
             "registration_name": self.registration_name,
-            "config": self._serialize_config_for_save(self.config),
+            "config": (
+                {}
+                if self._is_atom
+                else self._serialize_config_for_save(self.config)
+            ),
             "execution_priority": self.execution_priority,
             "is_atom": self._is_atom,
             "saved_project_root": str(self.project_root),
@@ -6387,6 +6363,20 @@ class PipelineHandler:
             self.config[field_name] = value
             return
         setattr(self.config, field_name, value)
+
+    def _require_owned_config(self) -> None:
+        if not getattr(self, "_is_atom", False):
+            return
+        parent_name = (
+            "the parent pipeline"
+            if self.parent_pipeline is None
+            else f"parent pipeline '{self.parent_pipeline.registration_name}'"
+        )
+        raise RegistrationError(
+            f"Atom pipeline '{self.registration_name}' does not own configuration; "
+            f"call set_config(), set_configs(), update_config(), or update_configs() "
+            f"on {parent_name}"
+        )
 
     def _invalidate_from_priority(
         self,
