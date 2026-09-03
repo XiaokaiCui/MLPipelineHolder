@@ -42,7 +42,7 @@ Each extra adds:
 - `torch`: PyTorch model, tensor, and optimiser persistence
 - `rich`: Rich-rendered console tracebacks (console tracebacks fall back to plain stdlib text when Rich is not installed)
 - `memory`: `psutil`-based memory profiling logs (useful when you utilise disk-backed features)
-- `optuna`: SQLite-backed Optuna `Study` artifacts and pickle-backed `BaseSampler` artifacts
+- `optuna`: support SQLite-backed Optuna `Study` artifacts and pickle-backed `BaseSampler` artifacts
 - `all`: all optional features listed above (**recommended**)
 
 The core package requires Python 3.11 or later and includes `termcolor` and NumPy.
@@ -56,6 +56,7 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes. (use `strict_mode` to make it even safer)
 - Build a pipeline around your existing Jupyter notebook in a straightforward way while retaining most of its original structure and logic.
 - Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed (more effective when used together with `save_to_disk`).
+- Keep arbitrary experiment objects in well-managed storage that is persisted with the pipeline.
 - Track and record logs, results, and pipeline state with minimal effort by using built-in logger.
 
 ### Example notebook

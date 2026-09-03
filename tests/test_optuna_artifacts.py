@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -193,6 +194,23 @@ class OptunaArtifactTests(unittest.TestCase):
             restored = child.get_value("study")
             self.assertEqual(len(restored.trials), 3)
             self.assertIsInstance(restored.sampler, optuna.samplers.RandomSampler)
+
+    def test_storage_study_uses_dedicated_persistence_without_pickle_warning(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            pipeline = PipelineHandler("study-storage", {}, root)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                hash_id = pipeline.save_to_storage("study", build_study())
+                pipeline.save_pipeline()
+
+            messages = [str(item.message) for item in caught]
+            self.assertFalse(any("falling back to pickle" in item for item in messages))
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            restored = loaded.get_from_storage(hash_id=hash_id)
+            self.assertIsInstance(restored, optuna.study.Study)
+            self.assertEqual(len(restored.trials), 3)
 
 
 if __name__ == "__main__":

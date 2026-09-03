@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.2) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.3) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -282,6 +282,28 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <h4 class="method-name" id="PipelineHandler.optuna_studies_db_path">optuna_studies_db_path</h4>
 <div class="sig"><span class="kw">property</span> optuna_studies_db_path -&gt; <span class="ret">Path</span></div>
 <p>Returns the dynamic default path <code>project_root / "optuna_studies.db"</code> for this non-atom pipeline. Reading the property does not create the database file. The path follows <code>project_root</code> when a temporary pipeline is relocated, a child is attached, or a saved project is loaded. Atom pipelines own no Optuna database path; their study outputs use the direct parent pipeline's database.</p>
+
+<h4 class="method-name" id="PipelineHandler.list_stored_objects">list_stored_objects()</h4>
+<div class="sig"><span class="kw">list_stored_objects</span>() -&gt; <span class="ret">pandas.DataFrame</span></div>
+<p>Returns one metadata row per root-stored object with columns <code>hash_id</code>, <code>object_name</code>, <code>object_type</code>, <code>object_description</code>, <code>created_at_utc</code>, and <code>last_modified_at_utc</code>. The timestamp columns are timezone-aware UTC values. This method requires pandas and raises <code>ImportError</code> when it is unavailable; install <code>mlpipelineholder[dataframe]</code>.</p>
+
+<h4 class="method-name" id="PipelineHandler.save_to_storage">save_to_storage()</h4>
+<div class="sig"><span class="kw">save_to_storage</span>(object_name: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_description: <span class="arg">str | None</span> = None) -&gt; <span class="ret">str</span></div>
+<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. The value remains in memory until <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a> persists it. Stored objects are never exposed to pipeline argument resolution or execution, even when a stored name matches a configuration field, constant, or output.</p>
+
+<h4 class="method-name" id="PipelineHandler.update_storage">update_storage()</h4>
+<div class="sig"><span class="kw">update_storage</span>(hash_id: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_name: <span class="arg">str | None</span> = None, object_description: <span class="arg">str | None</span> = None, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
+<p>Replaces the value selected by <code>hash_id</code>, updates its object type and UTC modification timestamp, and optionally replaces its name or description. With <code>to_disk=False</code>, persistence waits for the next pipeline save; <code>to_disk=True</code> writes a new managed artifact immediately.</p>
+
+<h4 class="method-name" id="PipelineHandler.get_from_storage">get_from_storage()</h4>
+<div class="sig"><span class="kw">get_from_storage</span>(hash_id: <span class="arg">str | None</span> = None, object_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">Any</span></div>
+<p>Loads and returns one stored object. When both selectors are supplied, <code>hash_id</code> takes precedence. An unknown selector, no selector, or an <code>object_name</code> shared by multiple records raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>.</p>
+
+<h4 class="method-name" id="PipelineHandler.remove_from_storage">remove_from_storage()</h4>
+<div class="sig"><span class="kw">remove_from_storage</span>(hash_id: <span class="arg">str | None</span> = None, object_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
+<p>Removes one selected record and deletes its managed artifact. Selection follows <code>get_from_storage()</code>: hash ID takes precedence and duplicated names are ambiguous.</p>
+
+<p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
 
 <h4 class="method-name" id="PipelineHandler.add_block">add_block()</h4>
 <div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">ExecutionBlock | None</span></div>
