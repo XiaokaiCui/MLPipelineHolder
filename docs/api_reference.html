@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.4) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.5) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -336,7 +336,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   target_function: <span class="arg">Any</span>,
   gate_config: <span class="arg">str | None</span> = None,
   expected_value: <span class="arg">Any</span> = True,
-  default_config_value: <span class="arg">Any</span> = True,
   output_variable_names: <span class="arg">str | list[str] | tuple[str, ...] | None</span> = None,
   save_to_disk_lst: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None,
   param_mapping_dct: <span class="arg">dict[str, str | None] | None</span> = None,
@@ -358,7 +357,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>target_function</code>: callable or import path executed by the atom.</li>
   <li><code>gate_config</code>: optional configuration field used as the atom's gate.</li>
   <li><code>expected_value</code>: value the gate must produce for the atom to run.</li>
-  <li><code>default_config_value</code>: value created in the parent configuration for <code>gate_config</code> when that field is not already visible.</li>
   <li><code>output_variable_names</code>: zero, one, or multiple declared output names for the target function.</li>
   <li><code>save_to_disk_lst</code>: declared outputs that should be stored as artifacts.</li>
   <li><code>param_mapping_dct</code>: legacy parameter-to-pipeline-name mapping; cannot be combined with <code>param_mapping</code>.</li>
@@ -416,6 +414,14 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <ul class="param-desc"><li><code>variable_name</code>: visible produced-output name to resolve through provenance and any output-pointer chain.</li></ul>
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names, and for names that are pipeline constants (use <a class="anchor" href="#PipelineHandler.get_constant_value"><code>get_constant_value()</code></a> instead).</p>
 
+<h4 class="method-name" id="PipelineHandler.list_visible_output">list_visible_output()</h4>
+<div class="sig"><span class="kw">list_visible_output</span>() -&gt; <span class="ret">set[str]</span></div>
+<p>Returns a detached set of <em>produced output names</em> currently visible to this pipeline: its own and descendant outputs, plus produced outputs of upstream ancestors and earlier-priority siblings. Visibility is key-based and side-effect free: <code>None</code> values, disk-backed artifact records, output pointers, and restorable placeholders count while their stored key exists, without loading artifacts, resolving pointers, or materializing any value. Declared-but-unproduced and invalidated outputs are absent, and pipeline constants are never included. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
+
+<h4 class="method-name" id="PipelineHandler.has_visible_output">has_visible_output()</h4>
+<div class="sig"><span class="kw">has_visible_output</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
+<p>Reports whether <code>variable_name</code> is a currently visible produced output, using the same key-based collector as <a class="anchor" href="#PipelineHandler.list_visible_output"><code>list_visible_output()</code></a>. Never materializes values, loads artifacts, resolves pointers, or mutates state; returns <code>False</code> for unknown names.</p>
+
 <h4 class="method-name" id="PipelineHandler.get_node_output">get_node_output()</h4>
 <div class="sig"><span class="kw">get_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns one materialized output from an immediate block or atom child. Output pointers are followed to the terminal owner and disk-backed values are loaded. Ordinary child-pipeline containers are rejected because their internal producers are not one immediate public output address.</p>
@@ -445,6 +451,14 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>variable_name</code>: constant name to resolve from the nearest visible owner.</li></ul>
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> if no such constant exists.</p>
+
+<h4 class="method-name" id="PipelineHandler.list_visible_constant">list_visible_constant()</h4>
+<div class="sig"><span class="kw">list_visible_constant</span>() -&gt; <span class="ret">set[str]</span></div>
+<p>Returns a detached set of <em>pipeline constant names</em> visible to this pipeline: its own constants plus ancestor and earlier-priority sibling constants. Later siblings and descendant-owned constants are excluded, matching <a class="anchor" href="#PipelineHandler.get_constant_value"><code>get_constant_value()</code></a> scope. Presence is key-based and side-effect free: <code>None</code> and disk-backed values count without loading or materialization. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
+
+<h4 class="method-name" id="PipelineHandler.has_visible_constant">has_visible_constant()</h4>
+<div class="sig"><span class="kw">has_visible_constant</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
+<p>Reports whether <code>variable_name</code> is a currently visible constant, using the same collector as <a class="anchor" href="#PipelineHandler.list_visible_constant"><code>list_visible_constant()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
 
 <h4 class="method-name" id="PipelineHandler.set_constant_value">set_constant_value()</h4>
 <div class="sig"><span class="kw">set_constant_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -537,6 +551,14 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <h4 class="method-name" id="PipelineHandler.get_full_config">get_full_config()</h4>
 <div class="sig"><span class="kw">get_full_config</span>() -&gt; <span class="ret">dict[str, Any]</span></div>
 <p>Returns the visible merged configuration for this pipeline, including parent configs recursively. Local config normally overrides same-named parent values. An atom owns no local configuration and returns its parent's current visible configuration.</p>
+
+<h4 class="method-name" id="PipelineHandler.list_visible_config">list_visible_config()</h4>
+<div class="sig"><span class="kw">list_visible_config</span>() -&gt; <span class="ret">set[str]</span></div>
+<p>Returns a detached set of <em>configuration field names</em> visible to this pipeline: its local plus ancestor config keys. Sibling and descendant configs are excluded. An atom delegates to its parent and returns the parent's current visible config names. Presence is key-based and side-effect free: keys whose value is <code>None</code> count, and no value is read or materialized. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
+
+<h4 class="method-name" id="PipelineHandler.has_visible_config">has_visible_config()</h4>
+<div class="sig"><span class="kw">has_visible_config</span>(config_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
+<p>Reports whether <code>config_name</code> is a currently visible configuration field, using the same collector as <a class="anchor" href="#PipelineHandler.list_visible_config"><code>list_visible_config()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
 
 <h4 class="method-name" id="PipelineHandler.config_as_dict">config_as_dict()</h4>
 <div class="sig"><span class="kw">config_as_dict</span>() -&gt; <span class="ret">dict[str, Any]</span></div>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -83,13 +84,37 @@ class AtomConfigInheritanceTests(unittest.TestCase):
                 atom.set_config("joint_use_median_param", False)
 
     def test_atom_creation_has_no_configuration_argument(self) -> None:
-        # Given/When: callers inspect the public atom factory signature.
+        # Given: callers inspect the public atom factory signature.
         parameters = inspect.signature(
             PipelineHandler.create_atom_child_pipeline
         ).parameters
 
         # Then: atom-local configuration cannot be supplied.
         self.assertNotIn("child_configuration", parameters)
+        self.assertNotIn("default_config_value", parameters)
+
+    def test_atom_creation_rejects_default_config_value_argument(self) -> None:
+        # Given: a parent pipeline with the gate config already visible.
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "joint_analysis_pipeline",
+                {"joint_use_median_param": True},
+                Path(temp_dir) / "pipeline",
+            )
+            method_name = "create_atom_child_pipeline"
+            factory: Callable[..., None] = getattr(pipeline, method_name)
+            invalid_kwargs = {"default_config_value": False}
+
+            # When/Then: removed atom-local config arguments fail with Python's normal signature error.
+            with self.assertRaises(TypeError):
+                factory(
+                    "joint_select_param",
+                    26,
+                    select_parameter_branch,
+                    gate_config="joint_use_median_param",
+                    output_variable_names="selected_branch",
+                    **invalid_kwargs,
+                )
 
     def test_default_atom_config_inheritance_survives_save_and_load(self) -> None:
         # Given: a default-config atom has been saved and loaded.
