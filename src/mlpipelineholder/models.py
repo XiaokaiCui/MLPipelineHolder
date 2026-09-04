@@ -1,11 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .output_pointers import OutputAddress
+
+
+def _restore_dataclass_state(instance: Any, state: Any) -> None:
+    """Restore pickle state while defaulting fields absent from older saves.
+
+    Backups written before a field existed pickle fewer slot entries, which
+    leaves the newer slots unset and raises AttributeError on access. Missing
+    fields are filled from their declared default or default factory instead.
+    """
+    if isinstance(state, dict):
+        raw = state
+    elif (
+        isinstance(state, tuple)
+        and len(state) == 2
+        and isinstance(state[0], (type(None), dict))
+        and isinstance(state[1], dict)
+    ):
+        raw = state[1]
+    elif isinstance(state, tuple):
+        raw = {
+            field_info.name: value
+            for field_info, value in zip(fields(instance), state)
+        }
+    else:
+        raise TypeError(
+            f"Unexpected pickle state for {type(instance).__name__}: {type(state).__name__}"
+        )
+    for field_info in fields(instance):
+        if field_info.name in raw:
+            object.__setattr__(instance, field_info.name, raw[field_info.name])
+        elif field_info.default is not MISSING:
+            object.__setattr__(instance, field_info.name, field_info.default)
+        elif field_info.default_factory is not MISSING:
+            object.__setattr__(instance, field_info.name, field_info.default_factory())
 
 
 @dataclass(slots=True)
@@ -21,6 +55,10 @@ class ArtifactRecord:
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     torch_load_weights_only: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __setstate__(self, state: Any) -> None:
+        """Fill fields added after an older save with their defaults."""
+        _restore_dataclass_state(self, state)
 
     def path(self) -> Path:
         return Path(self.file_path)
@@ -143,3 +181,7 @@ class TorchStateArtifactRecord:
     file_path: str
     object_kind: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __setstate__(self, state: Any) -> None:
+        """Fill fields added after an older save with their defaults."""
+        _restore_dataclass_state(self, state)

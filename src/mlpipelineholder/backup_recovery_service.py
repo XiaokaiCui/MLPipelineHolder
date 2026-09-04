@@ -66,10 +66,14 @@ def recover_variable_from_backup(
         name,
         scope_pipeline=scope if pipeline_name is not None else None,
     )
+    snapshot = read_backup_snapshot(pipeline)
     declaring = scope
     declared_only = False
     if not inventory.owners:
-        if pipeline_name is not None:
+        constant_scope = _missing_constant_scope(snapshot, scope, name)
+        if constant_scope is not None:
+            inventory = _constant_inventory(constant_scope, name)
+        elif pipeline_name is not None:
             declaring_node = scope._find_declaring_node(name)
             if declaring_node is None:
                 raise ResolutionError(f"Unknown pipeline value: {name}")
@@ -77,13 +81,14 @@ def recover_variable_from_backup(
                 if not getattr(declaring_node, "_is_atom", False):
                     raise ResolutionError(f"Unknown pipeline value: {name}")
                 declaring = declaring_node
+            inventory = _declared_inventory(declaring, name)
+            declared_only = True
         else:
             if name not in scope.list_declared_outputs():
                 raise ResolutionError(f"Unknown pipeline value: {name}")
             declaring = _deepest_declaring_pipeline(scope, name)
-        inventory = _declared_inventory(declaring, name)
-        declared_only = True
-    snapshot = read_backup_snapshot(pipeline)
+            inventory = _declared_inventory(declaring, name)
+            declared_only = True
     if declared_only or pipeline_name is not None:
         target_path = (
             declaring.full_path()
@@ -230,6 +235,48 @@ def _declared_inventory(
         scope.full_path(),
         OwnerKind.DECLARED,
         (),
+    )
+    return _VariableOwnershipInventory(variable_name, (owner,), ())
+
+
+def _missing_constant_scope(
+    snapshot: _BackupSnapshot,
+    scope: _PipelineProtocol,
+    variable_name: str,
+) -> _PipelineProtocol | None:
+    """Return ``scope`` when its saved payload still holds the name as a constant.
+
+    A constant removed from the live pipeline (for example after a notebook
+    restart that never re-registered it) has no live ownership slots, but the
+    backup's ``manual_values`` mapping still records it, so recovery can
+    recreate it without requiring the constant to exist first.
+    """
+    payload = snapshot.payload_for_path(tuple(scope.full_path().split("/")))
+    saved_manual = payload.get("manual_values")
+    if isinstance(saved_manual, dict) and variable_name in saved_manual:
+        return scope
+    return None
+
+
+def _constant_inventory(
+    scope: _PipelineProtocol,
+    variable_name: str,
+) -> _VariableOwnershipInventory:
+    """Inventory for re-creating a constant that exists only in the backup."""
+    path = scope.full_path()
+    owner = _OwnedVariableState(
+        path,
+        OwnerKind.MANUAL,
+        (
+            _StateSlot(path, SlotKind.PARA, scope.para_value_dict, variable_name),
+            _StateSlot(path, SlotKind.MANUAL, scope.manual_values, variable_name),
+            _StateSlot(
+                path,
+                SlotKind.ARTIFACT_REGISTRY,
+                scope.artifact_registry,
+                variable_name,
+            ),
+        ),
     )
     return _VariableOwnershipInventory(variable_name, (owner,), ())
 
