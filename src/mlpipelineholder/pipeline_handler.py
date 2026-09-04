@@ -13,7 +13,7 @@ import re
 import shutil
 import sys
 import warnings
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from ctypes import CDLL
 from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
@@ -1505,17 +1505,38 @@ class PipelineHandler:
         *,
         function_name: str,
         verbose: bool,
+        stage_dask_source: bool = False,
     ) -> ArtifactRecord:
         try:
-            record = self.artifact_store.save(
-                variable_name=variable_name,
-                value=value,
-                block_name=self.registration_name,
-                function_name=function_name,
-                run_id=uuid4().hex,
-                torch_load_weights_only=self.torch_load_weights_only,
-                optuna_db_path=self._optuna_studies_db_path_for_storage(),
-            )
+            with ExitStack() as stack:
+                value_to_save = value
+                if stage_dask_source:
+                    try:
+                        dask_dataframe = import_module("dask.dataframe")
+                    except ModuleNotFoundError:
+                        dask_dataframe = None
+                    if dask_dataframe is not None and isinstance(
+                        value,
+                        dask_dataframe.DataFrame,
+                    ):
+                        temp_dir = stack.enter_context(
+                            TemporaryDirectory(
+                                prefix=".dask-replacement-",
+                                dir=self.artifact_store.artifact_root,
+                            )
+                        )
+                        snapshot_path = Path(temp_dir) / "snapshot.parquet"
+                        value.to_parquet(snapshot_path)
+                        value_to_save = dask_dataframe.read_parquet(snapshot_path)
+                record = self.artifact_store.save(
+                    variable_name=variable_name,
+                    value=value_to_save,
+                    block_name=self.registration_name,
+                    function_name=function_name,
+                    run_id=uuid4().hex,
+                    torch_load_weights_only=self.torch_load_weights_only,
+                    optuna_db_path=self._optuna_studies_db_path_for_storage(),
+                )
         except Exception as exc:
             raise PersistenceError(
                 f"Failed to save value '{variable_name}' to disk: {type(exc).__name__}: {exc}"
@@ -1656,6 +1677,7 @@ class PipelineHandler:
                 value,
                 function_name="update_value",
                 verbose=verbose,
+                stage_dask_source=True,
             )
         elif copy:
             replacement = self._snapshot_value(variable_name, value, verbose=verbose)
@@ -6598,7 +6620,7 @@ class PipelineHandler:
         include_target: bool = True,
         preserve_pipeline_state: PipelineHandler | None = None,
     ) -> None:
-        if priority is None:
+        if priority is None or self._invalidation_forbidden:
             return
         selected_nodes = [
             node
@@ -6790,6 +6812,9 @@ class PipelineHandler:
 
     def _sync_attached_outputs_to_parent(self) -> None:
         if self.parent_pipeline is None or self.execution_priority is None:
+            return
+        if self._invalidation_forbidden:
+            self._resync_mirror_to_parent()
             return
         self.parent_pipeline.producer_outputs[self.registration_name] = (
             self._locally_produced_outputs()

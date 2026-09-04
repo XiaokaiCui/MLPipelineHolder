@@ -166,10 +166,17 @@ def _values_equal(left: Any, right: Any) -> bool:
     if type(left) is not type(right):
         return False
     if is_dataclass(left) and not isinstance(left, type):
-        return all(
-            _values_equal(getattr(left, field.name), getattr(right, field.name))
-            for field in fields(left)
-        )
+        for field_info in fields(left):
+            left_present = hasattr(left, field_info.name)
+            right_present = hasattr(right, field_info.name)
+            if left_present != right_present:
+                return False
+            if left_present and not _values_equal(
+                getattr(left, field_info.name),
+                getattr(right, field_info.name),
+            ):
+                return False
+        return True
     if isinstance(left, dict):
         if left.keys() != right.keys():
             return False

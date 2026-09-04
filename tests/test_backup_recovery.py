@@ -84,6 +84,91 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertIsNone(result)
             self.assertEqual(root.get_constant_value("threshold"), 5)
 
+    def test_recover_missing_root_constant_without_pipeline_name_restores_it(self) -> None:
+        # Given: a saved constant that no longer exists in the live root.
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.set_constant_value("threshold", 5)
+            root.save_pipeline()
+            root.manual_values.pop("threshold", None)
+            root.para_value_dict.pop("threshold", None)
+            root.artifact_registry.pop("threshold", None)
+            with self.assertRaises(ResolutionError):
+                root.get_constant_value("threshold")
+
+            # When: the missing constant is recovered without pipeline_name.
+            with patch(
+                "builtins.input",
+                side_effect=AssertionError("constant recovery must not prompt"),
+            ):
+                root.recover_variable_from_backup(name="threshold")
+
+            # Then: the constant is recreated without prior registration.
+            self.assertEqual(root.get_constant_value("threshold"), 5)
+
+    def test_recover_missing_child_constant_with_pipeline_name_restores_it(self) -> None:
+        # Given: a child-pipeline constant saved in the backup but removed live.
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            joint = PipelineHandler(
+                "joint_analysis_pipeline",
+                {},
+                Path(temp_dir) / "joint",
+            )
+            joint.set_constant_value("best_median_params_sofar_400", {"lr": 0.01})
+            root.add_child_pipeline(joint, 1)
+            root.save_pipeline()
+            joint.manual_values.pop("best_median_params_sofar_400", None)
+            joint.para_value_dict.pop("best_median_params_sofar_400", None)
+            joint.artifact_registry.pop("best_median_params_sofar_400", None)
+            with self.assertRaises(ResolutionError):
+                joint.get_constant_value("best_median_params_sofar_400")
+
+            # When: the missing constant is recovered for the owning pipeline.
+            with patch(
+                "builtins.input",
+                side_effect=AssertionError("constant recovery must not prompt"),
+            ):
+                root.recover_variable_from_backup(
+                    name="best_median_params_sofar_400",
+                    pipeline_name="joint_analysis_pipeline",
+                )
+
+            # Then: the child constant is recreated from the backup.
+            self.assertEqual(
+                joint.get_constant_value("best_median_params_sofar_400"),
+                {"lr": 0.01},
+            )
+
+    def test_recover_missing_disk_backed_constant_restores_artifact(self) -> None:
+        # Given: a disk-backed constant removed from the live child pipeline.
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            joint = PipelineHandler(
+                "joint_analysis_pipeline",
+                {},
+                Path(temp_dir) / "joint",
+            )
+            joint.set_constant_value("blob_constant", {"saved": 7}, to_disk=True)
+            root.add_child_pipeline(joint, 1)
+            root.save_pipeline()
+            joint.manual_values.pop("blob_constant", None)
+            joint.para_value_dict.pop("blob_constant", None)
+            joint.artifact_registry.pop("blob_constant", None)
+
+            # When: the missing disk-backed constant is recovered.
+            with patch(
+                "builtins.input",
+                side_effect=AssertionError("constant recovery must not prompt"),
+            ):
+                root.recover_variable_from_backup(
+                    name="blob_constant",
+                    pipeline_name="joint_analysis_pipeline",
+                )
+
+            # Then: the artifact is restored and materializes the saved value.
+            self.assertEqual(joint.get_constant_value("blob_constant"), {"saved": 7})
+
     def test_recover_variable_on_child_requires_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root, _, _ = self._saved_root(temp_dir, {})
