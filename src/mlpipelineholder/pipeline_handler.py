@@ -580,7 +580,6 @@ class PipelineHandler:
         target_function: Any,
         gate_config: str | None = None,
         expected_value: Any = True,
-        default_config_value: Any = True,
         output_variable_names: str | list[str] | tuple[str, ...] | None = None,
         save_to_disk_lst: list[str] | tuple[str, ...] | set[str] | None = None,
         param_mapping_dct: dict[str, str | None] | None = None,
@@ -650,9 +649,8 @@ class PipelineHandler:
                     )
                 if not temp_pipeline._suppress_strict_validation:
                     temp_pipeline.logger.warning(
-                        f"Gate config '{gate_config}' is not found in config, visible output values, or visible manual values; auto-creating config field with default value"
+                        f"Gate config '{gate_config}' is not found in config, visible output values, or visible manual values"
                     )
-                self.set_config(gate_config, default_config_value)
             temp_pipeline.set_gate_block(
                 gate_config,
                 expected_value=expected_value,
@@ -1272,6 +1270,19 @@ class PipelineHandler:
             else "",
         )
 
+    def list_visible_output(self) -> set[str]:
+        """Return a detached set of produced output names visible without side effects.
+
+        Own and descendant outputs plus upstream ancestor and earlier-sibling
+        outputs count by stored key, including ``None`` and deferred values,
+        without materialization.
+        """
+        return self._visible_output_names()
+
+    def has_visible_output(self, variable_name: str) -> bool:
+        """Report key-based produced-output visibility without materialization or side effects."""
+        return variable_name in self._visible_output_names()
+
     def get_node_output(self, node_name: str, output_name: str) -> Any:
         """Return one materialized output produced by an immediate block or atom."""
         node = self.nodes_by_name.get(node_name)
@@ -1425,6 +1436,20 @@ class PipelineHandler:
             if isinstance(value, (RuntimeValueReference, DataclassValueReference))
             else "",
         )
+
+    def list_visible_constant(self) -> set[str]:
+        """Return a detached set of constant names visible without side effects.
+
+        Own constants plus ancestor and earlier-sibling constants count by
+        stored key, including ``None`` and deferred values, without
+        materialization. Later siblings and descendant-owned constants are
+        excluded.
+        """
+        return self._visible_constant_names()
+
+    def has_visible_constant(self, variable_name: str) -> bool:
+        """Report key-based constant visibility without materialization or side effects."""
+        return variable_name in self._visible_constant_names()
 
     @staticmethod
     def _is_mutable_value(value: Any) -> bool:
@@ -1941,6 +1966,20 @@ class PipelineHandler:
 
     def get_config(self, config_name: str) -> Any:
         return self.get_config_value(config_name)
+
+    def list_visible_config(self) -> set[str]:
+        """Return a detached set of visible configuration field names.
+
+        Local plus ancestor config keys count by stored key, including ``None``
+        values, without materialization. Atom pipelines delegate to their
+        parent's visible config names. Sibling and descendant configs are
+        excluded.
+        """
+        return self._visible_config_names()
+
+    def has_visible_config(self, config_name: str) -> bool:
+        """Report key-based config visibility without materialization or side effects."""
+        return config_name in self._visible_config_names()
 
     def recover_config_from_backup(self, name: str) -> None:
         self._require_owned_config()
@@ -6144,6 +6183,27 @@ class PipelineHandler:
             return {}
         return self.parent_pipeline._visible_outputs_before_priority(self.execution_priority)
 
+    def _subtree_produced_output_names(self) -> set[str]:
+        """Collect own and descendant produced keys without inspecting values or side effects."""
+        output_names: set[str] = set()
+        for outputs in self.producer_outputs.values():
+            output_names.update(outputs)
+        for node in self._sorted_nodes():
+            if isinstance(node, PipelineHandler):
+                output_names.update(node._subtree_produced_output_names())
+        return output_names
+
+    def _visible_output_names(self) -> set[str]:
+        """Collect visible produced keys, excluding mirrored constants, without side effects.
+
+        Visibility includes own and descendant outputs plus upstream ancestor
+        and earlier-sibling outputs. Key presence counts ``None``, artifacts,
+        pointers, and placeholders without materialization.
+        """
+        output_names = self._subtree_produced_output_names()
+        output_names.update(self._incoming_parent_outputs())
+        return output_names - self._tree_constant_names()
+
     def _incoming_parent_manual_values(self) -> dict[str, Any]:
         if self.parent_pipeline is None or self.execution_priority is None:
             return {}
@@ -6160,6 +6220,10 @@ class PipelineHandler:
             if isinstance(node, PipelineHandler):
                 visible.update(node.manual_values)
         return visible
+
+    def _visible_constant_names(self) -> set[str]:
+        """Collect own, ancestor, and earlier-sibling constant keys without side effects."""
+        return set(self._incoming_parent_manual_values()) | set(self.manual_values)
 
     def _descendant_visible_value(self, variable_name: str) -> Any:
         for node in self._sorted_nodes():
@@ -6204,6 +6268,8 @@ class PipelineHandler:
         return values
 
     def _visible_config_names(self) -> set[str]:
+        if self._is_atom and self.parent_pipeline is not None:
+            return self.parent_pipeline._visible_config_names()
         return set(self.config_as_dict()).union(self._ancestor_config_values())
 
     def _registration_visible_names(self) -> set[str]:

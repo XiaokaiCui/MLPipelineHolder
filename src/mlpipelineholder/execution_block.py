@@ -747,15 +747,16 @@ class ExecutionBlock:
                     strict,
                 )
 
-        # Check 10: a param_mapping value is not found in config, visible
-        # output values, or visible manual values. Literal None mapping and
-        # 'logger' are always resolvable.
+        # Check 10: a param_mapping value is not found in config, visible or
+        # self-declared output values, or visible manual values. Literal None
+        # mapping and 'logger' are always resolvable.
         if visible_names is None:
             visible_names = self._registration_visible_names()
+        resolvable_names = visible_names | set(registration.output_names)
         for key, value in registration.param_mapping.items():
             if value is None or value == "logger":
                 continue
-            if value not in visible_names:
+            if value not in resolvable_names:
                 self._strict_violation(
                     f"param_mapping value '{value}' for parameter '{key}' of function "
                     f"'{registration.function_name}' is not found in config, visible output values, or visible manual values",

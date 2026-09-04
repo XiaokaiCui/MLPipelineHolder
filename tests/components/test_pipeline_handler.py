@@ -3648,7 +3648,6 @@ class PipelineHandlerTests(unittest.TestCase):
                 target_function=join_with_variadics,
                 gate_config="flag",
                 expected_value=True,
-                default_config_value=True,
                 output_variable_names=["joined"],
                 param_mapping_dct={"prefix": "prefix"},
                 kwargs_dct={"x": "part_b"},
@@ -3751,7 +3750,6 @@ class PipelineHandlerTests(unittest.TestCase):
                 10.0,
                 combine_optional_value,
                 None,
-                True,
                 True,
                 ["result"],
                 None,
@@ -4286,9 +4284,12 @@ class StrictModeTests(unittest.TestCase):
                     param_mapping={"output_df": "other", "target_col": "other2"},
                 )
 
-    def test_non_strict_mode_registration_check9_gate_config_not_found_autocreates(self) -> None:
+    def test_non_strict_mode_registration_check9_gate_config_not_found_warns_without_autocreate(self) -> None:
         with TemporaryDirectory() as temp_dir:
+            # Given: a non-strict pipeline registers an atom with a missing gate field.
             pipeline = PipelineHandler("loose", {}, Path(temp_dir))
+
+            # When: the atom is created.
             pipeline.create_atom_child_pipeline(
                 child_name="g",
                 execution_priority=10.0,
@@ -4298,8 +4299,12 @@ class StrictModeTests(unittest.TestCase):
                 output_variable_names="out",
                 param_mapping={"output_df": "other", "target_col": "other2"},
             )
+
+            # Then: registration warns but leaves the missing gate field absent.
             child = pipeline.get_child_pipeline("g")
-            self.assertIn("missing_gate_field", child.get_full_config())
+            log_text = (Path(temp_dir) / "metadata" / "pipeline.log").read_text(encoding="utf-8")
+            self.assertNotIn("missing_gate_field", child.get_full_config())
+            self.assertIn("Gate config 'missing_gate_field' is not found", log_text)
 
     def test_strict_mode_registration_check10_param_mapping_value_not_found_raises(self) -> None:
         with TemporaryDirectory() as temp_dir:

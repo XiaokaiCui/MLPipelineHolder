@@ -47,6 +47,10 @@ def recorder_step(model: int, recorder: list[int] | None = None) -> tuple[int, l
     return model + 1, next_recorder
 
 
+def advance_study(study: int | None) -> int:
+    return 1 if study is None else study + 1
+
+
 def duplicate_mapping_use(training_metric_divider: int, eval_metric_divider: int) -> tuple[int, int]:
     return training_metric_divider, eval_metric_divider
 
@@ -299,6 +303,34 @@ class ExecutionBlockTests(unittest.TestCase):
 
             self.assertEqual(pipeline.get_value("model"), 3)
             self.assertEqual(pipeline.get_value("recorder"), [1, 2])
+
+    def test_strict_atom_reuses_own_output_after_seed_override(self) -> None:
+        # Given: a strict atom maps one function input to its own declared output.
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "strict-stateful",
+                {},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            pipeline.create_atom_child_pipeline(
+                child_name="optimise",
+                execution_priority=1,
+                target_function=advance_study,
+                output_variable_names=["joint_study"],
+                param_mapping={"study": "joint_study"},
+            )
+            pipeline.run_block(
+                "optimise",
+                overrides={"joint_study": None},
+            )
+            self.assertEqual(pipeline.get_value("joint_study"), 1)
+
+            # When: the atom runs again without an override.
+            pipeline.run_block("optimise")
+
+            # Then: its previous output is reused as the next input.
+            self.assertEqual(pipeline.get_value("joint_study"), 2)
 
     def test_run_block_materializes_prior_disk_output_before_self_overwrite_invalidation(self) -> None:
         with TemporaryDirectory() as temp_dir:
