@@ -26,6 +26,7 @@ from textwrap import dedent
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
 from .artifact_store import ArtifactStore
 from .exceptions import (
@@ -64,6 +65,7 @@ from .object_storage import (
     validate_object_name,
     warn_for_pickle_fallback,
 )
+from .optuna_api import OptunaStudy, StudyArtifactOptions
 from .optuna_support import (
     OPTUNA_STUDIES_DB_NAME,
     is_optuna_sampler,
@@ -251,6 +253,12 @@ class PipelineHandler:
             self.para_value_dict: dict[str, Any] = {}
             self.artifact_registry: dict[str, ArtifactRecord] = {}
             self.producer_outputs: dict[str, dict[str, Any]] = {}
+            self._optuna_study_group_addresses: dict[str, set[OutputAddress]] = {}
+            self._optuna_study_group_names: dict[str, tuple[str, str]] = {}
+            self._optuna_study_provenance: WeakKeyDictionary[
+                OptunaStudy,
+                tuple[str, str],
+            ] = WeakKeyDictionary()
             self.run_history: list[RunRecord] = []
             self._stored_objects: dict[str, StoredObjectRecord] = {}
             self.artifact_store = ArtifactStore(self.project_root)
@@ -295,7 +303,27 @@ class PipelineHandler:
     ) -> str:
         """Keep an object outside pipeline execution state and return its hash ID."""
         self._require_root_storage_owner()
-        record = create_record(object_name, object_value, object_description)
+        self._reject_managed_study_reuse(object_value)
+        study_value = self._optuna_study_value(object_value)
+        stored_value = study_value if study_value is not None else object_value
+        record = create_record(object_name, stored_value, object_description)
+        if study_value is not None:
+            record.artifact = self.artifact_store.save(
+                variable_name=record.hash_id,
+                value=study_value,
+                block_name="storage",
+                function_name="object",
+                run_id=record.hash_id,
+                optuna_db_path=self.optuna_studies_db_path,
+                optuna_options=StudyArtifactOptions(
+                    independent_copy=True,
+                    owner_kind="storage",
+                    owner_key=record.hash_id,
+                ),
+            )
+            record.value = None
+            record.value_is_loaded = False
+            record.dirty = False
         self._stored_objects[record.hash_id] = record
         return record.hash_id
 
@@ -310,6 +338,56 @@ class PipelineHandler:
         """Replace a stored value and optionally persist it immediately."""
         self._require_root_storage_owner()
         record = resolve_record(self._stored_objects, hash_id=hash_id, object_name=None)
+        self._reject_managed_study_reuse(
+            object_value,
+            permitted_owner=("storage", record.hash_id),
+        )
+        study_value = self._optuna_study_value(object_value)
+        if study_value is not None:
+            if object_name is not None:
+                validate_object_name(object_name)
+            if object_description is not None:
+                validate_object_description(object_description)
+            previous_artifact = record.artifact
+            previous_name = None
+            original_name = None
+            if (
+                previous_artifact is not None
+                and previous_artifact.serializer == "optuna-study"
+            ):
+                persisted_name = previous_artifact.metadata.get("study_name")
+                lineage_name = previous_artifact.metadata.get("original_study_name")
+                if isinstance(persisted_name, str):
+                    previous_name = persisted_name
+                if isinstance(lineage_name, str):
+                    original_name = lineage_name
+            replacement = self.artifact_store.save(
+                variable_name=record.hash_id,
+                value=study_value,
+                block_name="storage",
+                function_name="object",
+                run_id=record.hash_id,
+                optuna_db_path=self.optuna_studies_db_path,
+                optuna_options=StudyArtifactOptions(
+                    independent_copy=previous_name is None,
+                    study_name=previous_name,
+                    original_study_name=original_name,
+                    owner_kind="storage",
+                    owner_key=record.hash_id,
+                ),
+            )
+            if object_name is not None:
+                record.object_name = object_name
+            if object_description is not None:
+                record.object_description = object_description
+            record.artifact = replacement
+            record.object_type = type(study_value).__name__
+            record.value = None
+            record.value_is_loaded = False
+            record.dirty = False
+            record.last_modified_at_utc = datetime.now(UTC)
+            self._cleanup_replaced_artifact(previous_artifact)
+            return
         if object_name is not None:
             validate_object_name(object_name)
             record.object_name = object_name
@@ -368,7 +446,7 @@ class PipelineHandler:
             raise PersistenceError(
                 f"Stored object '{record.object_name}' has no persisted artifact"
             )
-        record.value = self.artifact_store.load(record.artifact)
+        record.value = self._materialize_stored_value(record.artifact, "")
         record.value_is_loaded = True
         return record.value
 
@@ -903,6 +981,14 @@ class PipelineHandler:
         ):
             slots[address] = value
         self._prepare_pointer_removal(invalidated, slots)
+        root = self._root_pipeline()
+        for output_name, addresses in list(
+            root._optuna_study_group_addresses.items()
+        ):
+            addresses.difference_update(invalidated)
+            if not addresses:
+                root._optuna_study_group_addresses.pop(output_name, None)
+                root._optuna_study_group_names.pop(output_name, None)
         removed = self.producer_outputs.pop(node_name, {})
         self._refresh_pointer_visible_state()
         self._delete_artifacts_from_outputs(removed)
@@ -1418,7 +1504,16 @@ class PipelineHandler:
         if isinstance(value, CallableValueReference):
             return self._restore_callable_value(value)
         if isinstance(value, ArtifactRecord):
-            return self.artifact_store.load(value)
+            materialized = self.artifact_store.load(value)
+            if value.serializer == "optuna-study" and is_optuna_study(materialized):
+                owner_kind = value.metadata.get("study_owner_kind")
+                owner_key = value.metadata.get("study_owner_key")
+                if isinstance(owner_kind, str) and isinstance(owner_key, str):
+                    self._root_pipeline()._optuna_study_provenance[materialized] = (
+                        owner_kind,
+                        owner_key,
+                    )
+            return materialized
         if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(placeholder_error)
         return value
@@ -1595,7 +1690,41 @@ class PipelineHandler:
                 f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
             )
         previous_value = self.manual_values.get(variable_name)
-        if isinstance(
+        owner_key = f"{self.registration_name}.{variable_name}"
+        self._reject_managed_study_reuse(
+            value,
+            permitted_owner=("constant", owner_key),
+        )
+        study_value = self._optuna_study_value(value)
+        if study_value is not None:
+            previous_name = None
+            original_name = None
+            if (
+                isinstance(previous_value, ArtifactRecord)
+                and previous_value.serializer == "optuna-study"
+            ):
+                persisted_name = previous_value.metadata.get("study_name")
+                lineage_name = previous_value.metadata.get("original_study_name")
+                if isinstance(persisted_name, str):
+                    previous_name = persisted_name
+                if isinstance(lineage_name, str):
+                    original_name = lineage_name
+            replacement = self.artifact_store.save(
+                variable_name=variable_name,
+                value=study_value,
+                block_name=self.registration_name,
+                function_name="set_constant_value",
+                run_id=uuid4().hex,
+                optuna_db_path=self._optuna_studies_db_path_for_storage(),
+                optuna_options=StudyArtifactOptions(
+                    independent_copy=previous_name is None,
+                    study_name=previous_name,
+                    original_study_name=original_name,
+                    owner_kind="constant",
+                    owner_key=owner_key,
+                ),
+            )
+        elif isinstance(
             value,
             (ArtifactRecord, TorchStateArtifactRecord),
         ):
@@ -5303,6 +5432,84 @@ class PipelineHandler:
                     slots[address] = value
         return slots
 
+    @staticmethod
+    def _is_optuna_study_output(value: Any) -> bool:
+        return is_optuna_study(value) or (
+            isinstance(value, ArtifactRecord)
+            and value.serializer == "optuna-study"
+        )
+
+    def _managed_study_owner(self, value: Any) -> tuple[str, str] | None:
+        if isinstance(value, ArtifactRecord) and value.serializer == "optuna-study":
+            owner_kind = value.metadata.get("study_owner_kind")
+            owner_key = value.metadata.get("study_owner_key")
+            if isinstance(owner_kind, str) and isinstance(owner_key, str):
+                return owner_kind, owner_key
+            return None
+        if not is_optuna_study(value):
+            return None
+        return self._root_pipeline()._optuna_study_provenance.get(value)
+
+    def _reject_managed_study_reuse(
+        self,
+        value: Any,
+        permitted_owner: tuple[str, str] | None = None,
+    ) -> None:
+        study_owner = self._managed_study_owner(value)
+        if (
+            study_owner is None
+            or study_owner[0] == "output"
+            or study_owner == permitted_owner
+        ):
+            return
+        owner_kind, owner_key = study_owner
+        update_method = (
+            "set_constant_value" if owner_kind == "constant" else "update_storage"
+        )
+        raise RegistrationError(
+            f"Study is already managed by {owner_kind} '{owner_key}'; "
+            f"use {update_method} to replace that owner"
+        )
+
+    def _optuna_study_value(self, value: Any) -> OptunaStudy | None:
+        if isinstance(value, ArtifactRecord):
+            if value.serializer != "optuna-study":
+                return None
+            materialized = self._materialize_stored_value(value, "")
+            if not is_optuna_study(materialized):
+                raise PersistenceError("Optuna Study artifact did not load a Study")
+            return materialized
+        if is_optuna_study(value):
+            return value
+        return None
+
+    def _remember_optuna_study_groups(self) -> None:
+        root = self._root_pipeline()
+        slots = root._public_output_slots()
+        for address, value in slots.items():
+            terminal = value
+            if isinstance(value, OutputPointer):
+                try:
+                    _, terminal = resolve_pointer_chain(address, slots.__getitem__)
+                except PointerResolutionError:
+                    continue
+            if not (
+                isinstance(terminal, ArtifactRecord)
+                and terminal.serializer == "optuna-study"
+            ):
+                continue
+            root._optuna_study_group_addresses.setdefault(
+                address.output_name,
+                set(),
+            ).add(address)
+            study_name = terminal.metadata.get("study_name")
+            original_name = terminal.metadata.get("original_study_name", study_name)
+            if isinstance(study_name, str) and isinstance(original_name, str):
+                root._optuna_study_group_names[address.output_name] = (
+                    study_name,
+                    original_name,
+                )
+
     def _set_output_address(self, address: OutputAddress, value: Any) -> None:
         pipeline = self._pipeline_by_name(address.pipeline_name)
         outputs = pipeline.producer_outputs.setdefault(address.node_name, {})
@@ -5369,6 +5576,16 @@ class PipelineHandler:
                     destination_pipeline.qualified_node_name(destination.node_name),
                 )
             self._set_output_address(destination, promoted_value)
+            if (
+                isinstance(value, ArtifactRecord)
+                and value.serializer == "optuna-study"
+            ):
+                for survivor in survivors:
+                    if survivor != destination:
+                        self._set_output_address(
+                            survivor,
+                            OutputPointer(destination),
+                        )
 
     def _prepare_pointer_removal(
         self,
@@ -5407,7 +5624,21 @@ class PipelineHandler:
         produced_outputs: dict[str, Any],
         upstream_outputs: dict[str, Any] | None,
     ) -> None:
-        overrides = self._node_overridden_outputs(node)
+        current_address = {
+            output_name: OutputAddress(
+                self.registration_name,
+                node.registration_name,
+                output_name,
+            )
+            for output_name, value in produced_outputs.items()
+            if self._is_optuna_study_output(value)
+        }
+        node_overrides = self._node_overridden_outputs(node)
+        overrides = {
+            output_name: address
+            for output_name, address in node_overrides.items()
+            if output_name not in current_address
+        }
         targets: list[tuple[str, PipelineHandler, OutputAddress]] = []
         try:
             for output_name, address in overrides.items():
@@ -5430,9 +5661,61 @@ class PipelineHandler:
             self._delete_artifacts_from_outputs(produced_outputs)
             raise
 
+        prepared_outputs = dict(produced_outputs)
+        root = self._root_pipeline()
+        root._remember_optuna_study_groups()
+        try:
+            for output_name, address in current_address.items():
+                value = prepared_outputs[output_name]
+                group_name = root._optuna_study_group_names.get(output_name)
+                if is_optuna_study(value):
+                    prepared_outputs[output_name] = self.artifact_store.save(
+                        variable_name=output_name,
+                        value=value,
+                        block_name=self.qualified_node_name(node.registration_name),
+                        function_name="study_output",
+                        run_id=uuid4().hex,
+                        optuna_db_path=root.optuna_studies_db_path,
+                        optuna_options=StudyArtifactOptions(
+                            allocate_if_occupied=group_name is None,
+                            study_name=None if group_name is None else group_name[0],
+                            original_study_name=(
+                                None if group_name is None else group_name[1]
+                            ),
+                            owner_kind="output",
+                            owner_key=(
+                                f"{address.pipeline_name}.{address.node_name}."
+                                f"{address.output_name}"
+                            ),
+                        ),
+                    )
+                artifact = prepared_outputs[output_name]
+                if isinstance(artifact, ArtifactRecord):
+                    study_name = artifact.metadata.get("study_name")
+                    original_name = artifact.metadata.get(
+                        "original_study_name",
+                        study_name,
+                    )
+                    if isinstance(study_name, str) and isinstance(original_name, str):
+                        root._optuna_study_group_names[output_name] = (
+                            study_name,
+                            original_name,
+                        )
+                root._optuna_study_group_addresses.setdefault(
+                    output_name,
+                    set(),
+                ).add(address)
+        except BaseException:
+            self._delete_artifacts_from_outputs(prepared_outputs)
+            raise
+
         affected: dict[int, PipelineHandler] = {id(self): self}
         for _, pipeline, _ in targets:
             affected[id(pipeline)] = pipeline
+        for output_name in current_address:
+            for address in root._optuna_study_group_addresses.get(output_name, set()):
+                pipeline = root._pipeline_by_name(address.pipeline_name)
+                affected[id(pipeline)] = pipeline
         snapshots = {
             identity: {
                 name: dict(outputs)
@@ -5444,7 +5727,7 @@ class PipelineHandler:
             self.producer_outputs.get(node.registration_name, {}).values()
         )
         try:
-            self.producer_outputs[node.registration_name] = dict(produced_outputs)
+            self.producer_outputs[node.registration_name] = dict(prepared_outputs)
             for output_name, target_pipeline, address in targets:
                 target_outputs = target_pipeline.producer_outputs.setdefault(
                     address.node_name,
@@ -5459,6 +5742,18 @@ class PipelineHandler:
                         output_name,
                     )
                 )
+            for output_name, terminal_address in current_address.items():
+                for address in root._optuna_study_group_addresses[output_name]:
+                    if address == terminal_address:
+                        continue
+                    target_pipeline = root._pipeline_by_name(address.pipeline_name)
+                    target_outputs = target_pipeline.producer_outputs.setdefault(
+                        address.node_name,
+                        {},
+                    )
+                    if output_name in target_outputs:
+                        replaced.append(target_outputs[output_name])
+                    target_outputs[output_name] = OutputPointer(terminal_address)
             for _, target_pipeline, _ in targets:
                 target_pipeline._rebuild_visible_state(
                     target_pipeline._incoming_parent_outputs()
@@ -5474,10 +5769,25 @@ class PipelineHandler:
                     for name, outputs in snapshots[identity].items()
                 }
             self._refresh_pointer_visible_state()
-            self._delete_artifacts_from_outputs(produced_outputs)
+            self._delete_artifacts_from_outputs(prepared_outputs)
             raise
         for previous in replaced:
             self._cleanup_replaced_artifact(previous)
+        for output_name, terminal_address in current_address.items():
+            artifact = prepared_outputs[output_name]
+            if not isinstance(artifact, ArtifactRecord):
+                continue
+            study_name = artifact.metadata.get("study_name")
+            redirected_count = len(
+                root._optuna_study_group_addresses[output_name] - {terminal_address}
+            )
+            self.logger.info(
+                f"Optuna Study output group rewired: output={output_name!r}, "
+                f"study={study_name!r}, terminal={terminal_address!r}, "
+                f"redirected={redirected_count}, "
+                f"invalidation_forbidden={root._invalidation_forbidden}, "
+                f"override_ignored={output_name in node_overrides}"
+            )
 
     def _confirm_gate_cleanup(self, mode: str) -> bool:
         gate_label = (
@@ -6688,6 +6998,7 @@ class PipelineHandler:
     ) -> None:
         if priority is None or self._invalidation_forbidden:
             return
+        self._root_pipeline()._remember_optuna_study_groups()
         selected_nodes = [
             node
             for node in self._sorted_nodes()

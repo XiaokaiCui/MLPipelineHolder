@@ -2,149 +2,32 @@ from __future__ import annotations
 
 import os
 import pickle
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from types import ModuleType
-from typing import Final, Protocol, TypeAlias, TypeGuard, cast, final
+from typing import Final, TypeGuard, cast
 
 from .exceptions import PersistenceError
+from .optuna_api import (
+    OptunaApi,
+    OptunaRuntimeValue,
+    OptunaSampler,
+    OptunaStudy,
+    PersistedOptunaStudy,
+    StudyArtifactOptions,
+)
 
 OPTUNA_STUDY_SERIALIZER: Final = "optuna-study"
 OPTUNA_STUDIES_DB_NAME: Final = "optuna_studies.db"
-
-
-_JsonScalar: TypeAlias = str | int | float | bool | None
-_JsonValue: TypeAlias = _JsonScalar | list["_JsonValue"] | dict[str, "_JsonValue"]
-
-
-class _Sampler(Protocol):
-    pass
-
-
-class _Direction(Protocol):
-    pass
-
-
-class _FrozenTrial(Protocol):
-    pass
-
-
-class _RuntimeValue(Protocol):
-    pass
-
-
-class _Study(Protocol):
-    study_name: str
-    sampler: _Sampler
-    directions: Sequence[_Direction]
-    user_attrs: Mapping[str, _JsonValue]
-
-    def get_trials(self, *, deepcopy: bool) -> Sequence[_FrozenTrial]: ...
-
-
-class _PersistedStudy(_Study, Protocol):
-    def add_trials(self, trials: Sequence[_FrozenTrial]) -> None: ...
-
-    def set_user_attr(self, key: str, value: _JsonValue) -> None: ...
-
-
-class _StudyNamespace(Protocol):
-    Study: type[_Study]
-
-
-class _SamplerNamespace(Protocol):
-    BaseSampler: type[_Sampler]
-
-
-class _GetAllStudyNames(Protocol):
-    def __call__(self, *, storage: str) -> list[str]: ...
-
-
-class _DeleteStudy(Protocol):
-    def __call__(self, *, study_name: str, storage: str) -> None: ...
-
-
-class _CreateStudy(Protocol):
-    def __call__(
-        self,
-        *,
-        study_name: str,
-        storage: str,
-        directions: Sequence[_Direction],
-    ) -> _PersistedStudy: ...
-
-
-class _LoadStudy(Protocol):
-    def __call__(
-        self,
-        *,
-        study_name: str,
-        storage: str,
-        sampler: _Sampler,
-    ) -> _Study: ...
-
-
-@final
-class _OptunaApi:
-    def __init__(self, module: ModuleType) -> None:
-        self._module = module
-
-    @property
-    def study(self) -> _StudyNamespace:
-        return cast(_StudyNamespace, getattr(self._module, "study"))
-
-    @property
-    def samplers(self) -> _SamplerNamespace:
-        return cast(_SamplerNamespace, getattr(self._module, "samplers"))
-
-    def get_all_study_names(self, *, storage: str) -> list[str]:
-        function = cast(
-            _GetAllStudyNames,
-            getattr(self._module, "get_all_study_names"),
-        )
-        return function(storage=storage)
-
-    def delete_study(self, *, study_name: str, storage: str) -> None:
-        function = cast(_DeleteStudy, getattr(self._module, "delete_study"))
-        function(study_name=study_name, storage=storage)
-
-    def create_study(
-        self,
-        *,
-        study_name: str,
-        storage: str,
-        directions: Sequence[_Direction],
-    ) -> _PersistedStudy:
-        function = cast(_CreateStudy, getattr(self._module, "create_study"))
-        return function(
-            study_name=study_name,
-            storage=storage,
-            directions=directions,
-        )
-
-    def load_study(
-        self,
-        *,
-        study_name: str,
-        storage: str,
-        sampler: _Sampler,
-    ) -> _Study:
-        function = cast(_LoadStudy, getattr(self._module, "load_study"))
-        return function(
-            study_name=study_name,
-            storage=storage,
-            sampler=sampler,
-        )
 
 
 class StudyAlreadyExistsError(ValueError):
     pass
 
 
-def _load_optuna() -> _OptunaApi:
+def _load_optuna() -> OptunaApi:
     try:
-        return _OptunaApi(import_module("optuna"))
+        return OptunaApi(import_module("optuna"))
     except ModuleNotFoundError as exc:
         if exc.name != "optuna":
             raise
@@ -153,9 +36,9 @@ def _load_optuna() -> _OptunaApi:
         ) from exc
 
 
-def is_optuna_study(value: _RuntimeValue) -> TypeGuard[_Study]:
+def is_optuna_study(value: OptunaRuntimeValue) -> TypeGuard[OptunaStudy]:
     try:
-        optuna = _OptunaApi(import_module("optuna"))
+        optuna = OptunaApi(import_module("optuna"))
     except ModuleNotFoundError as exc:
         if exc.name != "optuna":
             raise
@@ -163,9 +46,9 @@ def is_optuna_study(value: _RuntimeValue) -> TypeGuard[_Study]:
     return isinstance(value, optuna.study.Study)
 
 
-def is_optuna_sampler(value: _RuntimeValue) -> TypeGuard[_Sampler]:
+def is_optuna_sampler(value: OptunaRuntimeValue) -> TypeGuard[OptunaSampler]:
     try:
-        optuna = _OptunaApi(import_module("optuna"))
+        optuna = OptunaApi(import_module("optuna"))
     except ModuleNotFoundError as exc:
         if exc.name != "optuna":
             raise
@@ -180,11 +63,11 @@ def _get_sqlite_storage_url(db_path: str | Path) -> str:
 
 
 def save_study_to_db(
-    study: _Study,
+    study: OptunaStudy,
     db_path: str | Path,
     study_name: str | None = None,
     overwrite: bool = True,
-) -> _PersistedStudy:
+) -> PersistedOptunaStudy:
     optuna = _load_optuna()
     storage = _get_sqlite_storage_url(db_path)
     persisted_name = study.study_name if study_name is None else study_name
@@ -192,29 +75,80 @@ def save_study_to_db(
     trials = tuple(study.get_trials(deepcopy=True))
     user_attrs = dict(study.user_attrs)
     existing_studies = optuna.get_all_study_names(storage=storage)
+    previous_state = None
     if persisted_name in existing_studies:
         if not overwrite:
             raise StudyAlreadyExistsError(
                 f"Study '{persisted_name}' already exists in:\n{Path(db_path).expanduser().resolve()}"
             )
+        previous_study = optuna.load_study(
+            study_name=persisted_name,
+            storage=storage,
+            sampler=study.sampler,
+        )
+        previous_state = (
+            tuple(previous_study.directions),
+            tuple(previous_study.get_trials(deepcopy=True)),
+            dict(previous_study.user_attrs),
+        )
         optuna.delete_study(study_name=persisted_name, storage=storage)
-    saved_study = optuna.create_study(
-        study_name=persisted_name,
-        storage=storage,
-        directions=directions,
-    )
-    saved_study.add_trials(trials)
-    for key, value in user_attrs.items():
-        saved_study.set_user_attr(key, value)
+    created = False
+    try:
+        saved_study = optuna.create_study(
+            study_name=persisted_name,
+            storage=storage,
+            directions=directions,
+        )
+        created = True
+        saved_study.add_trials(trials)
+        for key, value in user_attrs.items():
+            saved_study.set_user_attr(key, value)
+    except BaseException:
+        if created:
+            optuna.delete_study(study_name=persisted_name, storage=storage)
+        if previous_state is not None:
+            previous_directions, previous_trials, previous_user_attrs = previous_state
+            restored_study = optuna.create_study(
+                study_name=persisted_name,
+                storage=storage,
+                directions=previous_directions,
+            )
+            restored_study.add_trials(previous_trials)
+            for key, value in previous_user_attrs.items():
+                restored_study.set_user_attr(key, value)
+        raise
     return saved_study
 
 
+def copy_study_to_db(
+    study: OptunaStudy,
+    db_path: str | Path,
+) -> PersistedOptunaStudy:
+    optuna = _load_optuna()
+    duplicate_error = optuna.duplicated_study_error
+    suffix = 1
+    while True:
+        persisted_name = f"{study.study_name}_{suffix}"
+        try:
+            return save_study_to_db(
+                study,
+                db_path,
+                persisted_name,
+                overwrite=False,
+            )
+        except (StudyAlreadyExistsError, duplicate_error):
+            suffix += 1
+
+
 def save_study_artifact(
-    study: _Study,
+    study: OptunaStudy,
     sampler_path: Path,
     db_path: str | Path,
+    *,
+    options: StudyArtifactOptions | None = None,
 ) -> dict[str, str]:
     optuna = _load_optuna()
+    options = StudyArtifactOptions() if options is None else options
     if not isinstance(study, optuna.study.Study):
         raise PersistenceError("Optuna study persistence received a non-Study value")
     if not isinstance(study.sampler, optuna.samplers.BaseSampler):
@@ -226,26 +160,49 @@ def save_study_artifact(
             pickle.dump(study.sampler, handle)
             handle.flush()
             os.fsync(handle.fileno())
-        _ = save_study_to_db(
-            study,
-            db_path,
-            study.study_name,
-            overwrite=True,
-        )
+        if options.independent_copy:
+            saved_study = copy_study_to_db(study, db_path)
+        elif options.allocate_if_occupied:
+            try:
+                saved_study = save_study_to_db(
+                    study,
+                    db_path,
+                    study.study_name,
+                    overwrite=False,
+                )
+            except (StudyAlreadyExistsError, optuna.duplicated_study_error):
+                saved_study = copy_study_to_db(study, db_path)
+        else:
+            saved_study = save_study_to_db(
+                study,
+                db_path,
+                study.study_name if options.study_name is None else options.study_name,
+                overwrite=True,
+            )
         os.replace(temporary_path, sampler_path)
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
-    return {
-        "study_name": study.study_name,
+    metadata = {
+        "study_name": saved_study.study_name,
+        "original_study_name": (
+            study.study_name
+            if options.original_study_name is None
+            else options.original_study_name
+        ),
         "db_path": str(Path(db_path).expanduser().resolve()),
     }
+    if options.owner_kind is not None:
+        metadata["study_owner_kind"] = options.owner_kind
+    if options.owner_key is not None:
+        metadata["study_owner_key"] = options.owner_key
+    return metadata
 
 
 def load_study_artifact(
     sampler_path: Path,
     metadata: Mapping[str, str],
-) -> _Study:
+) -> OptunaStudy:
     optuna = _load_optuna()
     study_name = metadata.get("study_name")
     db_path = metadata.get("db_path")
@@ -258,7 +215,7 @@ def load_study_artifact(
         )
     try:
         with sampler_path.open("rb") as handle:
-            sampler = cast(_Sampler, pickle.load(handle))
+            sampler = cast(OptunaSampler, pickle.load(handle))
     except (AttributeError, EOFError, ImportError, OSError, pickle.UnpicklingError) as exc:
         raise PersistenceError(
             f"Failed to load Optuna sampler artifact: {sampler_path}"

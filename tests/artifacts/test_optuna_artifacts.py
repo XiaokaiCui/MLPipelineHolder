@@ -119,7 +119,7 @@ class OptunaArtifactTests(unittest.TestCase):
             self.assertEqual(restored.user_attrs, {"owner": "pipeline"})
             self.assertIsInstance(restored.sampler, optuna.samplers.RandomSampler)
 
-    def test_saving_pipeline_persists_live_study_and_sampler_as_artifacts(self) -> None:
+    def test_study_output_is_eagerly_persisted_while_sampler_waits_for_save(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "project"
             pipeline = PipelineHandler("live", {}, root)
@@ -129,7 +129,14 @@ class OptunaArtifactTests(unittest.TestCase):
             block.register_function(build_study, ["study"])
             block.register_function(build_sampler, ["sampler"])
             pipeline.run_all()
-            self.assertFalse(pipeline.optuna_studies_db_path.exists())
+            self.assertTrue(pipeline.optuna_studies_db_path.exists())
+            study_output = pipeline.para_value_dict["study"]
+            self.assertIsInstance(study_output, ArtifactRecord)
+            self.assertEqual(study_output.serializer, "optuna-study")
+            self.assertIsInstance(
+                pipeline.para_value_dict["sampler"],
+                optuna.samplers.TPESampler,
+            )
 
             pipeline.save_pipeline()
             loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
