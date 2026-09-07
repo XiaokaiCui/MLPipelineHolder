@@ -16,6 +16,7 @@ from .optuna_api import (
     PersistedOptunaStudy,
     StudyArtifactOptions,
 )
+from .optuna_sqlite import populate_study_from_sqlite
 
 OPTUNA_STUDY_SERIALIZER: Final = "optuna-study"
 OPTUNA_STUDIES_DB_NAME: Final = "optuna_studies.db"
@@ -129,15 +130,43 @@ def copy_study_to_db(
     suffix = 1
     while True:
         persisted_name = f"{study.study_name}_{suffix}"
+        created = False
         try:
+            optuna.create_study(
+                study_name=persisted_name,
+                storage=_get_sqlite_storage_url(db_path),
+                directions=study.directions,
+            )
+            created = True
+            if populate_study_from_sqlite(study, db_path, persisted_name):
+                return optuna.load_study(
+                    study_name=persisted_name,
+                    storage=_get_sqlite_storage_url(db_path),
+                    sampler=study.sampler,
+                )
+            optuna.delete_study(
+                study_name=persisted_name,
+                storage=_get_sqlite_storage_url(db_path),
+            )
+            created = False
             return save_study_to_db(
                 study,
                 db_path,
                 persisted_name,
                 overwrite=False,
             )
-        except (StudyAlreadyExistsError, duplicate_error):
+        except (
+            StudyAlreadyExistsError,
+            duplicate_error,
+        ):
             suffix += 1
+        except BaseException:
+            if created:
+                optuna.delete_study(
+                    study_name=persisted_name,
+                    storage=_get_sqlite_storage_url(db_path),
+                )
+            raise
 
 
 def save_study_artifact(

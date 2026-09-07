@@ -78,7 +78,7 @@ class _LoadStudy(Protocol):
         study_name: str,
         storage: str,
         sampler: OptunaSampler,
-    ) -> OptunaStudy: ...
+    ) -> PersistedOptunaStudy: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +140,7 @@ class OptunaApi:
         study_name: str,
         storage: str,
         sampler: OptunaSampler,
-    ) -> OptunaStudy:
+    ) -> PersistedOptunaStudy:
         function = cast(_LoadStudy, getattr(self._module, "load_study"))
         return function(
             study_name=study_name,

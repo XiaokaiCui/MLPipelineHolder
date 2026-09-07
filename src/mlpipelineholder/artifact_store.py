@@ -109,16 +109,28 @@ class ArtifactStore:
         )
 
     def load(self, artifact: ArtifactRecord) -> Any:
-        if artifact.serializer == OPTUNA_STUDY_SERIALIZER:
-            return load_study_artifact(
+        try:
+            if artifact.serializer == OPTUNA_STUDY_SERIALIZER:
+                return load_study_artifact(
+                    Path(artifact.file_path),
+                    getattr(artifact, "metadata", {}),
+                )
+            return load_value(
+                artifact.serializer,
                 Path(artifact.file_path),
-                getattr(artifact, "metadata", {}),
+                torch_weights_only=getattr(
+                    artifact,
+                    "torch_load_weights_only",
+                    False,
+                ),
             )
-        return load_value(
-            artifact.serializer,
-            Path(artifact.file_path),
-            torch_weights_only=getattr(artifact, "torch_load_weights_only", False),
-        )
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                f"Failed to load persisted value '{artifact.variable_name}' from "
+                f"'{artifact.file_path}': {type(exc).__name__}: {exc}"
+            ) from exc
 
     def _assert_managed_artifact_path(self, path: Path) -> Path:
         resolved = path.resolve()

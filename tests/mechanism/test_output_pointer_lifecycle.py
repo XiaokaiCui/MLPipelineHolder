@@ -238,7 +238,7 @@ class OutputPointerPersistenceTests(unittest.TestCase):
                 OutputPointer,
             )
 
-    def test_runtime_cycle_is_rejected_during_load(self) -> None:
+    def test_runtime_cycle_is_rejected_before_save(self) -> None:
         # Given
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -254,11 +254,11 @@ class OutputPointerPersistenceTests(unittest.TestCase):
                 "second": {"value": OutputPointer(first_address)},
             }
             pipeline._rebuild_visible_state()
-            pipeline.save_pipeline(root / "saved")
 
             # When / Then
             with self.assertRaisesRegex(PersistenceError, "pointer"):
-                PipelineHandler.load_pipeline(root / "saved", forced_deleting=True)
+                pipeline.save_pipeline(root / "saved")
+            self.assertFalse((root / "saved").exists())
 
 
 class OutputPointerArtifactTests(unittest.TestCase):
