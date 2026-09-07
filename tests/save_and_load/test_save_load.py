@@ -425,7 +425,7 @@ class SaveLoadTests(unittest.TestCase):
             if hasattr(__main__, "LegacyMainConfig"):
                 delattr(__main__, "LegacyMainConfig")
 
-    def test_load_project_rejects_missing_main_class_outside_config(self) -> None:
+    def test_load_project_replaces_missing_main_runtime_value_with_none(self) -> None:
         LegacyMainConfig.__module__ = "__main__"
         LegacyMainRuntimeHelper.__module__ = "__main__"
         setattr(__main__, "LegacyMainConfig", LegacyMainConfig)
@@ -455,8 +455,13 @@ class SaveLoadTests(unittest.TestCase):
                 delattr(__main__, "LegacyMainConfig")
                 delattr(__main__, "LegacyMainRuntimeHelper")
 
-                with self.assertRaises(PersistenceError):
-                    PipelineHandler.load_project(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_project(
+                    save_dir,
+                    forced_deleting=True,
+                )
+
+                self.assertEqual(loaded.get_config_value("value"), 2)
+                self.assertIsNone(loaded.get_constant_value("runtime_helper"))
                 return
         finally:
             if hasattr(__main__, "LegacyMainConfig"):

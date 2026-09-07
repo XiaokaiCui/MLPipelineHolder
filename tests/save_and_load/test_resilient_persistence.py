@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import pickle
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import optuna
+
+from mlpipelineholder import PersistenceError, PipelineHandler
+from mlpipelineholder.models import ArtifactRecord
+from mlpipelineholder.output_pointers import OutputAddress, OutputPointer
+
+
+def produce_study() -> optuna.study.Study:
+    study = optuna.create_study(study_name="legacy-nested", direction="minimize")
+    study.add_trial(optuna.trial.create_trial(value=3.0))
+    return study
+
+
+def produce_artifacts() -> tuple[dict[str, int], dict[str, int]]:
+    return {"bad": 1}, {"good": 2}
+
+
+def produce_number() -> int:
+    return 1
+
+
+class ResilientPersistenceTests(unittest.TestCase):
+    def test_nested_legacy_study_pointer_graph_is_normalized_during_load(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = PipelineHandler("root", {}, base / "project")
+            child = PipelineHandler("child", {"gate_on": True}, base / "child")
+            child.set_gate_block("gate_on")
+            grandchild = PipelineHandler("grandchild", {}, base / "grandchild")
+            producer = grandchild.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(produce_study, ["study"])
+            child.add_child_pipeline(grandchild, 1)
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+
+            state_path = root.project_root / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            child_payload = payload["nodes"][0]["payload"]
+            grandchild_payload = child_payload["nodes"][0]["payload"]
+            artifact = payload["producer_outputs"]["child"]["study"]
+            if not isinstance(artifact, ArtifactRecord):
+                raise AssertionError("root mirror should hold the Study artifact")
+            artifact.metadata.pop("study_owner_kind", None)
+            artifact.metadata.pop("study_owner_key", None)
+            child_payload["producer_outputs"]["grandchild"]["study"] = OutputPointer(
+                OutputAddress("root", "child", "study")
+            )
+            grandchild_payload["producer_outputs"]["producer"]["study"] = OutputPointer(
+                OutputAddress("child", "grandchild", "study")
+            )
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded_grandchild = (
+                loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
+            )
+            restored = loaded_grandchild.get_node_output("producer", "study")
+            restored_record = loaded_grandchild.producer_outputs["producer"]["study"]
+
+            self.assertEqual([trial.value for trial in restored.trials], [3.0])
+            self.assertIsInstance(restored_record, ArtifactRecord)
+            self.assertEqual(
+                restored_record.metadata["study_owner_key"],
+                "grandchild.producer.study",
+            )
+            loaded._validate_runtime_output_pointers()
+
+    def test_invalid_pointer_graph_is_rejected_before_save_creates_target(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            pipeline = PipelineHandler("root", {}, base / "project")
+            producer = pipeline.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(produce_number, ["value"])
+            pipeline.run_all()
+            pipeline.producer_outputs["producer"]["value"] = OutputPointer(
+                OutputAddress("root", "missing", "value")
+            )
+            target = base / "invalid-save"
+
+            with self.assertRaisesRegex(
+                PersistenceError,
+                "Saved output pointer graph is invalid",
+            ):
+                pipeline.save_pipeline(target)
+
+            self.assertFalse(target.exists())
+
+    def test_invalid_persisted_values_load_as_none_without_losing_valid_values(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir) / "project"
+            pipeline = PipelineHandler("root", {}, project_root)
+            producer = pipeline.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(
+                produce_artifacts,
+                ["bad_output", "good_output"],
+                save_to_disk=["bad_output", "good_output"],
+            )
+            pipeline.run_all()
+            pipeline.set_constant_value("bad_constant", {"bad": 3}, to_disk=True)
+            pipeline.set_constant_value("good_constant", {"good": 4}, to_disk=True)
+            bad_storage_hash = pipeline.save_to_storage("bad_storage", {"bad": 5})
+            good_storage_hash = pipeline.save_to_storage("good_storage", {"good": 6})
+            pipeline.save_pipeline()
+
+            bad_output = pipeline.producer_outputs["producer"]["bad_output"]
+            bad_constant = pipeline.manual_values["bad_constant"]
+            bad_storage = pipeline._stored_objects[bad_storage_hash].artifact
+            for artifact in (bad_output, bad_constant, bad_storage):
+                if not isinstance(artifact, ArtifactRecord):
+                    raise AssertionError("test value should be disk-backed")
+                Path(artifact.file_path).unlink()
+
+            loaded = PipelineHandler.load_pipeline(project_root)
+
+            self.assertIsNone(loaded.get_value("bad_output"))
+            self.assertEqual(loaded.get_value("good_output"), {"good": 2})
+            self.assertIsNone(loaded.get_constant_value("bad_constant"))
+            self.assertEqual(
+                loaded.get_constant_value("good_constant"),
+                {"good": 4},
+            )
+            self.assertIsNone(loaded.get_from_storage(hash_id=bad_storage_hash))
+            self.assertEqual(
+                loaded.get_from_storage(hash_id=good_storage_hash),
+                {"good": 6},
+            )
+
+
+if __name__ == "__main__":
+    _ = unittest.main()

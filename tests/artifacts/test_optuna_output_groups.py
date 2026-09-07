@@ -88,6 +88,28 @@ class OptunaOutputGroupTests(unittest.TestCase):
                 self.assertEqual(restored.study_name, "shared-study")
                 self.assertEqual(restored.user_attrs, {"owner": "third"})
 
+    def test_attached_child_study_remains_owned_by_child_producer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            # Given a child pipeline whose block produces a Study
+            base = Path(temp_dir)
+            parent = PipelineHandler("parent", {}, base / "parent")
+            child = PipelineHandler("child", {}, base / "child")
+            producer = child.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(first_study, ["study"])
+            parent.add_child_pipeline(child, 1)
+
+            # When the parent pipeline runs the attached child
+            parent.run_all()
+
+            # Then the child producer remains the concrete artifact owner
+            child_value = child.producer_outputs["producer"]["study"]
+            parent_mirror = parent.producer_outputs["child"]["study"]
+            self.assertIsInstance(child_value, ArtifactRecord)
+            self.assertEqual(parent_mirror, child_value)
+            self.assertTrue(Path(child_value.file_path).is_file())
+
     def test_normal_rerun_restores_invalidated_study_peers(self) -> None:
         with TemporaryDirectory() as temp_dir:
             # Given a complete three-node Study group

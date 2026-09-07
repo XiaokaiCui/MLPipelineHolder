@@ -2239,7 +2239,8 @@ class PipelineHandlerTests(unittest.TestCase):
             backup = tmp_path / "backup"
             shutil.copytree(source, backup)
 
-            loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True)
+            with patch("builtins.input", side_effect=["yes", ""]):
+                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True)
             self.assertEqual(loaded.get_constant_value("blob_constant"), "value=3")
             self.assertEqual(loaded.get_value("saved_blob"), "value=3")
 
@@ -3347,12 +3348,79 @@ class PipelineHandlerTests(unittest.TestCase):
             copied = tmp_path / "copied"
             shutil.copytree(source, copied)
 
-            loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
+            with patch("builtins.input", side_effect=["no", "yes"]) as mocked_input:
+                loaded = PipelineHandler.load_pipeline(copied)
             artifact = loaded.para_value_dict["saved_blob"]
 
+            self.assertEqual(mocked_input.call_count, 2)
             self.assertIsInstance(artifact, ArtifactRecord)
             self.assertTrue(str(artifact.file_path).startswith(str(source)))
+            self.assertEqual(loaded.pipeline_backup_root, copied)
             self.assertEqual(loaded.get_value("saved_blob"), "value=3")
+
+    def test_load_pipeline_from_copied_tree_can_adopt_new_project_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            # Given a copied pipeline tree with an attached child artifact
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "source"
+            parent = PipelineHandler("source", DemoConfig(base=2), source)
+            child = PipelineHandler("child", DemoConfig(base=2), tmp_path / "child")
+            block = child.add_block("disk_write", 1)
+            if block is None:
+                raise AssertionError("add_block should return a block")
+            block.register_function(
+                produce_seed,
+                ["saved_blob"],
+                save_to_disk=["saved_blob"],
+            )
+            parent.add_child_pipeline(child, 1)
+            parent.run_all()
+            parent.save_pipeline()
+            copied = tmp_path / "copied"
+            shutil.copytree(source, copied)
+            new_backup = tmp_path / "new_backup"
+
+            # When the user adopts the loading path and supplies a backup path
+            with patch(
+                "builtins.input",
+                side_effect=["yes", str(new_backup)],
+            ) as mocked_input:
+                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
+
+            # Then the root and descendant paths move to the copy
+            loaded_child = loaded.get_child_pipeline("child")
+            artifact = loaded_child.para_value_dict["saved_blob"]
+            self.assertEqual(mocked_input.call_count, 2)
+            self.assertEqual(loaded.project_root, copied)
+            self.assertEqual(loaded.pipeline_backup_root, new_backup)
+            self.assertEqual(loaded_child.project_root, copied / "children" / "child")
+            self.assertIsInstance(artifact, ArtifactRecord)
+            self.assertTrue(str(artifact.file_path).startswith(str(loaded_child.project_root)))
+            self.assertEqual(loaded.get_value("saved_blob"), 3)
+
+    def test_load_pipeline_from_copied_tree_can_clear_backup_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            # Given a manually copied pipeline tree
+            tmp_path = Path(temp_dir)
+            source = tmp_path / "source"
+            pipeline = PipelineHandler("source", DemoConfig(base=2), source)
+            setup = pipeline.add_block("setup", 1)
+            if setup is None:
+                raise AssertionError("add_block should return a block")
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+            copied = tmp_path / "copied"
+            shutil.copytree(source, copied)
+
+            # When the user adopts the copy and leaves the backup response empty
+            with patch("builtins.input", side_effect=["yes", ""]):
+                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
+
+            # Then the loading path is the root and backup is disabled
+            self.assertEqual(loaded.project_root, copied)
+            self.assertIsNone(loaded.pipeline_backup_root)
+            self.assertEqual(loaded.get_value("seed"), 3)
 
     def test_load_pipeline_from_backup_restores_into_work_root_after_confirmation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3504,6 +3572,35 @@ class PipelineHandlerTests(unittest.TestCase):
             log_text = pipeline.logger.log_file_path.read_text(encoding="utf-8")
             self.assertIn(f"Pipeline has been saved to project root: {work}", log_text)
             self.assertIn(f"Pipeline has been saved to project backup path: {backup}", log_text)
+
+    def test_explicit_save_destination_loads_as_known_backup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            # Given a pipeline explicitly saved outside its project root
+            tmp_path = Path(temp_dir)
+            work = tmp_path / "work"
+            saved_copy = tmp_path / "saved-copy"
+            pipeline = PipelineHandler("source", DemoConfig(base=2), work)
+            setup = pipeline.add_block("setup", 1)
+            if setup is None:
+                raise AssertionError("add_block should return a block")
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            pipeline.save_pipeline(saved_copy)
+
+            # When that explicit save destination is loaded
+            with patch(
+                "builtins.input",
+                side_effect=AssertionError("manual-copy prompt should not be called"),
+            ):
+                loaded = PipelineHandler.load_pipeline(
+                    saved_copy,
+                    forced_deleting=True,
+                )
+
+            # Then it behaves as the recorded backup for the original project root
+            self.assertEqual(loaded.project_root, work)
+            self.assertEqual(loaded.pipeline_backup_root, saved_copy)
+            self.assertEqual(loaded.get_value("seed"), 3)
 
     def test_attached_sibling_child_can_read_parent_visible_value_via_get_value(self) -> None:
         with TemporaryDirectory() as temp_dir:

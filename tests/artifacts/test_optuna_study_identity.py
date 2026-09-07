@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import optuna
 
-from mlpipelineholder import PipelineHandler, RegistrationError
+from mlpipelineholder import PipelineHandler
 from mlpipelineholder.models import ArtifactRecord
 
 
@@ -220,17 +220,29 @@ class OptunaStudyIdentityTests(unittest.TestCase):
             self.assertEqual(restored.study_name, "abc_study_1")
             self.assertEqual(len(restored.trials), 1)
 
-    def test_constant_owned_study_handle_cannot_create_storage_owner(self) -> None:
+    def test_constant_owned_study_can_create_storage_owner(self) -> None:
         with TemporaryDirectory() as temp_dir:
             # Given a Study handle materialized from a managed constant
             pipeline = PipelineHandler("root", {}, Path(temp_dir) / "project")
             pipeline.set_constant_value("search", build_named_study("abc_study"))
             managed = pipeline.get_constant_value("search")
 
-            # When it is reused to create a different managed owner
-            # Then the caller is directed to update the existing owner instead
-            with self.assertRaisesRegex(RegistrationError, "constant.*set_constant_value"):
-                pipeline.save_to_storage("duplicate", managed)
+            # When it is copied into object storage
+            hash_id = pipeline.save_to_storage("archive", managed)
+
+            # Then storage owns an independent suffixed copy and the constant is intact
+            restored = pipeline.get_from_storage(hash_id=hash_id)
+            self.assertIsInstance(restored, optuna.study.Study)
+            self.assertEqual(restored.study_name, "abc_study_1_1")
+            self.assertEqual(restored.user_attrs, managed.user_attrs)
+            self.assertEqual(
+                pipeline._managed_study_owner(restored),
+                ("storage", hash_id),
+            )
+            self.assertEqual(
+                pipeline._managed_study_owner(pipeline.get_constant_value("search")),
+                ("constant", "root.search"),
+            )
 
     def test_untracked_same_text_name_receives_nested_suffix(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -246,7 +258,7 @@ class OptunaStudyIdentityTests(unittest.TestCase):
             restored = pipeline.get_from_storage(hash_id=hash_id)
             self.assertEqual(restored.study_name, "abc_study_1_1")
 
-    def test_storage_owned_study_handle_cannot_create_constant_owner(self) -> None:
+    def test_storage_owned_study_can_create_constant_owner(self) -> None:
         with TemporaryDirectory() as temp_dir:
             # Given a Study handle materialized from managed object storage
             pipeline = PipelineHandler("root", {}, Path(temp_dir) / "project")
@@ -256,10 +268,21 @@ class OptunaStudyIdentityTests(unittest.TestCase):
             )
             managed = pipeline.get_from_storage(hash_id=hash_id)
 
-            # When it is reused to create a constant owner
-            # Then the caller is directed to update the storage owner instead
-            with self.assertRaisesRegex(RegistrationError, "storage.*update_storage"):
-                pipeline.set_constant_value("duplicate", managed)
+            # When it is copied into a pipeline constant
+            pipeline.set_constant_value("duplicate", managed)
+
+            # Then the constant owns an independent copy and storage is intact
+            constant = pipeline.get_constant_value("duplicate")
+            self.assertIsInstance(constant, optuna.study.Study)
+            self.assertEqual(constant.user_attrs, managed.user_attrs)
+            self.assertEqual(
+                pipeline._managed_study_owner(constant),
+                ("constant", "root.duplicate"),
+            )
+            self.assertEqual(
+                pipeline._managed_study_owner(pipeline.get_from_storage(hash_id=hash_id)),
+                ("storage", hash_id),
+            )
 
     def test_output_artifact_can_create_independent_storage_copy(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -15,7 +15,7 @@ import sys
 import warnings
 from contextlib import ExitStack, redirect_stdout
 from ctypes import CDLL
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from functools import partial
 from importlib import import_module
@@ -165,6 +165,14 @@ class _GateStatusCache:
         ] = {}
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PipelineLoadLocation:
+    project_root: Path
+    restore_message: str | None = None
+    backup_root: Path | None = None
+    update_backup_root: bool = False
+
+
 class PipelineHandler:
     def __init__(
         self,
@@ -303,7 +311,10 @@ class PipelineHandler:
     ) -> str:
         """Keep an object outside pipeline execution state and return its hash ID."""
         self._require_root_storage_owner()
-        self._reject_managed_study_reuse(object_value)
+        self._reject_managed_study_reuse(
+            object_value,
+            permitted_owner_kinds=frozenset({"output", "constant"}),
+        )
         study_value = self._optuna_study_value(object_value)
         stored_value = study_value if study_value is not None else object_value
         record = create_record(object_name, stored_value, object_description)
@@ -341,6 +352,7 @@ class PipelineHandler:
         self._reject_managed_study_reuse(
             object_value,
             permitted_owner=("storage", record.hash_id),
+            permitted_owner_kinds=frozenset({"output", "constant"}),
         )
         study_value = self._optuna_study_value(object_value)
         if study_value is not None:
@@ -1694,9 +1706,16 @@ class PipelineHandler:
         self._reject_managed_study_reuse(
             value,
             permitted_owner=("constant", owner_key),
+            permitted_owner_kinds=frozenset({"output", "storage"}),
         )
         study_value = self._optuna_study_value(value)
         if study_value is not None:
+            source_owner = self._managed_study_owner(value)
+            if source_owner is not None and source_owner[0] == "storage":
+                self.logger.info(
+                    f"Optuna Study copied from stored object '{source_owner[1]}' "
+                    f"into constant '{variable_name}'"
+                )
             previous_name = None
             original_name = None
             if (
@@ -2480,11 +2499,13 @@ class PipelineHandler:
         save_log_to_file: str | Path | None,
         cleanup_mode: str,
     ) -> Path:
+        self._root_pipeline()._validate_runtime_output_pointers()
         target = self.project_root if path is None else Path(path)
         if self._temporary_root_handle is not None and self._normalized_path(target) != self._normalized_path(self.project_root):
             self._relocate_project_root(target)
             target = self.project_root
-        if self._normalized_path(target) != self._normalized_path(self.project_root):
+        target_is_project_root = self._normalized_path(target) == self._normalized_path(self.project_root)
+        if not target_is_project_root:
             self._materialize_project_tree_for_save(target)
         else:
             target.mkdir(parents=True, exist_ok=True)
@@ -2492,11 +2513,15 @@ class PipelineHandler:
             payload = self._serialize_payload_for_save(target)
         except RegistrationError as exc:
             raise PersistenceError(str(exc)) from exc
+        saved_backup_root = self.pipeline_backup_root if target_is_project_root else target
+        payload["pipeline_backup_directory"] = (
+            None if saved_backup_root is None else str(saved_backup_root)
+        )
         self._atomic_pickle_dump(payload, target / "pipeline_state.pkl")
         self._atomic_pickle_dump(self._serialize_config_for_save(self.config), target / "config.pkl")
-        self._write_pipeline_metadata(target)
+        self._write_pipeline_metadata(target, saved_backup_root)
         self.logger.info(f"Pipeline has been saved to project root: {target}")
-        if self._normalized_path(target) == self._normalized_path(self.project_root):
+        if target_is_project_root:
             try:
                 self._cleanup_obsolete_saved_objects(payload, target, cleanup_mode)
             except OSError as exc:
@@ -2764,15 +2789,24 @@ class PipelineHandler:
             with (source / "pipeline_state.pkl").open("rb") as handle:
                 state_bytes = handle.read()
             payload = cls._load_pickle_with_missing_class_fallback(state_bytes)
+            invalid_runtime_values = cls._replace_missing_runtime_payload_values(
+                payload
+            )
             cls._validate_loaded_payload_placeholders(payload)
             cls._validate_loaded_payload_structure(payload)
-            target, restore_message = cls._restore_working_tree_if_needed(
+            load_location = cls._restore_working_tree_if_needed(
                 source,
                 forced_deleting=forced_deleting,
             )
+            if load_location.update_backup_root:
+                payload["pipeline_backup_directory"] = (
+                    None
+                    if load_location.backup_root is None
+                    else str(load_location.backup_root)
+                )
             pipeline = cls._from_payload(
                 payload,
-                target,
+                load_location.project_root,
                 verbose=verbose,
                 auto_resolve_placeholders=auto_resolve_placeholders,
             )
@@ -2783,9 +2817,16 @@ class PipelineHandler:
             # tree untouched, so the load can be retried; only log and artifact
             # files written mid-build remain, and save-time cleanup removes them.
             raise PersistenceError(f"Failed to load pipeline project: {exc}") from exc
-        if restore_message is not None:
-            pipeline.logger.info(restore_message)
-        pipeline.logger.info(f"Pipeline has been loaded from the project root: {target}")
+        if load_location.restore_message is not None:
+            pipeline.logger.info(load_location.restore_message)
+        for owner_label in invalid_runtime_values:
+            pipeline.logger.warning(
+                f"Loaded {owner_label} as None because its saved value depends on "
+                "a missing __main__ class"
+            )
+        pipeline.logger.info(
+            f"Pipeline has been loaded from the project root: {load_location.project_root}"
+        )
         return pipeline
 
     @classmethod
@@ -2804,15 +2845,19 @@ class PipelineHandler:
             auto_resolve_placeholders=auto_resolve_placeholders,
         )
 
-    def _write_pipeline_metadata(self, target: Path) -> None:
+    def _write_pipeline_metadata(
+        self,
+        target: Path,
+        saved_backup_root: Path | None,
+    ) -> None:
         with (target / "pipeline_meta.pkl").open("wb") as handle:
             pickle.dump(
                 {
                     "pipeline_directory": str(self.project_root),
                     "pipeline_backup_directory": (
                         None
-                        if self.pipeline_backup_root is None
-                        else str(self.pipeline_backup_root)
+                        if saved_backup_root is None
+                        else str(saved_backup_root)
                     ),
                 },
                 handle,
@@ -2968,6 +3013,60 @@ class PipelineHandler:
             raise PersistenceError(
                 "Failed to load pipeline project because a missing __main__ class was found outside the saved pipeline config"
             )
+
+    @classmethod
+    def _replace_missing_runtime_payload_values(
+        cls,
+        payload: Any,
+        pipeline_path: tuple[str, ...] = (),
+    ) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        registration_name = payload.get("registration_name")
+        current_path = (
+            (*pipeline_path, registration_name)
+            if isinstance(registration_name, str)
+            else pipeline_path
+        )
+        path_label = "/".join(current_path) or "pipeline"
+        invalid: list[str] = []
+        for mapping_name, owner_kind in (
+            ("manual_values", "constant"),
+            ("para_value_dict", "pipeline value"),
+            ("artifact_registry", "artifact registry value"),
+        ):
+            mapping = payload.get(mapping_name)
+            if not isinstance(mapping, dict):
+                continue
+            for value_name, value in list(mapping.items()):
+                if cls._contains_missing_main_placeholder(value):
+                    mapping[value_name] = None
+                    invalid.append(f"{owner_kind} '{path_label}.{value_name}'")
+        producer_outputs = payload.get("producer_outputs")
+        if isinstance(producer_outputs, dict):
+            for node_name, outputs in producer_outputs.items():
+                if not isinstance(outputs, dict):
+                    continue
+                for output_name, value in list(outputs.items()):
+                    if cls._contains_missing_main_placeholder(value):
+                        outputs[output_name] = None
+                        invalid.append(
+                            f"output '{path_label}.{node_name}.{output_name}'"
+                        )
+        nodes = payload.get("nodes")
+        if isinstance(nodes, list):
+            for node_payload in nodes:
+                if (
+                    isinstance(node_payload, dict)
+                    and node_payload.get("kind") == "pipeline"
+                ):
+                    invalid.extend(
+                        cls._replace_missing_runtime_payload_values(
+                            node_payload.get("payload"),
+                            current_path,
+                        )
+                    )
+        return invalid
 
     @classmethod
     def _validate_loaded_payload_structure(cls, payload: Any) -> None:
@@ -3204,16 +3303,45 @@ class PipelineHandler:
         source_path: Path,
         *,
         forced_deleting: bool,
-    ) -> tuple[Path, str | None]:
+    ) -> _PipelineLoadLocation:
         metadata = cls._load_pipeline_metadata(source_path)
         if metadata is None:
-            return source_path, None
+            return _PipelineLoadLocation(project_root=source_path)
         pipeline_directory = metadata.get("pipeline_directory")
         if pipeline_directory is None:
-            return source_path, None
+            return _PipelineLoadLocation(project_root=source_path)
         work_root = Path(pipeline_directory)
         if cls._normalized_path(source_path) == cls._normalized_path(work_root):
-            return source_path, None
+            return _PipelineLoadLocation(project_root=source_path)
+        backup_directory = metadata.get("pipeline_backup_directory")
+        backup_root = (
+            None if backup_directory is None else Path(backup_directory)
+        )
+        source_is_backup = backup_root is not None and (
+            cls._normalized_path(source_path) == cls._normalized_path(backup_root)
+        )
+        update_backup_root = False
+        selected_backup_root = backup_root
+        if not source_is_backup:
+            update_project_root = input(
+                f"Pipeline was loaded from unrecognized location '{source_path}'. "
+                f"Recorded project root is '{work_root}' and recorded backup path is "
+                f"'{backup_root}'. Use the loading path as the new project root? "
+                "Type 'yes' or 'y' to continue, otherwise type 'no': "
+            ).strip().lower()
+            if update_project_root in {"yes", "y"}:
+                new_backup = input(
+                    "Enter a new pipeline backup path, or press Enter for no backup: "
+                ).strip()
+                return _PipelineLoadLocation(
+                    project_root=source_path,
+                    backup_root=(
+                        None if not new_backup else Path(new_backup).expanduser()
+                    ),
+                    update_backup_root=True,
+                )
+            selected_backup_root = source_path
+            update_backup_root = True
         if cls._paths_overlap(source_path, work_root):
             raise PersistenceError(
                 f"Cannot restore pipeline from '{source_path}' into overlapping working directory '{work_root}'"
@@ -3224,9 +3352,14 @@ class PipelineHandler:
             forced_deleting=forced_deleting,
         )
         shutil.copytree(source_path, work_root)
-        return (
-            work_root,
-            f"Pipeline project directory has been copied from backup path: {source_path} -> {work_root}",
+        return _PipelineLoadLocation(
+            project_root=work_root,
+            restore_message=(
+                f"Pipeline project directory has been copied from backup path: "
+                f"{source_path} -> {work_root}"
+            ),
+            backup_root=selected_backup_root,
+            update_backup_root=update_backup_root,
         )
 
     def _relocate_project_root(self, new_root: Path) -> None:
@@ -3506,6 +3639,7 @@ class PipelineHandler:
             tuple[PipelineHandler, str, str | None, str, DataclassValueReference]
         ] = []
         if parent is None:
+            pipeline._normalize_legacy_optuna_output_pointers()
             pipeline._restore_dataclass_value_references(
                 verbose=verbose,
                 _pending=pending_dataclass_fallbacks,
@@ -3520,6 +3654,8 @@ class PipelineHandler:
             pipeline._warn_unresolved_placeholders_at_load(verbose=verbose)
         if parent is None:
             pipeline._validate_runtime_output_pointers()
+            pipeline._backfill_legacy_study_ownership()
+            pipeline._replace_unloadable_persisted_values()
         return pipeline
 
     def _restore_dataclass_value_references(
@@ -5432,6 +5568,188 @@ class PipelineHandler:
                     slots[address] = value
         return slots
 
+    def _all_output_slots(self) -> dict[OutputAddress, Any]:
+        slots: dict[OutputAddress, Any] = {}
+        for pipeline in self._root_pipeline()._iter_attached_pipelines():
+            if pipeline._is_atom:
+                continue
+            for node in pipeline._sorted_nodes():
+                node_outputs = pipeline.producer_outputs.get(
+                    node.registration_name,
+                    {},
+                )
+                for output_name, value in node_outputs.items():
+                    slots[
+                        OutputAddress(
+                            pipeline.registration_name,
+                            node.registration_name,
+                            output_name,
+                        )
+                    ] = value
+        return slots
+
+    def _normalize_legacy_optuna_output_pointers(self) -> None:
+        root = self._root_pipeline()
+        public_slots = root._public_output_slots()
+        all_slots = root._all_output_slots()
+        recoveries: dict[OutputAddress, tuple[ArtifactRecord, list[OutputAddress]]] = {}
+        for source, value in public_slots.items():
+            if not isinstance(value, OutputPointer):
+                continue
+            try:
+                terminal, terminal_value = resolve_pointer_chain(
+                    source,
+                    all_slots.__getitem__,
+                )
+            except PointerResolutionError:
+                continue
+            if terminal in public_slots or not (
+                isinstance(terminal_value, ArtifactRecord)
+                and terminal_value.serializer == "optuna-study"
+            ):
+                continue
+            terminal_pipeline = root._pipeline_by_name(terminal.pipeline_name)
+            terminal_node = terminal_pipeline.nodes_by_name.get(terminal.node_name)
+            if not isinstance(terminal_node, PipelineHandler) or terminal_node._is_atom:
+                continue
+            existing = recoveries.get(terminal)
+            if existing is None:
+                recoveries[terminal] = (terminal_value, [source])
+            else:
+                existing[1].append(source)
+
+        for artifact, sources in recoveries.values():
+            candidates = [
+                address
+                for address in public_slots
+                if address.output_name == artifact.variable_name
+                and root._pipeline_by_name(address.pipeline_name).qualified_node_name(
+                    address.node_name
+                )
+                == artifact.produced_by_block
+            ]
+            if len(candidates) != 1 or candidates[0] not in sources:
+                continue
+            owner = candidates[0]
+            owner_key = (
+                f"{owner.pipeline_name}.{owner.node_name}.{owner.output_name}"
+            )
+            artifact.metadata.setdefault("study_owner_kind", "output")
+            artifact.metadata.setdefault("study_owner_key", owner_key)
+            root._set_output_address(owner, artifact)
+            for source in sources:
+                if source != owner:
+                    root._set_output_address(source, OutputPointer(owner))
+            root.logger.warning(
+                f"Recovered legacy Optuna Study output ownership at '{owner_key}'"
+            )
+        if recoveries:
+            root._refresh_pointer_visible_state()
+
+    def _backfill_legacy_study_ownership(self) -> None:
+        root = self._root_pipeline()
+        slots = root._public_output_slots()
+        for address, value in slots.items():
+            terminal_address = address
+            terminal_value = value
+            if isinstance(value, OutputPointer):
+                try:
+                    terminal_address, terminal_value = resolve_pointer_chain(
+                        address,
+                        slots.__getitem__,
+                    )
+                except PointerResolutionError:
+                    continue
+            if not (
+                isinstance(terminal_value, ArtifactRecord)
+                and terminal_value.serializer == "optuna-study"
+            ):
+                continue
+            terminal_value.metadata.setdefault("study_owner_kind", "output")
+            terminal_value.metadata.setdefault(
+                "study_owner_key",
+                f"{terminal_address.pipeline_name}.{terminal_address.node_name}."
+                f"{terminal_address.output_name}",
+            )
+        for pipeline in root._iter_attached_pipelines():
+            for constant_name, value in pipeline.manual_values.items():
+                if isinstance(value, ArtifactRecord) and value.serializer == "optuna-study":
+                    value.metadata.setdefault("study_owner_kind", "constant")
+                    value.metadata.setdefault(
+                        "study_owner_key",
+                        f"{pipeline.registration_name}.{constant_name}",
+                    )
+        for hash_id, record in root._stored_objects.items():
+            artifact = record.artifact
+            if isinstance(artifact, ArtifactRecord) and artifact.serializer == "optuna-study":
+                artifact.metadata.setdefault("study_owner_kind", "storage")
+                artifact.metadata.setdefault("study_owner_key", hash_id)
+
+    def _replace_unloadable_persisted_values(self) -> None:
+        root = self._root_pipeline()
+        validity: dict[tuple[str, str], bool] = {}
+        runtime_state_changed = False
+
+        def artifact_loads(
+            pipeline: PipelineHandler,
+            artifact: ArtifactRecord,
+            owner_label: str,
+        ) -> bool:
+            key = (artifact.serializer, artifact.file_path)
+            cached = validity.get(key)
+            if cached is not None:
+                return cached
+            artifact_path = Path(artifact.file_path)
+            if artifact.serializer == "torch" and (
+                artifact_path.is_file() or artifact_path.is_dir()
+            ):
+                validity[key] = True
+                return True
+            try:
+                pipeline.artifact_store.load(artifact)
+            except PersistenceError as exc:
+                validity[key] = False
+                root.logger.warning(
+                    f"Loaded {owner_label} as None because its persisted value is "
+                    f"invalid: {exc}"
+                )
+                return False
+            validity[key] = True
+            return True
+
+        for pipeline in root._iter_attached_pipelines():
+            for node_name, outputs in pipeline.producer_outputs.items():
+                for output_name, value in list(outputs.items()):
+                    if isinstance(value, ArtifactRecord) and not artifact_loads(
+                        pipeline,
+                        value,
+                        f"output '{pipeline.registration_name}.{node_name}.{output_name}'",
+                    ):
+                        outputs[output_name] = None
+                        runtime_state_changed = True
+            for constant_name, value in list(pipeline.manual_values.items()):
+                if isinstance(value, ArtifactRecord) and not artifact_loads(
+                    pipeline,
+                    value,
+                    f"constant '{pipeline.registration_name}.{constant_name}'",
+                ):
+                    pipeline.manual_values[constant_name] = None
+                    runtime_state_changed = True
+
+        for record in root._stored_objects.values():
+            artifact = record.artifact
+            if isinstance(artifact, ArtifactRecord) and not artifact_loads(
+                root,
+                artifact,
+                f"stored object '{record.object_name}'",
+            ):
+                record.value = None
+                record.value_is_loaded = True
+                record.artifact = None
+                record.dirty = True
+        if runtime_state_changed:
+            root._refresh_pointer_visible_state()
+
     @staticmethod
     def _is_optuna_study_output(value: Any) -> bool:
         return is_optuna_study(value) or (
@@ -5454,21 +5772,35 @@ class PipelineHandler:
         self,
         value: Any,
         permitted_owner: tuple[str, str] | None = None,
+        permitted_owner_kinds: frozenset[str] = frozenset({"output"}),
     ) -> None:
         study_owner = self._managed_study_owner(value)
         if (
             study_owner is None
-            or study_owner[0] == "output"
+            or study_owner[0] in permitted_owner_kinds
             or study_owner == permitted_owner
         ):
             return
         owner_kind, owner_key = study_owner
-        update_method = (
-            "set_constant_value" if owner_kind == "constant" else "update_storage"
-        )
+        if owner_kind == "constant":
+            constant_name = owner_key.rsplit(".", 1)[-1]
+            raise RegistrationError(
+                f"Study is already managed by constant '{owner_key}'. "
+                "Constant values cannot hold a duplicate of a Study managed by "
+                "another constant; seed the new constant from the original source "
+                "(storage, pipeline output, or an unowned Study) instead, or replace "
+                f"that constant's Study with set_constant_value('{constant_name}', ...) "
+                "on its owning pipeline."
+            )
+        if owner_kind == "storage":
+            raise RegistrationError(
+                f"Study is already managed by stored object '{owner_key}'. "
+                "Storage cannot hold duplicate Studies; replace that stored object "
+                f"with update_storage(hash_id='{owner_key}', object_value=...) on the "
+                "root pipeline, or store a fresh Study (e.g. from optuna.load_study)."
+            )
         raise RegistrationError(
-            f"Study is already managed by {owner_kind} '{owner_key}'; "
-            f"use {update_method} to replace that owner"
+            f"Study is already managed by {owner_kind} '{owner_key}'"
         )
 
     def _optuna_study_value(self, value: Any) -> OptunaStudy | None:
@@ -5624,20 +5956,26 @@ class PipelineHandler:
         produced_outputs: dict[str, Any],
         upstream_outputs: dict[str, Any] | None,
     ) -> None:
+        study_output_names = {
+            output_name
+            for output_name, value in produced_outputs.items()
+            if self._is_optuna_study_output(value)
+        }
+        owns_output_slots = not isinstance(node, PipelineHandler)
         current_address = {
             output_name: OutputAddress(
                 self.registration_name,
                 node.registration_name,
                 output_name,
             )
-            for output_name, value in produced_outputs.items()
-            if self._is_optuna_study_output(value)
+            for output_name in produced_outputs
+            if owns_output_slots and output_name in study_output_names
         }
         node_overrides = self._node_overridden_outputs(node)
         overrides = {
             output_name: address
             for output_name, address in node_overrides.items()
-            if output_name not in current_address
+            if output_name not in study_output_names
         }
         targets: list[tuple[str, PipelineHandler, OutputAddress]] = []
         try:
