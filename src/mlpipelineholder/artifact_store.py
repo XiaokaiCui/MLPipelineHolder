@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .exceptions import PersistenceError
 from .models import ArtifactRecord
+from .optuna_api import StudyArtifactOptions
 from .optuna_support import (
     OPTUNA_STUDIES_DB_NAME,
     OPTUNA_STUDY_SERIALIZER,
@@ -35,6 +36,7 @@ class ArtifactStore:
         run_id: str,
         torch_load_weights_only: bool = False,
         optuna_db_path: str | Path | None = None,
+        optuna_options: StudyArtifactOptions | None = None,
     ) -> ArtifactRecord:
         if is_optuna_study(value):
             return self._save_optuna_study(
@@ -44,6 +46,7 @@ class ArtifactStore:
                 function_name,
                 run_id,
                 optuna_db_path,
+                optuna_options,
             )
         serializer = choose_serializer(value)
         suffix = extension_for(serializer)
@@ -74,6 +77,7 @@ class ArtifactStore:
         function_name: str,
         run_id: str,
         optuna_db_path: str | Path | None,
+        options: StudyArtifactOptions | None,
     ) -> ArtifactRecord:
         safe_block = block_name.replace("/", "_")
         safe_function = function_name.replace("/", "_")
@@ -88,7 +92,12 @@ class ArtifactStore:
             if optuna_db_path is None
             else Path(optuna_db_path)
         )
-        metadata = save_study_artifact(value, sampler_path, db_path)
+        metadata = save_study_artifact(
+            value,
+            sampler_path,
+            db_path,
+            options=options,
+        )
         return ArtifactRecord(
             variable_name=variable_name,
             serializer=OPTUNA_STUDY_SERIALIZER,
