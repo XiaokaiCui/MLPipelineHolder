@@ -142,5 +142,188 @@ class ResilientPersistenceTests(unittest.TestCase):
             )
 
 
+    def test_dangling_nested_study_pointer_recovers_from_orphan_mirror_artifact(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = PipelineHandler("root", {}, base / "project")
+            child = PipelineHandler("child", {"gate_on": True}, base / "child")
+            child.set_gate_block("gate_on")
+            grandchild = PipelineHandler("grandchild", {}, base / "grandchild")
+            producer = grandchild.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(produce_study, ["study"])
+            child.add_child_pipeline(grandchild, 1)
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+
+            state_path = root.project_root / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            child_payload = payload["nodes"][0]["payload"]
+            grandchild_payload = child_payload["nodes"][0]["payload"]
+            artifact = payload["producer_outputs"]["child"]["study"]
+            if not isinstance(artifact, ArtifactRecord):
+                raise AssertionError("root mirror should hold the Study artifact")
+            artifact.metadata.pop("study_owner_kind", None)
+            artifact.metadata.pop("study_owner_key", None)
+            child_payload["producer_outputs"].pop("grandchild")
+            grandchild_payload["producer_outputs"]["producer"]["study"] = OutputPointer(
+                OutputAddress("child", "grandchild", "study")
+            )
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded_grandchild = (
+                loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
+            )
+            restored = loaded_grandchild.get_node_output("producer", "study")
+            restored_record = loaded_grandchild.producer_outputs["producer"]["study"]
+
+            self.assertEqual([trial.value for trial in restored.trials], [3.0])
+            self.assertIsInstance(restored_record, ArtifactRecord)
+            self.assertEqual(
+                restored_record.metadata["study_owner_key"],
+                "grandchild.producer.study",
+            )
+            loaded._validate_runtime_output_pointers()
+
+    def test_dangling_output_pointer_without_recoverable_artifact_loads_as_none(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            pipeline = PipelineHandler("root", {}, base / "project")
+            producer = pipeline.add_block("producer", 1)
+            if producer is None:
+                raise AssertionError("add_block should return a block")
+            producer.register_function(produce_number, ["value"])
+            pipeline.run_all()
+            pipeline.save_pipeline()
+
+            state_path = pipeline.project_root / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            payload["producer_outputs"]["producer"]["value"] = OutputPointer(
+                OutputAddress("root", "missing", "value")
+            )
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(pipeline.project_root)
+
+            self.assertIsNone(loaded.get_value("value"))
+            loaded._validate_runtime_output_pointers()
+
+
+    def test_same_group_atom_study_slots_override_without_pointers_after_load(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            root = PipelineHandler("root", {}, base / "project")
+            child = PipelineHandler("child", {"gate_on": True}, base / "child")
+            child.set_gate_block("gate_on")
+            grandchild = PipelineHandler("grandchild", {}, base / "grandchild")
+            loser_atom = grandchild.create_atom_child_pipeline(
+                "optimise",
+                41.0,
+                produce_study,
+                output_variable_names="study",
+            )
+            winner_atom = grandchild.create_atom_child_pipeline(
+                "optimise_from_previous",
+                41.1,
+                produce_study,
+                output_variable_names="study",
+            )
+            if (
+                grandchild.get_child_pipeline("optimise") is None
+                or grandchild.get_child_pipeline("optimise_from_previous") is None
+            ):
+                raise AssertionError("atom creation should succeed")
+            child.add_child_pipeline(grandchild, 1)
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.save_pipeline()
+
+            state_path = root.project_root / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            child_payload = payload["nodes"][0]["payload"]
+            grandchild_payload = child_payload["nodes"][0]["payload"]
+            artifact = payload["producer_outputs"]["child"]["study"]
+            if not isinstance(artifact, ArtifactRecord):
+                raise AssertionError("root mirror should hold the Study artifact")
+            artifact.produced_by_block = (
+                "root/child/grandchild/optimise_from_previous/"
+                "optimise_from_previous_block"
+            )
+            artifact.metadata.pop("study_owner_kind", None)
+            artifact.metadata.pop("study_owner_key", None)
+            loser_atom_payload = grandchild_payload["nodes"][0]["payload"]
+            loser_atom_payload["producer_outputs"]["optimise_block"]["study"] = (
+                OutputPointer(OutputAddress("grandchild", "optimise", "study"))
+            )
+            grandchild_payload["producer_outputs"]["optimise"]["study"] = (
+                OutputPointer(OutputAddress("child", "grandchild", "study"))
+            )
+            grandchild_payload["producer_outputs"]["optimise_from_previous"] = {
+                "study": artifact
+            }
+            child_payload["producer_outputs"].pop("grandchild")
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded_grandchild = (
+                loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
+            )
+
+            self.assertIsNone(loaded_grandchild.producer_outputs["optimise"]["study"])
+            winner_slot = loaded_grandchild.producer_outputs[
+                "optimise_from_previous"
+            ]["study"]
+            self.assertIsInstance(winner_slot, ArtifactRecord)
+            self.assertNotIsInstance(winner_slot, OutputPointer)
+            restored = loaded_grandchild.get_value("study")
+            self.assertEqual([trial.value for trial in restored.trials], [3.0])
+            loaded._validate_runtime_output_pointers()
+
+    def test_same_group_study_atoms_override_without_pointer_creation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", {}, Path(temp_dir) / "project")
+            first_atom = pipeline.create_atom_child_pipeline(
+                "atom_first",
+                41.0,
+                produce_study,
+                output_variable_names="study",
+            )
+            second_atom = pipeline.create_atom_child_pipeline(
+                "atom_second",
+                41.1,
+                produce_study,
+                output_variable_names="study",
+            )
+            if (
+                pipeline.get_child_pipeline("atom_first") is None
+                or pipeline.get_child_pipeline("atom_second") is None
+            ):
+                raise AssertionError("atom creation should succeed")
+            pipeline.run_all()
+            pipeline.forbid_invalidate_objects()
+            pipeline.run_block("atom_second")
+
+            for atom_name in ("atom_first", "atom_second"):
+                atom = pipeline.get_child_pipeline(atom_name)
+                for outputs in atom.producer_outputs.values():
+                    self.assertNotIsInstance(outputs.get("study"), OutputPointer)
+            pipeline._validate_runtime_output_pointers()
+            pipeline.save_pipeline()
+            loaded = PipelineHandler.load_pipeline(
+                pipeline.project_root,
+                forced_deleting=True,
+            )
+            loaded._validate_runtime_output_pointers()
+
+
 if __name__ == "__main__":
     _ = unittest.main()
