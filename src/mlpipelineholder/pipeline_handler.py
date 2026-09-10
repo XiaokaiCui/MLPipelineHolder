@@ -74,6 +74,7 @@ from .optuna_support import (
 from .output_pointers import (
     OutputAddress,
     OutputPointer,
+    PointerDestinationMissingError,
     PointerResolutionError,
     is_strictly_upstream,
     resolve_pointer_chain,
@@ -3639,7 +3640,7 @@ class PipelineHandler:
             tuple[PipelineHandler, str, str | None, str, DataclassValueReference]
         ] = []
         if parent is None:
-            pipeline._normalize_legacy_optuna_output_pointers()
+            pipeline._recover_loaded_output_pointers()
             pipeline._restore_dataclass_value_references(
                 verbose=verbose,
                 _pending=pending_dataclass_fallbacks,
@@ -5588,8 +5589,38 @@ class PipelineHandler:
                     ] = value
         return slots
 
-    def _normalize_legacy_optuna_output_pointers(self) -> None:
+    def _recover_loaded_output_pointers(self) -> None:
         root = self._root_pipeline()
+        recovered = False
+
+        def restore_artifact_owner(
+            artifact: ArtifactRecord,
+            owner: OutputAddress,
+            sources: list[OutputAddress],
+        ) -> None:
+            owner_key = (
+                f"{owner.pipeline_name}.{owner.node_name}.{owner.output_name}"
+            )
+            if artifact.serializer == "optuna-study":
+                artifact.metadata.setdefault("study_owner_kind", "output")
+                artifact.metadata.setdefault("study_owner_key", owner_key)
+            root._set_output_address(owner, artifact)
+            for source in sources:
+                if source == owner:
+                    continue
+                if root._same_priority_group_address(source, owner):
+                    root._set_output_address(source, None)
+                    root.logger.warning(
+                        f"Loaded output '{source.pipeline_name}.{source.node_name}."
+                        f"{source.output_name}' as None because it shares an execution "
+                        "priority group with its Study owner"
+                    )
+                else:
+                    root._set_output_address(source, OutputPointer(owner))
+            root.logger.warning(
+                f"Recovered legacy output ownership at '{owner_key}'"
+            )
+
         public_slots = root._public_output_slots()
         all_slots = root._all_output_slots()
         recoveries: dict[OutputAddress, tuple[ArtifactRecord, list[OutputAddress]]] = {}
@@ -5619,32 +5650,125 @@ class PipelineHandler:
                 existing[1].append(source)
 
         for artifact, sources in recoveries.values():
-            candidates = [
-                address
-                for address in public_slots
-                if address.output_name == artifact.variable_name
-                and root._pipeline_by_name(address.pipeline_name).qualified_node_name(
-                    address.node_name
-                )
-                == artifact.produced_by_block
-            ]
-            if len(candidates) != 1 or candidates[0] not in sources:
+            owner = self._unique_legacy_artifact_owner(artifact, sources, public_slots)
+            if owner is None:
                 continue
-            owner = candidates[0]
-            owner_key = (
-                f"{owner.pipeline_name}.{owner.node_name}.{owner.output_name}"
+            restore_artifact_owner(artifact, owner, sources)
+            recovered = True
+
+        public_slots = root._public_output_slots()
+        for source, value in public_slots.items():
+            if not isinstance(value, OutputPointer):
+                continue
+            try:
+                resolve_pointer_chain(source, public_slots.__getitem__)
+                continue
+            except PointerDestinationMissingError:
+                pass
+            except PointerResolutionError:
+                continue
+            artifact, owner = self._find_orphan_legacy_artifact(
+                source.output_name,
+                public_slots,
             )
-            artifact.metadata.setdefault("study_owner_kind", "output")
-            artifact.metadata.setdefault("study_owner_key", owner_key)
-            root._set_output_address(owner, artifact)
-            for source in sources:
-                if source != owner:
-                    root._set_output_address(source, OutputPointer(owner))
-            root.logger.warning(
-                f"Recovered legacy Optuna Study output ownership at '{owner_key}'"
-            )
-        if recoveries:
+            if artifact is not None and owner is not None:
+                restore_artifact_owner(artifact, owner, [source])
+            else:
+                root._set_output_address(source, None)
+                root.logger.warning(
+                    f"Loaded output '{source.pipeline_name}.{source.node_name}."
+                    f"{source.output_name}' as None because its pointer "
+                    "destination is missing from the saved pipeline"
+                )
+            recovered = True
+        if recovered:
             root._refresh_pointer_visible_state()
+
+    def _address_matches_legacy_artifact_owner(
+        self,
+        address: OutputAddress,
+        artifact: ArtifactRecord,
+    ) -> bool:
+        if address.output_name != artifact.variable_name:
+            return False
+        qualified = self._root_pipeline()._pipeline_by_name(
+            address.pipeline_name
+        ).qualified_node_name(address.node_name)
+        return (
+            qualified == artifact.produced_by_block
+            or artifact.produced_by_block.startswith(f"{qualified}/")
+        )
+
+    def _unique_legacy_artifact_owner(
+        self,
+        artifact: ArtifactRecord,
+        sources: list[OutputAddress],
+        public_slots: dict[OutputAddress, Any],
+    ) -> OutputAddress | None:
+        candidates = [
+            address
+            for address in public_slots
+            if self._address_matches_legacy_artifact_owner(address, artifact)
+        ]
+        if len(candidates) != 1 or candidates[0] not in sources:
+            return None
+        return candidates[0]
+
+    def _find_orphan_legacy_artifact(
+        self,
+        output_name: str,
+        public_slots: dict[OutputAddress, Any],
+    ) -> tuple[ArtifactRecord | None, OutputAddress | None]:
+        root = self._root_pipeline()
+        artifacts_by_block: dict[str, list[ArtifactRecord]] = {}
+        for address, value in root._all_output_slots().items():
+            if address in public_slots:
+                continue
+            if not (
+                isinstance(value, ArtifactRecord)
+                and value.variable_name == output_name
+            ):
+                continue
+            block_artifacts = artifacts_by_block.setdefault(
+                value.produced_by_block,
+                [],
+            )
+            if all(existing is not value for existing in block_artifacts):
+                block_artifacts.append(value)
+        if not artifacts_by_block:
+            return None, None
+        qualified_by_address = {
+            address: root._pipeline_by_name(
+                address.pipeline_name
+            ).qualified_node_name(address.node_name)
+            for address in public_slots
+        }
+        owners = [
+            address
+            for address in public_slots
+            if address.output_name == output_name
+            and any(
+                block == qualified_by_address[address]
+                or block.startswith(f"{qualified_by_address[address]}/")
+                for block in artifacts_by_block
+            )
+        ]
+        if len(owners) != 1:
+            return None, None
+        owner = owners[0]
+        owner_qualified = qualified_by_address[owner]
+        artifacts: list[ArtifactRecord] = []
+        for block_name, block_artifacts in artifacts_by_block.items():
+            if block_name != owner_qualified and not block_name.startswith(
+                f"{owner_qualified}/"
+            ):
+                continue
+            for artifact in block_artifacts:
+                if all(existing is not artifact for existing in artifacts):
+                    artifacts.append(artifact)
+        if len(artifacts) != 1:
+            return None, None
+        return artifacts[0], owner
 
     def _backfill_legacy_study_ownership(self) -> None:
         root = self._root_pipeline()
@@ -5851,6 +5975,24 @@ class PipelineHandler:
         pipeline = self._pipeline_by_name(address.pipeline_name)
         return pipeline._priority_vector(address.node_name)
 
+    def _same_priority_group_address(
+        self,
+        first: OutputAddress,
+        second: OutputAddress,
+    ) -> bool:
+        root = self._root_pipeline()
+        first_pipeline = root._pipeline_by_name(first.pipeline_name)
+        second_pipeline = root._pipeline_by_name(second.pipeline_name)
+        if first_pipeline is not second_pipeline:
+            return False
+        first_node = first_pipeline.nodes_by_name.get(first.node_name)
+        second_node = first_pipeline.nodes_by_name.get(second.node_name)
+        if first_node is None or second_node is None:
+            return False
+        return self._priority_group(
+            first_node.execution_priority
+        ) == self._priority_group(second_node.execution_priority)
+
     def _repair_pointer_gaps(
         self,
         invalidated: set[OutputAddress],
@@ -5961,16 +6103,28 @@ class PipelineHandler:
             for output_name, value in produced_outputs.items()
             if self._is_optuna_study_output(value)
         }
-        owns_output_slots = not isinstance(node, PipelineHandler)
-        current_address = {
-            output_name: OutputAddress(
-                self.registration_name,
-                node.registration_name,
-                output_name,
-            )
-            for output_name in produced_outputs
-            if owns_output_slots and output_name in study_output_names
-        }
+        if isinstance(node, PipelineHandler):
+            terminal_pipeline: PipelineHandler | None = None
+            terminal_node_name: str | None = None
+        elif self._is_atom and self.parent_pipeline is not None:
+            terminal_pipeline = self.parent_pipeline
+            terminal_node_name = self.registration_name
+        else:
+            terminal_pipeline = self
+            terminal_node_name = node.registration_name
+        current_address = (
+            {
+                output_name: OutputAddress(
+                    terminal_pipeline.registration_name,
+                    terminal_node_name,
+                    output_name,
+                )
+                for output_name in produced_outputs
+                if output_name in study_output_names
+            }
+            if terminal_pipeline is not None and terminal_node_name is not None
+            else {}
+        )
         node_overrides = self._node_overridden_outputs(node)
         overrides = {
             output_name: address
@@ -6083,6 +6237,8 @@ class PipelineHandler:
             for output_name, terminal_address in current_address.items():
                 for address in root._optuna_study_group_addresses[output_name]:
                     if address == terminal_address:
+                        continue
+                    if self._same_priority_group_address(address, terminal_address):
                         continue
                     target_pipeline = root._pipeline_by_name(address.pipeline_name)
                     target_outputs = target_pipeline.producer_outputs.setdefault(

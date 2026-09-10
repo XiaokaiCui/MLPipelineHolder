@@ -21,6 +21,14 @@ class PointerResolutionError(Exception):
     pass
 
 
+class PointerCycleError(PointerResolutionError):
+    pass
+
+
+class PointerDestinationMissingError(PointerResolutionError):
+    pass
+
+
 ValueT = TypeVar("ValueT")
 
 
@@ -32,14 +40,14 @@ def resolve_pointer_chain(
     visited: set[OutputAddress] = set()
     while True:
         if current in visited:
-            raise PointerResolutionError(
+            raise PointerCycleError(
                 f"Output pointer cycle detected at {current!r}"
             )
         visited.add(current)
         try:
             value = read(current)
         except KeyError as exc:
-            raise PointerResolutionError(
+            raise PointerDestinationMissingError(
                 f"Output pointer destination does not exist: {current!r}"
             ) from exc
         if isinstance(value, OutputPointer):
