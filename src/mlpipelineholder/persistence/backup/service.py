@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .artifact_recovery import (
+from ..artifact_recovery import (
     _ArtifactRecoveryTransaction,
     _delete_unreferenced_artifact,
 )
-from .backup_recovery import (
+from .recovery import (
     OwnerKind,
     SlotKind,
     _OwnedVariableState,
@@ -20,13 +20,13 @@ from .backup_recovery import (
     confirm_recovery_impact,
     discover_owned_variable_slots,
 )
-from .backup_snapshot import _BackupSnapshot, read_backup_snapshot
-from .backup_value_resolver import (
+from .snapshot import _BackupSnapshot, read_backup_snapshot
+from .value_resolver import (
     resolve_saved_config_field,
     resolve_saved_root_variable,
 )
-from .exceptions import PersistenceError, RegistrationError, ResolutionError
-from .models import ArtifactRecord, TorchStateArtifactRecord
+from ...exceptions import PersistenceError, RegistrationError, ResolutionError
+from ...core.models import ArtifactRecord, TorchStateArtifactRecord
 
 
 @dataclass(frozen=True, slots=True)

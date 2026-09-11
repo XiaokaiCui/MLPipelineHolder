@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.function_registry import _values_equal
-from src.mlpipelineholder.models import ArtifactRecord, TorchStateArtifactRecord
+from src.mlpipelineholder.execution.function_registry import _values_equal
+from src.mlpipelineholder.core.models import ArtifactRecord, TorchStateArtifactRecord
 
 
 def produce_blob() -> dict[str, int]:

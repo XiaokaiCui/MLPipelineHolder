@@ -7,8 +7,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Final, TypeGuard, cast
 
-from .exceptions import PersistenceError
-from .optuna_api import (
+from ...exceptions import PersistenceError
+from .api import (
     OptunaApi,
     OptunaRuntimeValue,
     OptunaSampler,
@@ -16,7 +16,7 @@ from .optuna_api import (
     PersistedOptunaStudy,
     StudyArtifactOptions,
 )
-from .optuna_sqlite import populate_study_from_sqlite
+from .sqlite import populate_study_from_sqlite
 
 OPTUNA_STUDY_SERIALIZER: Final = "optuna-study"
 OPTUNA_STUDIES_DB_NAME: Final = "optuna_studies.db"

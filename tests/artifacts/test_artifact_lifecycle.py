@@ -5,7 +5,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from mlpipelineholder import PipelineHandler
-from mlpipelineholder.models import ArtifactRecord
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_blob(seed: int) -> str:

@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
-from src.mlpipelineholder.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
+from src.mlpipelineholder.core.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
 
 
 @dataclass
@@ -471,7 +471,7 @@ class SaveLoadTests(unittest.TestCase):
 
     def test_source_package_loader_resolves_installed_package_pickle_to_active_class(self) -> None:
         # Given: a pickle written by the installed package namespace.
-        payload = b"cmlpipelineholder.models\nRunRecord\n."
+        payload = b"cmlpipelineholder.core.models\nRunRecord\n."
 
         # When: it is loaded through the directly imported source package.
         loaded_class = PipelineHandler._load_pickle_with_missing_class_fallback(payload)

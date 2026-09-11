@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.models import ArtifactRecord
+from src.mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_dict() -> dict[str, int]:

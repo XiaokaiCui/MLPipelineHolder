@@ -42,7 +42,7 @@ Include this manifest with the final conversion. An intermediate approval messag
 Always create the root with strict mode:
 
 ```python
-pipeline = PipelineHandler(..., strict_mode=True)
+pipeline = PipelineHolder(..., strict_mode=True)
 ```
 
 Strict mode turns unsafe registrations into immediate `RegistrationError`s. Register upstream producers before downstream consumers so their outputs are already declared; producers do **not** need to run before downstream registration. Attached children inherit strict mode from the root.

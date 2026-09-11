@@ -6,10 +6,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 from uuid import uuid4
 
-from .exceptions import PersistenceError, RegistrationError, ResolutionError
-from .models import ArtifactRecord
-from .optuna_support import is_optuna_sampler, is_optuna_study
-from .serializers import choose_serializer
+from ..exceptions import PersistenceError, RegistrationError, ResolutionError
+from ..core.models import ArtifactRecord
+from ..integrations.optuna.support import is_optuna_sampler, is_optuna_study
+from .artifacts.serializers import choose_serializer
 
 STORAGE_COLUMNS: Final = [
     "hash_id",

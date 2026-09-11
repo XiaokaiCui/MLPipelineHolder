@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 import optuna
 
 from mlpipelineholder import PersistenceError, PipelineHandler
-from mlpipelineholder.models import ArtifactRecord
-from mlpipelineholder.output_pointers import OutputAddress, OutputPointer
+from mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
 
 
 def produce_study() -> optuna.study.Study:

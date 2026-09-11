@@ -6,8 +6,8 @@ import shutil
 from typing import cast, final
 from uuid import uuid4
 
-from .exceptions import PersistenceError
-from .models import ArtifactRecord, TorchStateArtifactRecord
+from ..exceptions import PersistenceError
+from ..core.models import ArtifactRecord, TorchStateArtifactRecord
 
 _ArtifactLike = ArtifactRecord | TorchStateArtifactRecord
 

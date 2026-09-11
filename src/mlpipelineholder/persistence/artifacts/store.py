@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .exceptions import PersistenceError
-from .models import ArtifactRecord
-from .optuna_api import StudyArtifactOptions
-from .optuna_support import (
+from ...exceptions import PersistenceError
+from ...core.models import ArtifactRecord
+from ...integrations.optuna.api import StudyArtifactOptions
+from ...integrations.optuna.support import (
     OPTUNA_STUDIES_DB_NAME,
     OPTUNA_STUDY_SERIALIZER,
     is_optuna_study,

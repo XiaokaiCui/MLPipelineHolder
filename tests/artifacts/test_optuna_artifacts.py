@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 import optuna
 
 from mlpipelineholder import PersistenceError, PipelineHandler
-from mlpipelineholder.models import ArtifactRecord
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def _objective(trial: optuna.trial.Trial) -> float:

@@ -110,6 +110,17 @@ Your final output must include:
 I will now provide my notebook/code.
 ```
 
+## Package layout and compatibility
+
+The package is organised by responsibility: `core/` (value models and naming rules), `execution/` (blocks, gates, atom pipelines, the function registry), `state/` (output addresses and pointers), `persistence/` (artifacts, object storage, save/load, backups, recovery), `integrations/` (Optuna and dataframe support) and `presentation/` (logging and rendering).
+
+`PipelineHolder` is the canonical class. `PipelineHandler` remains available as an alias for the same class, so existing notebooks keep working unchanged:
+
+```python
+from mlpipelineholder import PipelineHolder      # preferred
+from mlpipelineholder import PipelineHandler     # legacy alias, same class
+```
+
 ## API reference
 
 The full public API is documented in a standalone reference page:
@@ -118,7 +129,7 @@ The full public API is documented in a standalone reference page:
   
 It covers:
 
-- main classes: `PipelineHandler`, `ExecutionBlock`, `GateBlock`, `PipelineLogger`
+- main classes: `PipelineHolder` (the legacy `PipelineHandler` name is an alias for the same class), `ExecutionBlock`, `GateBlock`, `PipelineLogger`
 - functions and decorators: `rename_args`
 - exceptions: `PipelineError`, `RegistrationError`, `ResolutionError`, `ExecutionError`, `PersistenceError`
-- data models in `mlpipelineholder.models` (e.g. `ArtifactRecord`, `RunRecord`, function/expression/block registrations, runtime value and callable references)
+- data models in `mlpipelineholder.core.models` (e.g. `ArtifactRecord`, `RunRecord`, function/expression/block registrations, runtime value and callable references)

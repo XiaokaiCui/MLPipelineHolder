@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
-from .exceptions import ExecutionError, RegistrationError
+from ..exceptions import ExecutionError, RegistrationError
 from .function_registry import inspect_input_names, resolve_callable
-from .models import FunctionRegistration
+from ..core.models import FunctionRegistration
 
 if TYPE_CHECKING:
-    from .pipeline_handler import PipelineHandler
+    from ..pipeline_holder import PipelineHolder
 
 
 class GateBlock:
     """Runs a single boolean function before the rest of a pipeline."""
 
-    def __init__(self, parent: PipelineHandler, function_or_path: Any, expected_value: Any = True) -> None:
+    def __init__(self, parent: PipelineHolder, function_or_path: Any, expected_value: Any = True) -> None:
         self.parent = parent
         self.config_field_name: str | None = None
         self.expected_value = expected_value
@@ -82,3 +82,22 @@ class GateBlock:
             "import_path": self.registration.import_path,
             "expected_value": self.expected_value,
         }
+
+
+class _GateStatusCache:
+    """Memo of per-level gate evaluations for one placeholder-recovery pass.
+
+    Each gate-owning pipeline retains a snapshot of every value its gate can
+    read (incoming parent outputs, config fields, and manual values), so a
+    cached answer is reused only while those inputs remain deeply equal. The
+    cache is short-lived: it is created at the entry point of one recovery
+    pass and discarded when the pass completes.
+    """
+
+    __slots__ = ("_levels",)
+
+    def __init__(self) -> None:
+        self._levels: dict[
+            int,
+            tuple[tuple[tuple[str, Any], ...], tuple[str, str | None]],
+        ] = {}

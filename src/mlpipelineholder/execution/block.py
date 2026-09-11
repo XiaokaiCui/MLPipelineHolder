@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
-from .exceptions import ExecutionError, RegistrationError, ResolutionError
+from ..exceptions import ExecutionError, RegistrationError, ResolutionError
 from .function_registry import (
     callable_identity_matches,
     callable_signature,
@@ -17,17 +17,17 @@ from .function_registry import (
     rename_args,
     resolve_callable,
 )
-from .models import (
+from ..core.models import (
     BlockArgsRegistration,
     BlockKwargsRegistration,
     ExpressionRegistration,
     FunctionExecutionResult,
     FunctionRegistration,
 )
-from .naming import validate_registration_name
+from ..core.naming import validate_registration_name
 
 if TYPE_CHECKING:
-    from .pipeline_handler import PipelineHandler
+    from ..pipeline_holder import PipelineHolder
 
 
 _ALLOWED_EXPRESSION_BUILTIN_NAMES: Final[set[str]] = {
@@ -41,7 +41,7 @@ class ExecutionBlock:
     """Represents one priority level whose registered functions run in parallel."""
 
     def __init__(
-        self, parent: PipelineHandler, registration_name: str, execution_priority: float
+        self, parent: PipelineHolder, registration_name: str, execution_priority: float
     ) -> None:
         self.parent = parent
         self.registration_name = validate_registration_name(
@@ -63,11 +63,7 @@ class ExecutionBlock:
         warn_on_input_mutation: bool = False,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
-        if self.parent._is_atom:
-            raise RegistrationError(
-                f"Atom pipeline '{self.parent.registration_name}' is immutable "
-                "and cannot accept new expressions"
-            )
+        self.parent._assert_mutable("accept new expressions")
         return self._register_expression_strict(
             code,
             output_variable_name=output_variable_name,
@@ -287,11 +283,7 @@ class ExecutionBlock:
     def register_args(
         self, name: str, ordered_items: tuple[str, ...] | list[str], forced: bool = False
     ) -> BlockArgsRegistration | None:
-        if self.parent._is_atom:
-            raise RegistrationError(
-                f"Atom pipeline '{self.parent.registration_name}' is immutable "
-                "and cannot accept new args helpers"
-            )
+        self.parent._assert_mutable("accept new args helpers")
         try:
             if name in self.registered_args:
                 if not forced:
@@ -314,11 +306,7 @@ class ExecutionBlock:
     def register_kwargs(
         self, name: str, mapping_dct: dict[str, str], forced: bool = False
     ) -> BlockKwargsRegistration | None:
-        if self.parent._is_atom:
-            raise RegistrationError(
-                f"Atom pipeline '{self.parent.registration_name}' is immutable "
-                "and cannot accept new kwargs helpers"
-            )
+        self.parent._assert_mutable("accept new kwargs helpers")
         try:
             if name in self.registered_kwargs:
                 if not forced:
@@ -385,11 +373,7 @@ class ExecutionBlock:
         forced: bool = False,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
-        if self.parent._is_atom:
-            raise RegistrationError(
-                f"Atom pipeline '{self.parent.registration_name}' is immutable "
-                "and cannot accept new functions"
-            )
+        self.parent._assert_mutable("accept new functions")
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         existing_registration = next(
             (
@@ -795,11 +779,7 @@ class ExecutionBlock:
         self.parent.logger.warning(message)
 
     def remove_function(self, function_name: str) -> None:
-        if self.parent._is_atom:
-            raise RegistrationError(
-                f"Atom pipeline '{self.parent.registration_name}' is immutable "
-                "and cannot remove functions"
-            )
+        self.parent._assert_mutable("remove functions")
         matches = [
             registration
             for registration in self.functions

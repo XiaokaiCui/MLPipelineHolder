@@ -10,7 +10,7 @@ from src.mlpipelineholder import (
     RegistrationError,
     ResolutionError,
 )
-from src.mlpipelineholder.output_pointers import (
+from src.mlpipelineholder.state.output_pointers import (
     OutputAddress,
     OutputPointer,
     PointerResolutionError,

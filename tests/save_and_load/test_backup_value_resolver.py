@@ -11,12 +11,12 @@ import unittest
 from typing import final
 
 from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
-from src.mlpipelineholder.backup_value_resolver import (
+from src.mlpipelineholder.persistence.backup.value_resolver import (
     resolve_saved_config_field,
     resolve_saved_root_variable,
 )
-from src.mlpipelineholder.function_registry import resolve_callable
-from src.mlpipelineholder.models import (
+from src.mlpipelineholder.execution.function_registry import resolve_callable
+from src.mlpipelineholder.core.models import (
     CallableValueReference,
     DataclassValueReference,
     RuntimeCallableReference,

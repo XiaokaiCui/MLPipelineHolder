@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from mlpipelineholder import PipelineHandler
-from mlpipelineholder.models import ArtifactRecord
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_disk_frame():
