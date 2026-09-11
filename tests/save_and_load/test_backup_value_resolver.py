@@ -10,13 +10,13 @@ from types import SimpleNamespace, TracebackType
 import unittest
 from typing import final
 
-from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
-from src.mlpipelineholder.persistence.backup.value_resolver import (
+from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
+from mlpipelineholder.persistence.backup.value_resolver import (
     resolve_saved_config_field,
     resolve_saved_root_variable,
 )
-from src.mlpipelineholder.execution.function_registry import resolve_callable
-from src.mlpipelineholder.core.models import (
+from mlpipelineholder.execution.function_registry import resolve_callable
+from mlpipelineholder.core.models import (
     CallableValueReference,
     DataclassValueReference,
     RuntimeCallableReference,

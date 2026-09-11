@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import ExecutionError, PipelineHandler, RegistrationError, ResolutionError
+from mlpipelineholder import ExecutionError, PipelineHandler, RegistrationError, ResolutionError
 
 
 @dataclass

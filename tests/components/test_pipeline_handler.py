@@ -17,11 +17,11 @@ from unittest.mock import patch
 import warnings
 import weakref
 
-from src import GateBlock as TopLevelGateBlock
-from src.mlpipelineholder import ExecutionError, GateBlock, PersistenceError, PipelineHandler, RegistrationError, ResolutionError
-from src.mlpipelineholder.persistence.artifacts.store import ArtifactStore
-from src.mlpipelineholder.core.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
-from src.mlpipelineholder.persistence.artifacts.serializers import choose_serializer
+from mlpipelineholder import GateBlock as TopLevelGateBlock
+from mlpipelineholder import ExecutionError, GateBlock, PersistenceError, PipelineHandler, RegistrationError, ResolutionError
+from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+from mlpipelineholder.core.models import ArtifactRecord, RuntimeValueReference, TorchStateArtifactRecord
+from mlpipelineholder.persistence.artifacts.serializers import choose_serializer
 
 
 @dataclass
@@ -736,7 +736,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.logger.disable_file_logging()
 
             captured_stdout = StringIO()
-            with patch("src.mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
                 pipeline.logger.info("console-only")
                 pipeline.logger.result("history-only")
 
@@ -1057,7 +1057,7 @@ class PipelineHandlerTests(unittest.TestCase):
             block.register_function(boom_function, ["out"])
 
             captured_stdout = StringIO()
-            with patch("src.mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
                 with self.assertRaises(ExecutionError):
                     pipeline.run_all()
 
@@ -1125,7 +1125,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.logger.set_traceback_console_render(False)
 
             captured_stdout = StringIO()
-            with patch("src.mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
                 with self.assertRaises(ExecutionError):
                     pipeline.run_all()
 
@@ -1143,7 +1143,7 @@ class PipelineHandlerTests(unittest.TestCase):
             pipeline.logger.set_show_traceback_locals(True)
 
             captured_stdout = StringIO()
-            with patch("src.mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
                 with self.assertRaises(ExecutionError):
                     pipeline.run_all()
             self.assertIn("secret_value = 42", strip_ansi(captured_stdout.getvalue()))
@@ -1155,7 +1155,7 @@ class PipelineHandlerTests(unittest.TestCase):
             block.register_function(boom_function, ["out"])
 
             captured_stdout = StringIO()
-            with patch("src.mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
                 with self.assertRaises(ExecutionError):
                     pipeline.run_all()
             self.assertNotIn("secret_value = 42", strip_ansi(captured_stdout.getvalue()))
@@ -2483,8 +2483,8 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(len(parquet_files), 2)
 
     def test_atom_child_pipeline_is_atom_pipeline_subclass_after_load(self) -> None:
-        from src.mlpipelineholder.execution.atom_pipeline import AtomPipeline
-        from src.mlpipelineholder.pipeline_holder import PipelineHolder
+        from mlpipelineholder.execution.atom_pipeline import AtomPipeline
+        from mlpipelineholder.pipeline_holder import PipelineHolder
 
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -2528,7 +2528,7 @@ class PipelineHandlerTests(unittest.TestCase):
             )
 
             with patch(
-                "src.mlpipelineholder.integrations.dataframe._DASK_TARGET_PARTITION_SIZE",
+                "mlpipelineholder.integrations.dataframe._DASK_TARGET_PARTITION_SIZE",
                 "1KiB",
             ):
                 pipeline.run_all()
@@ -4196,7 +4196,7 @@ class PipelineHandlerTests(unittest.TestCase):
             def fail_dump(*args: object, **kwargs: object) -> None:
                 raise OSError("simulated disk full")
 
-            with patch("src.mlpipelineholder.pipeline_holder.pickle.dump", side_effect=fail_dump):
+            with patch("mlpipelineholder.pipeline_holder.pickle.dump", side_effect=fail_dump):
                 with self.assertRaises(OSError):
                     pipeline.save_pipeline(save_dir)
 

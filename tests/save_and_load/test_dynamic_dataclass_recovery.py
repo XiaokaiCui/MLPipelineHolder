@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from typing import Protocol
 import unittest
 
-from src.mlpipelineholder import PipelineHandler
+from mlpipelineholder import PipelineHandler
 
 
 class DynamicConfig(Protocol):

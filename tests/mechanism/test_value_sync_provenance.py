@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import ExecutionBlock, PipelineHandler, ResolutionError
+from mlpipelineholder import ExecutionBlock, PipelineHandler, ResolutionError
 
 
 def produce_value(seed: int) -> int:

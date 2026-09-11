@@ -6,15 +6,15 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import MagicMock
 
-from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.persistence.backup.recovery import (
+from mlpipelineholder import PipelineHandler
+from mlpipelineholder.persistence.backup.recovery import (
     ImpactConfirmation,
     OwnerKind,
     SlotKind,
     confirm_recovery_impact,
     discover_owned_variable_slots,
 )
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 @dataclass

@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from src.mlpipelineholder import ExecutionBlock, PipelineHandler, ResolutionError
+from mlpipelineholder import ExecutionBlock, PipelineHandler, ResolutionError
 
 
 def produce_seed(seed: int) -> int:
@@ -504,7 +504,7 @@ def produce_lock() -> _Lock:
 
 
 def produce_pointer() -> object:
-    from src.mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
+    from mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
 
     return OutputPointer(OutputAddress("pipeline", "producer", "value"))
 
@@ -556,7 +556,7 @@ class CrossCuttingVisibilityTests(unittest.TestCase):
                     side_effect=AssertionError("artifact loaded"),
                 ),
                 mock.patch(
-                    "src.mlpipelineholder.pipeline_holder.resolve_pointer_chain",
+                    "mlpipelineholder.pipeline_holder.resolve_pointer_chain",
                     side_effect=AssertionError("pointer resolved"),
                 ),
                 mock.patch.object(
@@ -565,7 +565,7 @@ class CrossCuttingVisibilityTests(unittest.TestCase):
                     side_effect=AssertionError("recovered"),
                 ),
                 mock.patch(
-                    "src.mlpipelineholder.persistence.backup.service.recover_variable_from_backup",
+                    "mlpipelineholder.persistence.backup.service.recover_variable_from_backup",
                     side_effect=AssertionError("recovered (service)"),
                 ),
             ):

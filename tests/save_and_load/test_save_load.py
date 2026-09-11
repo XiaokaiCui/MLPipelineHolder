@@ -9,8 +9,8 @@ import shutil
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
-from src.mlpipelineholder.core.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
+from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
+from mlpipelineholder.core.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
 
 
 @dataclass

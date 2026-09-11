@@ -9,8 +9,8 @@ from tempfile import TemporaryDirectory
 from typing import Callable, Protocol, cast
 import unittest
 
-from src.mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 class BackupSnapshotProtocol(Protocol):
@@ -31,7 +31,7 @@ ReadBackupSnapshot = Callable[[PipelineHandler], BackupSnapshotProtocol]
 
 read_backup_snapshot = cast(
     ReadBackupSnapshot,
-    import_module("src.mlpipelineholder.persistence.backup.snapshot").read_backup_snapshot,
+    import_module("mlpipelineholder.persistence.backup.snapshot").read_backup_snapshot,
 )
 
 

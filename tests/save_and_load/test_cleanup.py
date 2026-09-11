@@ -5,8 +5,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder import PipelineHandler
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_dict() -> dict[str, int]:

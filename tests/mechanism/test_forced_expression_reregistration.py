@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import PipelineHandler
+from mlpipelineholder import PipelineHandler
 
 
 def consume(value: int) -> int:

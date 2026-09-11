@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import PipelineHandler, RegistrationError
+from mlpipelineholder import PipelineHandler, RegistrationError
 
 
 def select_parameter_branch(joint_use_median_param: bool = True) -> str:

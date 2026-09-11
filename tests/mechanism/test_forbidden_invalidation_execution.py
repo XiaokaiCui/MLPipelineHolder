@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder import PipelineHandler
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_early_value() -> int:

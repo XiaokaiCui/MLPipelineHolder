@@ -4,13 +4,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import (
+from mlpipelineholder import (
     ExecutionBlock,
     PipelineHandler,
     RegistrationError,
     ResolutionError,
 )
-from src.mlpipelineholder.state.output_pointers import (
+from mlpipelineholder.state.output_pointers import (
     OutputAddress,
     OutputPointer,
     PointerResolutionError,

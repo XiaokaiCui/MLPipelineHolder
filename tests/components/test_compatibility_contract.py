@@ -29,26 +29,17 @@ LEGACY_FLAT_MODULES = (
 )
 
 CANONICAL_IMPORTS = (
-    ("src.mlpipelineholder.core.models", "ArtifactRecord"),
-    ("src.mlpipelineholder.execution.block", "ExecutionBlock"),
-    ("src.mlpipelineholder.execution.gate_block", "GateBlock"),
-    ("src.mlpipelineholder.state.output_pointers", "OutputPointer"),
-    ("src.mlpipelineholder.persistence.artifacts.store", "ArtifactStore"),
-    ("src.mlpipelineholder.presentation.logger", "PipelineLogger"),
+    ("mlpipelineholder.core.models", "ArtifactRecord"),
+    ("mlpipelineholder.execution.block", "ExecutionBlock"),
+    ("mlpipelineholder.execution.gate_block", "GateBlock"),
+    ("mlpipelineholder.state.output_pointers", "OutputPointer"),
+    ("mlpipelineholder.persistence.artifacts.store", "ArtifactStore"),
+    ("mlpipelineholder.presentation.logger", "PipelineLogger"),
 )
 
 
 class CompatibilityContractTests(unittest.TestCase):
-    def test_root_alias_identity_for_src_root(self) -> None:
-        from src.mlpipelineholder import PipelineHandler, PipelineHolder
-
-        self.assertIs(PipelineHandler, PipelineHolder)
-
-    def test_root_alias_identity_for_public_root(self) -> None:
-        try:
-            import mlpipelineholder
-        except ModuleNotFoundError:
-            self.skipTest("public package name is not importable in this environment")
+    def test_root_alias_identity(self) -> None:
         from mlpipelineholder import PipelineHandler, PipelineHolder
 
         self.assertIs(PipelineHandler, PipelineHolder)
@@ -63,17 +54,16 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_legacy_flat_modules_are_intentionally_absent(self) -> None:
         for legacy_name in LEGACY_FLAT_MODULES:
-            for root in ("src.mlpipelineholder", "mlpipelineholder"):
-                module_name = f"{root}.{legacy_name}"
-                self.assertIsNone(
-                    importlib.util.find_spec(module_name),
-                    f"{module_name} should have been removed in 0.3.10",
-                )
+            module_name = f"mlpipelineholder.{legacy_name}"
+            self.assertIsNone(
+                importlib.util.find_spec(module_name),
+                f"{module_name} should have been removed in 0.3.10",
+            )
 
     def test_legacy_unpickle_map_resolves_canonical_classes(self) -> None:
-        from src.mlpipelineholder.core.models import ArtifactRecord
-        from src.mlpipelineholder.persistence.pickle_io import _MissingClassUnpickler
-        from src.mlpipelineholder.pipeline_holder import PipelineHolder
+        from mlpipelineholder.core.models import ArtifactRecord
+        from mlpipelineholder.persistence.pickle_io import _MissingClassUnpickler
+        from mlpipelineholder.pipeline_holder import PipelineHolder
 
         unpickler = _MissingClassUnpickler(BytesIO(b""))
         self.assertIs(
@@ -82,6 +72,15 @@ class CompatibilityContractTests(unittest.TestCase):
         )
         self.assertIs(
             unpickler.find_class("mlpipelineholder.pipeline_handler", "PipelineHolder"),
+            PipelineHolder,
+        )
+        # Pipelines saved while the package was imported as src.mlpipelineholder still load.
+        self.assertIs(
+            unpickler.find_class("src.mlpipelineholder.models", "ArtifactRecord"),
+            ArtifactRecord,
+        )
+        self.assertIs(
+            unpickler.find_class("src.mlpipelineholder.pipeline_handler", "PipelineHolder"),
             PipelineHolder,
         )
 
