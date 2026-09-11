@@ -34,7 +34,7 @@ from .persistence.cleanup import (
     _delete_saved_path,
     _referenced_payload_artifact_paths,
 )
-from .persistence.payloads import PayloadMixin, _register_payloads_holder_base
+from .persistence.payloads import PayloadMixin
 from .persistence.pickle_io import (
     _MissingMainClassPlaceholder,
     atomic_pickle_dump,
@@ -66,7 +66,7 @@ from .exceptions import (
     ResolutionError,
 )
 from .execution.arguments import ArgumentMixin
-from .execution.engine import EngineMixin, _register_engine_holder_base
+from .execution.engine import EngineMixin
 from .execution.function_registry import (
     _values_equal,
     callable_signature,
@@ -75,13 +75,9 @@ from .execution.function_registry import (
 )
 from .execution.gate_block import GateBlock, _GateStatusCache
 from .execution.atom_registry import atom_pipeline_class
-from .execution.registration import (
-    AtomRegistrationMixin,
-    RegistrationMixin,
-    _register_registration_holder_base,
-)
+from .execution.registration import AtomRegistrationMixin, RegistrationMixin
 from .presentation.print_capture import PrintCaptureMixin
-from .presentation.description import DescriptionMixin, _register_holder_base
+from .presentation.description import DescriptionMixin
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
 from .core.base import PipelineBase
@@ -2585,7 +2581,3 @@ class PipelineHolder(
 
 
 PipelineHandler = PipelineHolder
-_register_holder_base(PipelineHolder)
-_register_registration_holder_base(PipelineHolder)
-_register_engine_holder_base(PipelineHolder)
-_register_payloads_holder_base(PipelineHolder)

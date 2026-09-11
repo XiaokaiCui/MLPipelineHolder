@@ -33,16 +33,11 @@ from ..state.output_pointers import OutputAddress, OutputPointer
 from .artifacts.serializers import choose_serializer
 from .artifacts.store import ArtifactStore
 
-_holder_base: type | None = None
-
-
-def _register_payloads_holder_base(holder_base: type) -> None:
-    global _holder_base
-    _holder_base = holder_base
+from ..core.base import PipelineBase
 
 
 def _is_child_pipeline(node: object) -> bool:
-    return _holder_base is not None and isinstance(node, _holder_base)
+    return isinstance(node, PipelineBase)
 
 
 class PayloadMixin:
