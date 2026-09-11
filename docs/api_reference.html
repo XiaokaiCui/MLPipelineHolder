@@ -157,7 +157,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <nav class="tocbar">
   <a href="#overview">Overview</a>
   <a href="#toc">Index</a>
-  <a href="#pipelinehandler">PipelineHandler</a>
+  <a href="#pipelineholder">PipelineHolder</a>
+  <a href="#atompipeline">AtomPipeline</a>
   <a href="#executionblock">ExecutionBlock</a>
   <a href="#gateblock">GateBlock</a>
   <a href="#pipelinelogger">PipelineLogger</a>
@@ -181,7 +182,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <div class="example">
   <div class="example-title">Import the public API</div>
 <pre>from mlpipelineholder import (
-    PipelineHandler,
+    PipelineHolder,
+    AtomPipeline,
     ExecutionBlock,
     GateBlock,
     PipelineLogger,
@@ -193,12 +195,23 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     rename_args,
 )</pre>
 </div>
+<p>
+  <code>PipelineHolder</code> is the canonical class name. <code>PipelineHandler</code> remains available as an
+  alias of the same class, so notebooks written before the rename keep working unchanged.
+</p>
+<p>
+  The implementation is organised into subpackages (<code>core</code>, <code>execution</code>, <code>state</code>,
+  <code>persistence</code>, <code>integrations</code>, <code>presentation</code>). Only the top-level package names
+  are public API. Pipelines saved by earlier releases still load: historical flat module names are mapped to their
+  current homes while unpickling, so no manual migration is needed.
+</p>
 
 <h2 class="section" id="toc">Index</h2>
 <div id="toc">
   <ul>
     <li class="toc-group">Core pipeline</li>
-    <li><a class="anchor" href="#pipelinehandler">PipelineHandler</a></li>
+    <li><a class="anchor" href="#pipelineholder">PipelineHolder</a></li>
+    <li><a class="anchor" href="#atompipeline">AtomPipeline</a></li>
     <li><a class="anchor" href="#executionblock">ExecutionBlock</a></li>
     <li><a class="anchor" href="#gateblock">GateBlock</a></li>
     <li class="toc-group">Logging</li>
@@ -228,15 +241,16 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </div>
 
 <!-- ================================================================ -->
-<h2 class="section" id="pipelinehandler">PipelineHandler</h2>
+<h2 class="section" id="pipelineholder">PipelineHolder</h2>
 
-<h3 class="class-name" id="PipelineHandler">PipelineHandler</h3>
+<h3 class="class-name" id="PipelineHolder">PipelineHolder</h3>
 <p class="class-desc">
   The central class that owns configuration, values, child pipelines, execution, save/load,
   and logging. Construct one per pipeline scope, then attach blocks and child pipelines.
+  <code>PipelineHandler</code> is an alias of this class.
 </p>
 <div class="sig">
-<span class="kw">class</span> mlpipelineholder.PipelineHandler(
+<span class="kw">class</span> mlpipelineholder.PipelineHolder(
   registration_name: <span class="arg">str</span>,
   configuration: <span class="arg">Any | None</span> = None,
   local_folder_path: <span class="arg">str | Path | None</span> = None,
@@ -279,33 +293,46 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.optuna_studies_db_path">optuna_studies_db_path</h4>
+<h4 class="method-name" id="PipelineHolder.config">config</h4>
+<div class="sig"><span class="kw">property</span> config -&gt; <span class="ret">Any</span></div>
+<p>
+  The configuration object this pipeline was created with: a pure dataclass instance, a dictionary, or a plain
+  object. Reading it returns the local configuration. Assigning to it replaces the whole local configuration in one
+  step; the assigned value must be a dataclass, dictionary, or object whose fields can be persisted.
+</p>
+<p>
+  An atom pipeline owns no configuration: reading <code>config</code> returns the direct parent's configuration
+  object, and assigning raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Change
+  parent configuration with the parent's <code>set_configs()</code> or <code>update_configs()</code> methods instead.
+</p>
+
+<h4 class="method-name" id="PipelineHolder.optuna_studies_db_path">optuna_studies_db_path</h4>
 <div class="sig"><span class="kw">property</span> optuna_studies_db_path -&gt; <span class="ret">Path</span></div>
 <p>Returns the dynamic default path <code>project_root / "optuna_studies.db"</code> for this non-atom pipeline. Reading the property does not create the database file. The path follows <code>project_root</code> when a temporary pipeline is relocated, a child is attached, or a saved project is loaded. Atom pipelines own no Optuna database path; their study outputs use the direct parent pipeline's database.</p>
 
-<h4 class="method-name" id="PipelineHandler.list_stored_objects">list_stored_objects()</h4>
+<h4 class="method-name" id="PipelineHolder.list_stored_objects">list_stored_objects()</h4>
 <div class="sig"><span class="kw">list_stored_objects</span>() -&gt; <span class="ret">pandas.DataFrame</span></div>
 <p>Returns one metadata row per root-stored object with columns <code>hash_id</code>, <code>object_name</code>, <code>object_type</code>, <code>object_description</code>, <code>created_at_utc</code>, and <code>last_modified_at_utc</code>. The timestamp columns are timezone-aware UTC values. This method requires pandas and raises <code>ImportError</code> when it is unavailable; install <code>mlpipelineholder[dataframe]</code>.</p>
 
-<h4 class="method-name" id="PipelineHandler.save_to_storage">save_to_storage()</h4>
+<h4 class="method-name" id="PipelineHolder.save_to_storage">save_to_storage()</h4>
 <div class="sig"><span class="kw">save_to_storage</span>(object_name: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_description: <span class="arg">str | None</span> = None) -&gt; <span class="ret">str</span></div>
-<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to pipeline argument resolution or execution, even when a stored name matches a configuration field, constant, or output.</p>
+<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to pipeline argument resolution or execution, even when a stored name matches a configuration field, constant, or output.</p>
 
-<h4 class="method-name" id="PipelineHandler.update_storage">update_storage()</h4>
+<h4 class="method-name" id="PipelineHolder.update_storage">update_storage()</h4>
 <div class="sig"><span class="kw">update_storage</span>(hash_id: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_name: <span class="arg">str | None</span> = None, object_description: <span class="arg">str | None</span> = None, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Replaces the value selected by <code>hash_id</code>, updates its object type and UTC modification timestamp, and optionally replaces its name or description. With <code>to_disk=False</code>, ordinary-value persistence waits for the next pipeline save; <code>to_disk=True</code> writes a new managed artifact immediately. Study updates are always eager and retain the storage record's existing physical Study name even when the record name or incoming Study name changes.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_from_storage">get_from_storage()</h4>
+<h4 class="method-name" id="PipelineHolder.get_from_storage">get_from_storage()</h4>
 <div class="sig"><span class="kw">get_from_storage</span>(hash_id: <span class="arg">str | None</span> = None, object_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">Any</span></div>
 <p>Loads and returns one stored object. When both selectors are supplied, <code>hash_id</code> takes precedence. An unknown selector, no selector, or an <code>object_name</code> shared by multiple records raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>.</p>
 
-<h4 class="method-name" id="PipelineHandler.remove_from_storage">remove_from_storage()</h4>
+<h4 class="method-name" id="PipelineHolder.remove_from_storage">remove_from_storage()</h4>
 <div class="sig"><span class="kw">remove_from_storage</span>(hash_id: <span class="arg">str | None</span> = None, object_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
 <p>Removes one selected record and deletes its managed artifact. Selection follows <code>get_from_storage()</code>: hash ID takes precedence and duplicated names are ambiguous.</p>
 
 <p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
 
-<h4 class="method-name" id="PipelineHandler.add_block">add_block()</h4>
+<h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
 <div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
 <div class="field-label">Parameters</div>
@@ -316,9 +343,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </ul>
 <p>Returns the new <code>ExecutionBlock</code>, an identical existing expression block during a forced re-registration, or <code>None</code> when non-strict registration is skipped. Invalid names and strict-mode conflicts raise <code>RegistrationError</code>.</p>
 
-<h4 class="method-name" id="PipelineHandler.add_child_pipeline">add_child_pipeline()</h4>
-<div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHandler</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHandler | None</span></div>
-<p>Attaches an existing <code>PipelineHandler</code> as an immediate child node. The child is relocated under this pipeline's project tree, inherits the root's strict and memory settings, and participates in parent visibility and execution ordering.</p>
+<h4 class="method-name" id="PipelineHolder.add_child_pipeline">add_child_pipeline()</h4>
+<div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHolder</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHolder | None</span></div>
+<p>Attaches an existing <code>PipelineHolder</code> as an immediate child node. The child is relocated under this pipeline's project tree, inherits the root's strict and memory settings, and participates in parent visibility and execution ordering.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>child_pipeline</code>: detached or re-attachable pipeline to place under this parent; a pipeline cannot attach itself.</li>
@@ -329,7 +356,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>Returns the attached child, or <code>None</code> when a non-forced duplicate is skipped.</p>
 <p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the child's declared output names conflict with visible configuration fields or pipeline constants anywhere in the tree.</p>
 
-<h4 class="method-name" id="PipelineHandler.create_atom_child_pipeline">create_atom_child_pipeline()</h4>
+<h4 class="method-name" id="PipelineHolder.create_atom_child_pipeline">create_atom_child_pipeline()</h4>
 <div class="sig"><span class="kw">create_atom_child_pipeline</span>(
   child_name: <span class="arg">str</span>,
   execution_priority: <span class="arg">float</span>,
@@ -368,19 +395,19 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>param_mapping</code>: preferred keyword-only parameter-to-pipeline-name mapping.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
 </ul>
-<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable.</p>
+<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
 <p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
-<h4 class="method-name" id="PipelineHandler.run_all">run_all()</h4>
+<h4 class="method-name" id="PipelineHolder.run_all">run_all()</h4>
 <div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
 <p>Executes every node in the pipeline tree in ascending priority order. Returns a <a class="anchor" href="#runrecord"><code>RunRecord</code></a> summarising the run.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.run_until">run_until()</h4>
+<h4 class="method-name" id="PipelineHolder.run_until">run_until()</h4>
 <div class="sig"><span class="kw">run_until</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
 <p>Executes all nodes with priority lower than the target node's priority. Supports nested paths, for example <code>run_until("modeling_pipeline", "predictor_components")</code>.</p>
 <div class="field-label">Parameters</div>
@@ -389,7 +416,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>overrides</code>: optional inputs used only for this run.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.run_from">run_from()</h4>
+<h4 class="method-name" id="PipelineHolder.run_from">run_from()</h4>
 <div class="sig"><span class="kw">run_from</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
 <p>Executes the target node and everything after it. Outputs produced strictly before the target remain visible, the target may consume its own previous output, and outputs from later nodes are hidden until those nodes rerun. These rules apply recursively to nested paths such as <code>run_from("modeling_pipeline", "predictor_training_pipeline")</code>. Previous pointer-backed and disk-backed target inputs are materialized before invalidation, so nested restarts do not leave dangling pointers or delete an upstream artifact that the target still needs.</p>
 <div class="field-label">Parameters</div>
@@ -398,7 +425,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>overrides</code>: optional inputs used only for this partial run.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.run_block">run_block()</h4>
+<h4 class="method-name" id="PipelineHolder.run_block">run_block()</h4>
 <div class="sig"><span class="kw">run_block</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
 <p>Invalidates from the target's priority but executes only the selected block or child pipeline. Earlier outputs remain available; the target's previous outputs are materialized when needed.</p>
 <div class="field-label">Parameters</div>
@@ -407,22 +434,22 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>overrides</code>: optional inputs used only for this targeted run.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.get_value">get_value()</h4>
+<h4 class="method-name" id="PipelineHolder.get_value">get_value()</h4>
 <div class="sig"><span class="kw">get_value</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns a <em>produced value</em> visible to this pipeline (own outputs, upstream parent outputs, or descendant values). If the value is disk-backed, the true object is loaded and returned.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>variable_name</code>: visible produced-output name to resolve through provenance and any output-pointer chain.</li></ul>
-<p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names, and for names that are pipeline constants (use <a class="anchor" href="#PipelineHandler.get_constant_value"><code>get_constant_value()</code></a> instead).</p>
+<p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names, and for names that are pipeline constants (use <a class="anchor" href="#PipelineHolder.get_constant_value"><code>get_constant_value()</code></a> instead).</p>
 
-<h4 class="method-name" id="PipelineHandler.list_visible_output">list_visible_output()</h4>
+<h4 class="method-name" id="PipelineHolder.list_visible_output">list_visible_output()</h4>
 <div class="sig"><span class="kw">list_visible_output</span>() -&gt; <span class="ret">set[str]</span></div>
 <p>Returns a detached set of <em>produced output names</em> currently visible to this pipeline: its own and descendant outputs, plus produced outputs of upstream ancestors and earlier-priority siblings. Visibility is key-based and side-effect free: <code>None</code> values, disk-backed artifact records, output pointers, and restorable placeholders count while their stored key exists, without loading artifacts, resolving pointers, or materializing any value. Declared-but-unproduced and invalidated outputs are absent, and pipeline constants are never included. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
 
-<h4 class="method-name" id="PipelineHandler.has_visible_output">has_visible_output()</h4>
+<h4 class="method-name" id="PipelineHolder.has_visible_output">has_visible_output()</h4>
 <div class="sig"><span class="kw">has_visible_output</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
-<p>Reports whether <code>variable_name</code> is a currently visible produced output, using the same key-based collector as <a class="anchor" href="#PipelineHandler.list_visible_output"><code>list_visible_output()</code></a>. Never materializes values, loads artifacts, resolves pointers, or mutates state; returns <code>False</code> for unknown names.</p>
+<p>Reports whether <code>variable_name</code> is a currently visible produced output, using the same key-based collector as <a class="anchor" href="#PipelineHolder.list_visible_output"><code>list_visible_output()</code></a>. Never materializes values, loads artifacts, resolves pointers, or mutates state; returns <code>False</code> for unknown names.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_node_output">get_node_output()</h4>
+<h4 class="method-name" id="PipelineHolder.get_node_output">get_node_output()</h4>
 <div class="sig"><span class="kw">get_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns one materialized output from an immediate block or atom child. Output pointers are followed to the terminal owner and disk-backed values are loaded. Ordinary child-pipeline containers are rejected because their internal producers are not one immediate public output address.</p>
 <div class="field-label">Parameters</div>
@@ -432,9 +459,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </ul>
 <p>An atom with one internal producer returns that value directly; if multiple internal priorities produced the same name, the return value is a <code>dict[float, Any]</code> keyed by internal priority. Unknown nodes and missing outputs raise <code>ResolutionError</code>.</p>
 
-<h4 class="method-name" id="PipelineHandler.set_node_output">set_node_output()</h4>
+<h4 class="method-name" id="PipelineHolder.set_node_output">set_node_output()</h4>
 <div class="sig"><span class="kw">set_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
-<p>Replaces an already-produced output of one named immediate block or atom child. Unlike <a class="anchor" href="#PipelineHandler.set_value"><code>set_value()</code></a>, this method does not select the currently visible producer when several nodes produced the same output name; it changes only <code>node_name</code>'s slot and then recomputes the visible winner by execution priority.</p>
+<p>Replaces an already-produced output of one named immediate block or atom child. Unlike <a class="anchor" href="#PipelineHolder.set_value"><code>set_value()</code></a>, this method does not select the currently visible producer when several nodes produced the same output name; it changes only <code>node_name</code>'s slot and then recomputes the visible winner by execution priority.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>node_name</code>: immediate block or atom-child name in this pipeline.</li>
@@ -445,22 +472,22 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </ul>
 <p>For an atom, the replacement is written to its internal authoritative producer and synchronized through the parent tree. An atom with multiple internal producers for the same name is rejected as ambiguous. Ordinary child-pipeline containers, unknown immediate nodes, outputs that have not been produced, and output-pointer slots raise <code>ResolutionError</code> without changing state. Disk-backing is retained when the selected slot currently contains an artifact.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_constant_value">get_constant_value()</h4>
+<h4 class="method-name" id="PipelineHolder.get_constant_value">get_constant_value()</h4>
 <div class="sig"><span class="kw">get_constant_value</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
-<p>Returns a <em>pipeline constant</em> set via <a class="anchor" href="#PipelineHandler.set_constant_value"><code>set_constant_value()</code></a>, resolving the nearest definition in the visibility chain: own constant, then earlier-priority sibling, then parent, then grandparent. Disk-backed values are loaded from disk.</p>
+<p>Returns a <em>pipeline constant</em> set via <a class="anchor" href="#PipelineHolder.set_constant_value"><code>set_constant_value()</code></a>, resolving the nearest definition in the visibility chain: own constant, then earlier-priority sibling, then parent, then grandparent. Disk-backed values are loaded from disk.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>variable_name</code>: constant name to resolve from the nearest visible owner.</li></ul>
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> if no such constant exists.</p>
 
-<h4 class="method-name" id="PipelineHandler.list_visible_constant">list_visible_constant()</h4>
+<h4 class="method-name" id="PipelineHolder.list_visible_constant">list_visible_constant()</h4>
 <div class="sig"><span class="kw">list_visible_constant</span>() -&gt; <span class="ret">set[str]</span></div>
-<p>Returns a detached set of <em>pipeline constant names</em> visible to this pipeline: its own constants plus ancestor and earlier-priority sibling constants. Later siblings and descendant-owned constants are excluded, matching <a class="anchor" href="#PipelineHandler.get_constant_value"><code>get_constant_value()</code></a> scope. Presence is key-based and side-effect free: <code>None</code> and disk-backed values count without loading or materialization. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
+<p>Returns a detached set of <em>pipeline constant names</em> visible to this pipeline: its own constants plus ancestor and earlier-priority sibling constants. Later siblings and descendant-owned constants are excluded, matching <a class="anchor" href="#PipelineHolder.get_constant_value"><code>get_constant_value()</code></a> scope. Presence is key-based and side-effect free: <code>None</code> and disk-backed values count without loading or materialization. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
 
-<h4 class="method-name" id="PipelineHandler.has_visible_constant">has_visible_constant()</h4>
+<h4 class="method-name" id="PipelineHolder.has_visible_constant">has_visible_constant()</h4>
 <div class="sig"><span class="kw">has_visible_constant</span>(variable_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
-<p>Reports whether <code>variable_name</code> is a currently visible constant, using the same collector as <a class="anchor" href="#PipelineHandler.list_visible_constant"><code>list_visible_constant()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
+<p>Reports whether <code>variable_name</code> is a currently visible constant, using the same collector as <a class="anchor" href="#PipelineHolder.list_visible_constant"><code>list_visible_constant()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
 
-<h4 class="method-name" id="PipelineHandler.set_constant_value">set_constant_value()</h4>
+<h4 class="method-name" id="PipelineHolder.set_constant_value">set_constant_value()</h4>
 <div class="sig"><span class="kw">set_constant_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Creates or replaces a pipeline constant. The constant is visible to this pipeline, its descendants, and downstream siblings through the parent visibility model.</p>
 <div class="field-label">Parameters</div>
@@ -481,9 +508,9 @@ rate = pipeline.get_constant_value("learning_rate")
 pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre>
 </div>
 
-<h4 class="method-name" id="PipelineHandler.set_value">set_value()</h4>
+<h4 class="method-name" id="PipelineHolder.set_value">set_value()</h4>
 <div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
-<p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet). When several nodes produced the same name, the currently visible winning producer is updated; use <a class="anchor" href="#PipelineHandler.set_node_output"><code>set_node_output()</code></a> to select a specific immediate block or atom.</p>
+<p>Updates an existing produced value, or injects a value for a declared-but-cleared produced name (a name declared as an output by a block that has not produced it yet). When several nodes produced the same name, the currently visible winning producer is updated; use <a class="anchor" href="#PipelineHolder.set_node_output"><code>set_node_output()</code></a> to select a specific immediate block or atom.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>variable_name</code>: existing or declared produced-output name to assign.</li>
@@ -495,7 +522,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>If the selected slot is an output pointer, <code>set_value()</code> raises <code>ResolutionError</code> without changing state. The message identifies the terminal <code>pipeline.node.output</code> that stores the real object and tells the caller which pipeline should receive <code>set_value()</code> instead.</p>
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produces the name registered it with <code>save_to_disk</code>, the value is saved to disk automatically, otherwise it stays in memory.</p>
 
-<h4 class="method-name" id="PipelineHandler.update_value">update_value()</h4>
+<h4 class="method-name" id="PipelineHolder.update_value">update_value()</h4>
 <div class="sig"><span class="kw">update_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
 <p>Updates an existing produced value only. When several nodes produced the same name, the currently visible winning producer is updated. Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
 <div class="field-label">Parameters</div>
@@ -507,7 +534,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 </ul>
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produced the name registered it with <code>save_to_disk</code>, the updated value is saved to disk automatically (a non-serializable value raises <code>PersistenceError</code>), otherwise it stays in memory.</p>
 
-<h4 class="method-name" id="PipelineHandler.set_config">set_config()</h4>
+<h4 class="method-name" id="PipelineHolder.set_config">set_config()</h4>
 <div class="sig"><span class="kw">set_config</span>(config_name: <span class="arg">str</span>, new_config_value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
 <p>Adds or updates one configuration field. Writes that would conflict with declared output names or manual values are skipped. Atom pipelines own no configuration, so calling this method on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
@@ -516,13 +543,13 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>new_config_value</code>: replacement value for that field.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.set_configs">set_configs()</h4>
+<h4 class="method-name" id="PipelineHolder.set_configs">set_configs()</h4>
 <div class="sig"><span class="kw">set_configs</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
 <p>Adds or updates multiple configuration fields in one call. This is the plural form of <code>set_config()</code> and applies the same validation to every mapping entry. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: local configuration names and replacement values to merge into this pipeline.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.update_config">update_config()</h4>
+<h4 class="method-name" id="PipelineHolder.update_config">update_config()</h4>
 <div class="sig"><span class="kw">update_config</span>(config_name: <span class="arg">str</span>, new_config_value: <span class="arg">Any</span>) -&gt; <span class="ret">None</span></div>
 <p>Updates one existing local configuration field. Unlike <code>set_config()</code>, this method rejects an unknown field rather than creating it. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
@@ -531,41 +558,41 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>new_config_value</code>: replacement value for that field.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.update_configs">update_configs()</h4>
+<h4 class="method-name" id="PipelineHolder.update_configs">update_configs()</h4>
 <div class="sig"><span class="kw">update_configs</span>(overrides: <span class="arg">dict[str, Any]</span>) -&gt; <span class="ret">None</span></div>
 <p>Updates multiple existing configuration fields. This is the plural form of <code>update_config()</code>; every unknown field is rejected rather than created. Calling it on an atom raises <code>RegistrationError</code>; call it on the parent instead.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: existing local configuration names and their replacement values.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.get_config">get_config()</h4>
+<h4 class="method-name" id="PipelineHolder.get_config">get_config()</h4>
 <div class="sig"><span class="kw">get_config</span>(config_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns one local or inherited configuration value. This method mirrors <code>get_config_value()</code>, including its placeholder and unknown-field errors.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>config_name</code>: local or inherited configuration field to resolve.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.get_config_value">get_config_value()</h4>
+<h4 class="method-name" id="PipelineHolder.get_config_value">get_config_value()</h4>
 <div class="sig"><span class="kw">get_config_value</span>(field_name: <span class="arg">str</span>) -&gt; <span class="ret">Any</span></div>
 <p>Returns a single configuration value visible to this pipeline, including inherited parent config values. Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> if the key does not exist.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>field_name</code>: local or inherited configuration field to resolve.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.get_full_config">get_full_config()</h4>
+<h4 class="method-name" id="PipelineHolder.get_full_config">get_full_config()</h4>
 <div class="sig"><span class="kw">get_full_config</span>() -&gt; <span class="ret">dict[str, Any]</span></div>
 <p>Returns the visible merged configuration for this pipeline, including parent configs recursively. Local config normally overrides same-named parent values. An atom owns no local configuration and returns its parent's current visible configuration.</p>
 
-<h4 class="method-name" id="PipelineHandler.list_visible_config">list_visible_config()</h4>
+<h4 class="method-name" id="PipelineHolder.list_visible_config">list_visible_config()</h4>
 <div class="sig"><span class="kw">list_visible_config</span>() -&gt; <span class="ret">set[str]</span></div>
 <p>Returns a detached set of <em>configuration field names</em> visible to this pipeline: its local plus ancestor config keys. Sibling and descendant configs are excluded. An atom delegates to its parent and returns the parent's current visible config names. Presence is key-based and side-effect free: keys whose value is <code>None</code> count, and no value is read or materialized. Set ordering is unspecified; mutating the returned set does not affect later calls.</p>
 
-<h4 class="method-name" id="PipelineHandler.has_visible_config">has_visible_config()</h4>
+<h4 class="method-name" id="PipelineHolder.has_visible_config">has_visible_config()</h4>
 <div class="sig"><span class="kw">has_visible_config</span>(config_name: <span class="arg">str</span>) -&gt; <span class="ret">bool</span></div>
-<p>Reports whether <code>config_name</code> is a currently visible configuration field, using the same collector as <a class="anchor" href="#PipelineHandler.list_visible_config"><code>list_visible_config()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
+<p>Reports whether <code>config_name</code> is a currently visible configuration field, using the same collector as <a class="anchor" href="#PipelineHolder.list_visible_config"><code>list_visible_config()</code></a>. Never materializes values or mutates state; returns <code>False</code> for unknown names.</p>
 
-<h4 class="method-name" id="PipelineHandler.config_as_dict">config_as_dict()</h4>
+<h4 class="method-name" id="PipelineHolder.config_as_dict">config_as_dict()</h4>
 <div class="sig"><span class="kw">config_as_dict</span>() -&gt; <span class="ret">dict[str, Any]</span></div>
 <p>Returns the local configuration as a plain dictionary (without parent inheritance). For an atom, this reflects its direct parent's local configuration because the atom owns none.</p>
 
-<h4 class="method-name" id="PipelineHandler.save_pipeline">save_pipeline()</h4>
+<h4 class="method-name" id="PipelineHolder.save_pipeline">save_pipeline()</h4>
 <div class="sig"><span class="kw">save_pipeline</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None, *, verbose: <span class="arg">bool</span> = False, cleanup: <span class="arg">str</span> = "auto") -&gt; <span class="ret">Path</span></div>
 <p>Saves the pipeline project tree. Without <code>path</code>, saves to the current <code>project_root</code>. Passing a different path creates a restart-safe copy of the current project tree (including nested children and disk-backed artifacts) before writing fresh state. The target must not overlap the current project tree.</p>
 <div class="field-label">Parameters</div>
@@ -582,9 +609,9 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>When a <code>pipeline_backup_directory</code> is configured, the refreshed backup copy also receives the updated <code>history_logs/</code> folder. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
 <p>With <code>verbose=False</code> (the default) the advisory warnings emitted during saving are suppressed: the callable-reference notice and per-value placeholder warnings for unserialisable or non-importable values. Pass <code>verbose=True</code> to show them. Warnings unrelated to saving (registration, load, logger) are never suppressed.</p>
 
-<h4 class="method-name" id="PipelineHandler.save_project">save_project()</h4>
+<h4 class="method-name" id="PipelineHolder.save_project">save_project()</h4>
 <div class="sig"><span class="kw">save_project</span>(path: <span class="arg">str | Path | None</span> = None, save_log_to_file: <span class="arg">str | Path | None</span> = None, *, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">Path</span></div>
-<p>Compatibility alias for <a class="anchor" href="#PipelineHandler.save_pipeline"><code>save_pipeline()</code></a> using its default <code>cleanup="auto"</code> policy.</p>
+<p>Compatibility alias for <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> using its default <code>cleanup="auto"</code> policy.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path</code>: destination project root; <code>None</code> saves in place.</li>
@@ -592,8 +619,8 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>verbose</code>: expose advisory save warnings.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.load_pipeline">load_pipeline()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
+<h4 class="method-name" id="PipelineHolder.load_pipeline">load_pipeline()</h4>
+<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
 <p>Loads a saved pipeline project. The state payload, placeholders, and callable references are fully reconstructed in a temporary preflight first. Only after that succeeds may a non-canonical saved tree replace the canonical working directory; a preflight failure raises <code>PersistenceError</code> and leaves the existing working tree untouched.</p>
 <div class="field-label">Parameters</div>
 <ul>
@@ -607,9 +634,9 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 </ul>
 <p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
-<h4 class="method-name" id="PipelineHandler.load_project">load_project()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHandler</span></div>
-<p>Compatibility alias for <a class="anchor" href="#PipelineHandler.load_pipeline"><code>load_pipeline()</code></a>.</p>
+<h4 class="method-name" id="PipelineHolder.load_project">load_project()</h4>
+<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
+<p>Compatibility alias for <a class="anchor" href="#PipelineHolder.load_pipeline"><code>load_pipeline()</code></a>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path</code>: saved project root.</li>
@@ -618,7 +645,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>auto_resolve_placeholders</code>: rerun eligible placeholder producers during loading.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.recover_variable_from_backup">recover_variable_from_backup()</h4>
+<h4 class="method-name" id="PipelineHolder.recover_variable_from_backup">recover_variable_from_backup()</h4>
 <div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>, *, pipeline_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
 <p>Restores one current value from the latest complete in-place backup. Call on the root pipeline only. Updates in place and returns <code>None</code>.</p>
 <div class="field-label">Parameters</div>
@@ -632,13 +659,13 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li>Does not rerun or invalidate derived outputs.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.recover_config_from_backup">recover_config_from_backup()</h4>
+<h4 class="method-name" id="PipelineHolder.recover_config_from_backup">recover_config_from_backup()</h4>
 <div class="sig"><span class="kw">recover_config_from_backup</span>(name: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Restores one config field from the latest complete in-place backup. Call on the pipeline that locally owns the field. Descendants inherit the restored field through normal config visibility unless they define their own local override. Returns <code>None</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>name</code>: locally owned configuration field to restore from backup.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.add_gate_block">add_gate_block()</h4>
+<h4 class="method-name" id="PipelineHolder.add_gate_block">add_gate_block()</h4>
 <div class="sig"><span class="kw">add_gate_block</span>(function_or_path: <span class="arg">Any</span>, expected_value: <span class="arg">Any</span> = True, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">GateBlock</span></div>
 <p>Registers a gate block that runs a single boolean function before the rest of the pipeline. If the function does not return the expected value, the pipeline run is skipped.</p>
 <div class="field-label">Parameters</div>
@@ -648,9 +675,9 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>forced</code>: replace an existing gate when <code>True</code>.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.set_gate_block">set_gate_block()</h4>
+<h4 class="method-name" id="PipelineHolder.set_gate_block">set_gate_block()</h4>
 <div class="sig"><span class="kw">set_gate_block</span>(function_or_path: <span class="arg">Any</span>, expected_value: <span class="arg">Any</span> = True, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">GateBlock</span></div>
-<p>Alias for <a class="anchor" href="#PipelineHandler.add_gate_block"><code>add_gate_block()</code></a>.</p>
+<p>Alias for <a class="anchor" href="#PipelineHolder.add_gate_block"><code>add_gate_block()</code></a>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>function_or_path</code>: gate callable, import path, or config-field name.</li>
@@ -658,136 +685,136 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>forced</code>: replace an existing gate.</li>
 </ul>
 
-<h4 class="method-name" id="PipelineHandler.reset_gate_block">reset_gate_block()</h4>
+<h4 class="method-name" id="PipelineHolder.reset_gate_block">reset_gate_block()</h4>
 <div class="sig"><span class="kw">reset_gate_block</span>() -&gt; <span class="ret">None</span></div>
 <p>Clears the pipeline's gate block if one is registered.</p>
 
-<h4 class="method-name" id="PipelineHandler.define_expression_runtime">define_expression_runtime()</h4>
+<h4 class="method-name" id="PipelineHolder.define_expression_runtime">define_expression_runtime()</h4>
 <div class="sig"><span class="kw">define_expression_runtime</span>(code: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Registers import statements available to <code>register_expression()</code> blocks (for example <code>import math</code> or <code>from functools import partial</code>). Non-import statements, wildcard imports, and relative imports are rejected.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>code</code>: one or more absolute import statements to normalize, validate, persist, and expose to expressions.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.get_expression_runtime_code">get_expression_runtime_code()</h4>
+<h4 class="method-name" id="PipelineHolder.get_expression_runtime_code">get_expression_runtime_code()</h4>
 <div class="sig"><span class="kw">get_expression_runtime_code</span>() -&gt; <span class="ret">str | None</span></div>
 <p>Returns the normalized expression runtime code registered on the effective owner pipeline, or <code>None</code> if none is defined.</p>
 
-<h4 class="method-name" id="PipelineHandler.clear_expression_runtime">clear_expression_runtime()</h4>
+<h4 class="method-name" id="PipelineHolder.clear_expression_runtime">clear_expression_runtime()</h4>
 <div class="sig"><span class="kw">clear_expression_runtime</span>() -&gt; <span class="ret">None</span></div>
 <p>Clears the registered expression runtime code.</p>
 
-<h4 class="method-name" id="PipelineHandler.describe_pipeline">describe_pipeline()</h4>
+<h4 class="method-name" id="PipelineHolder.describe_pipeline">describe_pipeline()</h4>
 <div class="sig"><span class="kw">describe_pipeline</span>() -&gt; <span class="ret">str</span></div>
 <p>Returns a printable chart of the pipeline: block names, priorities, child hierarchy, gate block, function names, supplied argument names, output names, and a <code>*</code> marker for disk-backed outputs.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_output_conflicts">get_output_conflicts()</h4>
+<h4 class="method-name" id="PipelineHolder.get_output_conflicts">get_output_conflicts()</h4>
 <div class="sig"><span class="kw">get_output_conflicts</span>() -&gt; <span class="ret">dict[str, dict[str, list[str] | str]]</span></div>
 <p>Returns a structured report of duplicate output names across parent-level nodes, including the original producer and later overriding nodes. Declared output-pointer overrides remain visible in this report.</p>
 
-<h4 class="method-name" id="PipelineHandler.describe_output_conflicts">describe_output_conflicts()</h4>
+<h4 class="method-name" id="PipelineHolder.describe_output_conflicts">describe_output_conflicts()</h4>
 <div class="sig"><span class="kw">describe_output_conflicts</span>() -&gt; <span class="ret">str</span></div>
-<p>Returns a printable version of <a class="anchor" href="#PipelineHandler.get_output_conflicts"><code>get_output_conflicts()</code></a>.</p>
+<p>Returns a printable version of <a class="anchor" href="#PipelineHolder.get_output_conflicts"><code>get_output_conflicts()</code></a>.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_block">get_block()</h4>
+<h4 class="method-name" id="PipelineHolder.get_block">get_block()</h4>
 <div class="sig"><span class="kw">get_block</span>(block_name: <span class="arg">str</span>) -&gt; <span class="ret">ExecutionBlock</span></div>
 <p>Returns the registered block with the given name. Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name refers to a child pipeline or does not exist.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>block_name</code>: immediate execution-block name in this pipeline.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.get_child_pipeline">get_child_pipeline()</h4>
-<div class="sig"><span class="kw">get_child_pipeline</span>(pipeline_name: <span class="arg">str</span>) -&gt; <span class="ret">PipelineHandler</span></div>
+<h4 class="method-name" id="PipelineHolder.get_child_pipeline">get_child_pipeline()</h4>
+<div class="sig"><span class="kw">get_child_pipeline</span>(pipeline_name: <span class="arg">str</span>) -&gt; <span class="ret">PipelineHolder</span></div>
 <p>Returns the direct child pipeline with the given name. Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name refers to a block or does not exist.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>pipeline_name</code>: immediate child-pipeline name.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.list_child_pipeline_names">list_child_pipeline_names()</h4>
+<h4 class="method-name" id="PipelineHolder.list_child_pipeline_names">list_child_pipeline_names()</h4>
 <div class="sig"><span class="kw">list_child_pipeline_names</span>() -&gt; <span class="ret">list[str]</span></div>
 <p>Returns the names of direct child pipelines, ordered by execution priority.</p>
 
-<h4 class="method-name" id="PipelineHandler.remove_block">remove_block()</h4>
+<h4 class="method-name" id="PipelineHolder.remove_block">remove_block()</h4>
 <div class="sig"><span class="kw">remove_block</span>(block_name: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Removes an immediate execution block, erases its own outputs, repairs any surviving output-pointer chain, and normally invalidates affected consumers.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>block_name</code>: immediate block to remove; child-pipeline names and unknown names raise <code>RegistrationError</code>.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.list_declared_outputs">list_declared_outputs()</h4>
+<h4 class="method-name" id="PipelineHolder.list_declared_outputs">list_declared_outputs()</h4>
 <div class="sig"><span class="kw">list_declared_outputs</span>() -&gt; <span class="ret">set[str]</span></div>
 <p>Returns the set of output names declared by all nodes (blocks and child pipelines) registered on this pipeline.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_priority_group">get_priority_group()</h4>
+<h4 class="method-name" id="PipelineHolder.get_priority_group">get_priority_group()</h4>
 <div class="sig"><span class="kw">get_priority_group</span>(integer_priority: <span class="arg">int</span>) -&gt; <span class="ret">tuple[list[str], str | None]</span></div>
 <p>Returns a tuple of (node names in the priority group, executable node name or <code>None</code>). Parent-level float priorities such as <code>5.1</code>, <code>5.3</code>, and <code>5.9</code> all belong to group <code>5</code>; once one node in the group executes, later nodes are skipped.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>integer_priority</code>: integer group number whose immediate nodes and selected executable member should be reported.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.qualified_node_name">qualified_node_name()</h4>
+<h4 class="method-name" id="PipelineHolder.qualified_node_name">qualified_node_name()</h4>
 <div class="sig"><span class="kw">qualified_node_name</span>(node_name: <span class="arg">str</span>) -&gt; <span class="ret">str</span></div>
 <p>Returns the fully qualified name for a node (for example <code>"parent/child"</code>).</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>node_name</code>: immediate node name to append to this pipeline's full path.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.full_path">full_path()</h4>
+<h4 class="method-name" id="PipelineHolder.full_path">full_path()</h4>
 <div class="sig"><span class="kw">full_path</span>() -&gt; <span class="ret">str</span></div>
 <p>Returns the pipeline's full path within the attached tree.</p>
 
-<h4 class="method-name" id="PipelineHandler.set_log_level">set_log_level()</h4>
+<h4 class="method-name" id="PipelineHolder.set_log_level">set_log_level()</h4>
 <div class="sig"><span class="kw">set_log_level</span>(level: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Sets the pipeline logger level (for example <code>"info"</code>, <code>"debug"</code>, <code>"warning"</code>).</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>level</code>: case-insensitive logger level name; unknown levels raise <code>ValueError</code>.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.set_print_capture_mode">set_print_capture_mode()</h4>
+<h4 class="method-name" id="PipelineHolder.set_print_capture_mode">set_print_capture_mode()</h4>
 <div class="sig"><span class="kw">set_print_capture_mode</span>(mode: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Sets print capture for single-function blocks: <code>"tee"</code> (default) sends <code>print()</code> output to both stdout and the log; <code>"logger_only"</code> captures only into the log; <code>"off"</code> leaves normal behaviour unchanged.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>mode</code>: one of <code>"tee"</code>, <code>"logger_only"</code>, or <code>"off"</code>.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.set_torch_load_weights_only">set_torch_load_weights_only()</h4>
+<h4 class="method-name" id="PipelineHolder.set_torch_load_weights_only">set_torch_load_weights_only()</h4>
 <div class="sig"><span class="kw">set_torch_load_weights_only</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
 <p>Sets whether torch artifacts saved by this pipeline load with <code>torch.load(weights_only=True)</code>. The setting is stamped onto each artifact record at save time, persisted with the pipeline, and never inherited from a parent pipeline.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>enabled</code>: <code>True</code> to stamp future torch artifacts for weights-only loading.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.set_strict_mode">set_strict_mode()</h4>
+<h4 class="method-name" id="PipelineHolder.set_strict_mode">set_strict_mode()</h4>
 <div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
 <p>Enables or disables strict-mode registration validation for this pipeline and all attached descendants. In strict mode, violations of the strict registration checks (kwargs usage, gate config resolution, param_mapping and kwargs_dct value/key validation) raise <code>RegistrationError</code> instead of logging warnings. The setting is persisted with the pipeline.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>enabled</code>: strict-mode state propagated through the attached tree.</li></ul>
 
-<h4 class="method-name" id="PipelineHandler.forbid_invalidate_objects">forbid_invalidate_objects()</h4>
+<h4 class="method-name" id="PipelineHolder.forbid_invalidate_objects">forbid_invalidate_objects()</h4>
 <div class="sig"><span class="kw">forbid_invalidate_objects</span>() -&gt; <span class="ret">None</span></div>
 <p>Disables cascade invalidation after function, expression, block, atom, child-pipeline, or gate changes across the complete attached tree. The changed, removed, or replaced node's own outputs are always erased; cached outputs belonging to other upstream or downstream nodes are retained and may become stale or inconsistent. Study output groups still rotate to one latest concrete terminal with direct peer pointers. Gate changes have no own outputs to erase, so all existing computed outputs are retained. Only the root pipeline may call this method; a child call raises <code>RegistrationError</code>. A warning is logged only when the state actually changes. This setting is not persisted and must be enabled again after loading.</p>
 
-<h4 class="method-name" id="PipelineHandler.allow_invalidate_objects">allow_invalidate_objects()</h4>
+<h4 class="method-name" id="PipelineHolder.allow_invalidate_objects">allow_invalidate_objects()</h4>
 <div class="sig"><span class="kw">allow_invalidate_objects</span>() -&gt; <span class="ret">None</span></div>
 <p>Restores normal cascade invalidation for the complete attached tree. Only the root pipeline may call this method; a child call raises <code>RegistrationError</code>. A warning is logged only when the state actually changes. This setting is intentionally not persisted, so a loaded pipeline starts with cascade invalidation allowed.</p>
 
 <p>Attached descendants inherit the active root's setting. If a detached former root with cascade invalidation forbidden is attached under a new root, forbidden mode transfers to that new top root and synchronises every existing and newly attached subtree. A warning is logged only when this transfer actually changes the new root's state; attaching to an already-forbidden tree stays silent. An allowed former root never changes a destination tree that is already forbidden.</p>
 
-<h4 class="method-name" id="PipelineHandler.get_result_history">get_result_history()</h4>
+<h4 class="method-name" id="PipelineHolder.get_result_history">get_result_history()</h4>
 <div class="sig"><span class="kw">get_result_history</span>() -&gt; <span class="ret">list[str]</span></div>
 <p>Returns the in-memory <code>result(...)</code> history list.</p>
 
-<h4 class="method-name" id="PipelineHandler.print_result_history">print_result_history()</h4>
+<h4 class="method-name" id="PipelineHolder.print_result_history">print_result_history()</h4>
 <div class="sig"><span class="kw">print_result_history</span>() -&gt; <span class="ret">None</span></div>
 <p>Prints the in-memory result history.</p>
 
-<h4 class="method-name" id="PipelineHandler.clear_result_history">clear_result_history()</h4>
+<h4 class="method-name" id="PipelineHolder.clear_result_history">clear_result_history()</h4>
 <div class="sig"><span class="kw">clear_result_history</span>() -&gt; <span class="ret">None</span></div>
 <p>Clears the in-memory result history. Does not modify <code>metadata/pipeline.log</code>.</p>
 
-<h4 class="method-name" id="PipelineHandler.__str__">__str__() / __repr__()</h4>
+<h4 class="method-name" id="PipelineHolder.__str__">__str__() / __repr__()</h4>
 <div class="sig"><span class="kw">__str__</span>() -&gt; <span class="ret">str</span> &nbsp;&nbsp;&nbsp; <span class="kw">__repr__</span>() -&gt; <span class="ret">str</span></div>
-<p>Both render the pipeline chart produced by <a class="anchor" href="#PipelineHandler.describe_pipeline"><code>describe_pipeline()</code></a>, so <code>print(pipeline)</code> and <code>repr(pipeline)</code> are readable.</p>
+<p>Both render the pipeline chart produced by <a class="anchor" href="#PipelineHolder.describe_pipeline"><code>describe_pipeline()</code></a>, so <code>print(pipeline)</code> and <code>repr(pipeline)</code> are readable.</p>
 
 <div class="example">
   <div class="example-title">Example: build, run, and inspect</div>
-<pre>from mlpipelineholder import PipelineHandler
+<pre>from mlpipelineholder import PipelineHolder
 
 def produce_seed(base: int) -&gt; int:
     return base + 1
 
-pipeline = PipelineHandler("demo", {"base": 2}, local_folder_path="/tmp/demo_run")
+pipeline = PipelineHolder("demo", {"base": 2}, local_folder_path="/tmp/demo_run")
 setup = pipeline.add_block("setup", 1)
 setup.register_function(produce_seed, ["seed"])
 
@@ -800,21 +827,80 @@ print(pipeline.describe_pipeline())</pre>
 </div>
 
 <!-- ================================================================ -->
+<!-- ================================================================ -->
+<h2 class="section" id="atompipeline">AtomPipeline</h2>
+
+<h3 class="class-name" id="AtomPipeline">AtomPipeline</h3>
+<p class="class-desc">
+  An immutable, block-like child pipeline. You never create one directly: call
+  <a href="#PipelineHolder.create_atom_child_pipeline"><code>create_atom_child_pipeline()</code></a> on the parent
+  pipeline, and the framework builds a sealed <code>AtomPipeline</code> that wraps one target function and an
+  optional gate.
+</p>
+<div class="sig">
+<span class="kw">class</span> mlpipelineholder.AtomPipeline
+</div>
+<p>
+  An atom participates in its parent's execution exactly like a block: the parent runs it as one indivisible node,
+  its outputs appear under one public node name, and an optional gate can skip it. Internally the atom holds one
+  implementation block that calls the target function; that structure is fixed when the atom is created.
+</p>
+<p>
+  <code>AtomPipeline</code> inherits the full <a href="#pipelineholder">PipelineHolder</a> reading surface, so every
+  method documented for <code>PipelineHolder</code> is available on an atom unless it is listed as rejected below.
+</p>
+<div class="field-label">What still works after creation</div>
+<ul>
+  <li>Reading state: <code>get_value()</code>, <code>get_node_output()</code>, <code>get_config()</code>,
+      <code>get_full_config()</code>, <code>config_as_dict()</code>, <code>list_visible_*()</code>,
+      <code>has_visible_*()</code>, <code>list_declared_outputs()</code>, <code>describe_pipeline()</code>,
+      <code>full_path()</code>, <code>qualified_node_name()</code>, and the other read-only helpers.</li>
+  <li>Running: the parent's <code>run_all()</code>, <code>run_until()</code>, <code>run_from()</code>, and
+      <code>run_block()</code> execute the atom as part of the parent's node list.</li>
+  <li>Configuration through the parent: <code>atom.config</code>, <code>atom.get_config_value()</code>, and
+      execution-time argument resolution always use the parent's current configuration.</li>
+  <li>Parent value changes: <code>set_constant_value()</code>, <code>set_value()</code>,
+      <code>set_node_output()</code>, and <code>update_value()</code> keep working (values and constants stay mutable).</li>
+</ul>
+<div class="field-label">What raises RegistrationError after creation</div>
+<ul>
+  <li>Growing or shrinking the atom: <code>add_block()</code>, <code>add_child_pipeline()</code>,
+      <code>create_atom_child_pipeline()</code>, and <code>remove_block()</code>.</li>
+  <li>Changing the gate: <code>add_gate_block()</code>, <code>set_gate_block()</code>, and
+      <code>reset_gate_block()</code>. The gate is fixed when the atom is created.</li>
+  <li>Changing configuration: <code>set_config()</code>, <code>set_configs()</code>,
+      <code>update_config()</code>, and <code>update_configs()</code>. Atoms own no configuration.</li>
+  <li>Mutating the atom's internal block: registering or removing functions, expressions, args, or kwargs helpers.</li>
+</ul>
+<div class="field-label">Creating and re-creating atoms</div>
+<p>
+  All creation arguments (name, priority, target function, optional gate, declared outputs, disk-backed outputs,
+  parameter mappings, args/kwargs helpers, and output overrides) are documented on
+  <a href="#PipelineHolder.create_atom_child_pipeline"><code>create_atom_child_pipeline()</code></a>. Calling it
+  again with an identical definition is a no-op that keeps the atom and every downstream output intact, even with
+  <code>forced=True</code>; any real difference replaces the atom and erases its own outputs.
+</p>
+<div class="field-label">Save and load</div>
+<p>
+  Atoms are saved and loaded together with their parent. A loaded atom arrives already sealed, and re-registering an
+  identical definition after a load remains a no-op.
+</p>
+
 <h2 class="section" id="executionblock">ExecutionBlock</h2>
 
 <h3 class="class-name" id="ExecutionBlock">ExecutionBlock</h3>
 <p class="class-desc">Represents one priority level whose registered functions run in parallel.</p>
 <div class="sig">
 <span class="kw">class</span> mlpipelineholder.ExecutionBlock(
-  parent: <span class="arg">PipelineHandler</span>,
+  parent: <span class="arg">PipelineHolder</span>,
   registration_name: <span class="arg">str</span>,
   execution_priority: <span class="arg">float</span>
 ) -&gt; <span class="ret">None</span>
 </div>
-<p>Constructed via <a class="anchor" href="#PipelineHandler.add_block"><code>PipelineHandler.add_block()</code></a>; you rarely instantiate it directly.</p>
+<p>Constructed via <a class="anchor" href="#PipelineHolder.add_block"><code>PipelineHolder.add_block()</code></a>; you rarely instantiate it directly.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
-  <li><code>parent</code>: owning <code>PipelineHandler</code> that supplies config, visible values, artifacts, and logging.</li>
+  <li><code>parent</code>: owning <code>PipelineHolder</code> that supplies config, visible values, artifacts, and logging.</li>
   <li><code>registration_name</code>: unique block name within the parent.</li>
   <li><code>execution_priority</code>: numeric position among the parent's immediate nodes.</li>
 </ul>
@@ -951,12 +1037,12 @@ block.register_function(
 <p class="class-desc">Runs a single boolean function before the rest of a pipeline.</p>
 <div class="sig">
 <span class="kw">class</span> mlpipelineholder.GateBlock(
-  parent: <span class="arg">PipelineHandler</span>,
+  parent: <span class="arg">PipelineHolder</span>,
   function_or_path: <span class="arg">Any</span>,
   expected_value: <span class="arg">Any</span> = True
 ) -&gt; <span class="ret">None</span>
 </div>
-<p>Constructed via <a class="anchor" href="#PipelineHandler.add_gate_block"><code>PipelineHandler.add_gate_block()</code></a>.</p>
+<p>Constructed via <a class="anchor" href="#PipelineHolder.add_gate_block"><code>PipelineHolder.add_gate_block()</code></a>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>parent</code>: pipeline whose run is controlled by this gate.</li>
