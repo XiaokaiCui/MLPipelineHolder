@@ -2,6 +2,19 @@
 
 All notable changes to MLPipelineHolder are documented here.
 
+## 0.4.0 - 2026-09-11
+
+### Internal changes
+
+- `PipelineBase` replaced the hidden `_register_*_holder_base` registries; internal modules now recognise holder
+  instances by type instead of mutable module state.
+- The main class shrank from about 2,600 lines at 0.3.10 to about 1,470: reconstruction, placeholder recovery,
+  payload serialization, expression runtime, project-tree helpers, and topology helpers moved into focused mixins,
+  and runtime toggles split out of configuration into their own mixin.
+- A mixin contract test now fails when two mixins define the same public method name.
+- Compatibility is unchanged from 0.3.10: `from mlpipelineholder import PipelineHandler` remains the only guaranteed
+  legacy import, and pipelines saved by earlier releases still load.
+
 ## 0.3.10 - 2026-09-11
 
 ### Breaking changes
@@ -40,8 +53,3 @@ raises `ModuleNotFoundError`. Import from the new locations instead:
 ### Other changes
 
 - Unit tests run on Python 3.11, 3.12, 3.13, and 3.14.
-
-## 0.4.0 (planned)
-
-The next feature release, cut after the current hardening cycle (base type for internal holder checks, further
-extraction out of the main class, mixin contract test, and configuration/runtime-control split) is fully verified.
