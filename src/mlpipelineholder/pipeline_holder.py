@@ -82,6 +82,7 @@ from .execution.gate_cache import _GateStatusCache
 from .execution.atom_registry import atom_pipeline_class
 from .execution.registration import AtomRegistrationMixin, RegistrationMixin
 from .presentation.print_capture import PrintCaptureMixin
+from .state.topology import TopologyMixin
 from .presentation.description import DescriptionMixin
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
@@ -155,6 +156,7 @@ class PipelineHolder(
     PlaceholderRecoveryMixin,
     ExpressionRuntimeMixin,
     ProjectTreeMixin,
+    TopologyMixin,
     PipelineBase,
 ):
     _is_atom: bool = False
@@ -911,74 +913,6 @@ class PipelineHolder(
             raise RegistrationError(
                 f"Pipeline names must be unique across the related pipeline tree: {overlap}"
             )
-
-    def _root_pipeline(self) -> "PipelineHolder":
-        current = self
-        while current.parent_pipeline is not None:
-            current = current.parent_pipeline
-        return current
-
-    def _pipeline_by_name(self, pipeline_name: str) -> "PipelineHolder":
-        matches = [
-            pipeline
-            for pipeline in self._root_pipeline()._iter_attached_pipelines()
-            if pipeline.registration_name == pipeline_name
-        ]
-        if len(matches) != 1:
-            raise RegistrationError(
-                f"Output pointer pipeline must identify one attached pipeline: {pipeline_name!r}"
-            )
-        return matches[0]
-
-    def _priority_vector(
-        self,
-        node_name: str,
-        node_priority: float | None = None,
-    ) -> tuple[float, ...]:
-        priorities: list[float] = []
-        chain: list[PipelineHolder] = []
-        current: PipelineHolder | None = self
-        while current is not None and current.parent_pipeline is not None:
-            chain.append(current)
-            current = current.parent_pipeline
-        for pipeline in reversed(chain):
-            if pipeline.execution_priority is None or not math.isfinite(
-                pipeline.execution_priority
-            ):
-                raise RegistrationError(
-                    f"Pipeline '{pipeline.registration_name}' has an invalid output-pointer priority"
-                )
-            priorities.append(pipeline.execution_priority)
-        priority = node_priority
-        if priority is None:
-            node = self.nodes_by_name.get(node_name)
-            priority = None if node is None else node.execution_priority
-        if priority is None or not math.isfinite(priority):
-            raise RegistrationError(
-                f"Node '{node_name}' has an invalid output-pointer priority"
-            )
-        priorities.append(priority)
-        return tuple(priorities)
-
-    def _iter_attached_pipelines(self) -> list["PipelineHolder"]:
-        pipelines: list[PipelineHolder] = [self]
-        for node in self._sorted_nodes():
-            if isinstance(node, PipelineHolder):
-                for pipeline in node._iter_attached_pipelines():
-                    pipelines.append(pipeline)
-        return pipelines
-
-    def _tree_constant_names(self) -> set[str]:
-        names: set[str] = set()
-        for pipeline in self._root_pipeline()._iter_attached_pipelines():
-            names.update(pipeline.manual_values)
-        return names
-
-    def _tree_declared_output_names(self) -> set[str]:
-        names: set[str] = set()
-        for pipeline in self._root_pipeline()._iter_attached_pipelines():
-            names.update(pipeline.list_declared_outputs())
-        return names
 
     def _tree_produced_value_names(self) -> set[str]:
         names: set[str] = set()
