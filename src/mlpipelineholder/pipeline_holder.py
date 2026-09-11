@@ -76,6 +76,7 @@ from .execution.function_registry import (
     resolve_callable,
 )
 from .execution.gate_block import GateBlock
+from .execution.expression_runtime import ExpressionRuntimeMixin
 from .execution.gate_cache import _GateStatusCache
 from .execution.atom_registry import atom_pipeline_class
 from .execution.registration import AtomRegistrationMixin, RegistrationMixin
@@ -151,6 +152,7 @@ class PipelineHolder(
     ConfigurationMixin,
     ReconstructionMixin,
     PlaceholderRecoveryMixin,
+    ExpressionRuntimeMixin,
     PipelineBase,
 ):
     _is_atom: bool = False
@@ -420,84 +422,6 @@ class PipelineHolder(
     def _load_pickle_with_missing_class_fallback(raw_bytes: bytes) -> Any:
         return load_pickle_with_missing_class_fallback(raw_bytes)
 
-    @staticmethod
-    def _validate_expression_runtime_code(code: str) -> None:
-        try:
-            parsed = ast.parse(code, mode="exec")
-        except SyntaxError as exc:
-            raise RegistrationError(f"Invalid expression runtime syntax: {exc}") from exc
-        for node in parsed.body:
-            if isinstance(node, ast.Import):
-                continue
-            if isinstance(node, ast.ImportFrom):
-                if node.level != 0 or node.module is None:
-                    raise RegistrationError(
-                        "Expression runtime only supports absolute imports"
-                    )
-                if any(alias.name == "*" for alias in node.names):
-                    raise RegistrationError(
-                        "Expression runtime does not support wildcard imports"
-                    )
-                continue
-            raise RegistrationError(
-                "Expression runtime only supports import and from-import statements"
-            )
-
-    @staticmethod
-    def _normalize_expression_runtime_code(code: str) -> str:
-        normalized = dedent(code).strip()
-        if not normalized:
-            raise RegistrationError("Expression runtime code cannot be empty")
-        return normalized
-
-    def _effective_expression_runtime_owner(self) -> "PipelineHolder | None":
-        current: PipelineHolder | None = self
-        while current is not None:
-            if current.expression_runtime_code is not None:
-                return current
-            current = current.parent_pipeline
-        return None
-
-    def _expression_runtime_defined_names(self) -> set[str]:
-        owner = self._effective_expression_runtime_owner()
-        if owner is None or owner.expression_runtime_code is None:
-            return set()
-        if owner._expression_runtime_defined_names_cache is not None:
-            return set(owner._expression_runtime_defined_names_cache)
-        parsed = ast.parse(owner.expression_runtime_code, mode="exec")
-        names: set[str] = set()
-        for node in parsed.body:
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    names.add(alias.asname or alias.name.split(".")[0])
-                continue
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    names.add(alias.asname or alias.name)
-        owner._expression_runtime_defined_names_cache = names
-        return set(names)
-
-    def _build_expression_runtime_namespace(self) -> dict[str, Any]:
-        owner = self._effective_expression_runtime_owner()
-        if owner is None or owner.expression_runtime_code is None:
-            return {}
-        if owner._expression_runtime_namespace_cache is not None:
-            return dict(owner._expression_runtime_namespace_cache)
-        globals_namespace: dict[str, Any] = {"__builtins__": builtins.__dict__}
-        try:
-            exec(owner.expression_runtime_code, globals_namespace, globals_namespace)
-        except Exception as exc:
-            raise PersistenceError(
-                f"Failed to build expression runtime for pipeline '{owner.registration_name}': {type(exc).__name__}: {exc}"
-            ) from exc
-        runtime_namespace = {
-            key: value
-            for key, value in globals_namespace.items()
-            if key != "__builtins__"
-        }
-        owner._expression_runtime_namespace_cache = runtime_namespace
-        return dict(runtime_namespace)
-
     @classmethod
     def _contains_missing_main_placeholder(cls, value: Any) -> bool:
         return contains_missing_main_placeholder(cls, value)
@@ -736,50 +660,6 @@ class PipelineHolder(
         if gate_passes:
             return "pass", None
         return "block", None
-
-    def _gate_level_input_digest(self) -> tuple[tuple[str, Any], ...] | None:
-        """Snapshot every state this pipeline's own gate can read.
-
-        Captures the incoming parent outputs, own and ancestor config fields,
-        and own and ancestor manual values. Mutable values are copied so an
-        in-place change invalidates the cached gate result. If a value cannot
-        be copied safely, caching is disabled for that gate level.
-        """
-        entries: list[tuple[str, Any]] = []
-
-        def append_snapshot(name: str, value: Any) -> bool:
-            if not self._is_mutable_value(value):
-                entries.append((name, value))
-                return True
-            try:
-                snapshot = self._copy_value(value)
-            except Exception:
-                return False
-            entries.append((name, snapshot))
-            return True
-
-        for name, value in self._incoming_parent_outputs().items():
-            if not append_snapshot(name, value):
-                return None
-        for name, value in self._config_name_mapping(self.config).items():
-            if not append_snapshot(f"config:{name}", value):
-                return None
-        ancestor = self.parent_pipeline
-        while ancestor is not None:
-            for name, value in self._config_name_mapping(ancestor.config).items():
-                if not append_snapshot(
-                    f"ancestor_config:{ancestor.registration_name}:{name}",
-                    value,
-                ):
-                    return None
-            ancestor = ancestor.parent_pipeline
-        for name, value in self.manual_values.items():
-            if not append_snapshot(f"manual:{name}", value):
-                return None
-        for name, value in self._ancestor_manual_values().items():
-            if not append_snapshot(f"ancestor_manual:{name}", value):
-                return None
-        return tuple(sorted(entries, key=lambda item: item[0]))
 
     def _pipeline_effectively_gated(
         self,
