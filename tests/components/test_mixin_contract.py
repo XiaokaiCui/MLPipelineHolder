@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from src.mlpipelineholder import PipelineHolder
-from src.mlpipelineholder.core.base import PipelineBase
+from mlpipelineholder import PipelineHolder
+from mlpipelineholder.core.base import PipelineBase
 
 ALLOWED_PUBLIC_COLLISIONS: frozenset[str] = frozenset()
 

@@ -5,8 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from src.mlpipelineholder import PipelineHandler, RegistrationError
-from src.mlpipelineholder.execution.atom_pipeline import AtomPipeline
+from mlpipelineholder import PipelineHandler, RegistrationError
+from mlpipelineholder.execution.atom_pipeline import AtomPipeline
 
 
 def produce_value(value: str = "value") -> str:

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import ExecutionBlock, PipelineHandler
+from mlpipelineholder import ExecutionBlock, PipelineHandler
 
 observed_b_inputs: list[tuple[int, int | None]] = []
 observed_disk_inputs: list[tuple[list[int], list[int] | None]] = []

@@ -11,14 +11,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from src.mlpipelineholder import (
+from mlpipelineholder import (
     PersistenceError,
     PipelineHandler,
     RegistrationError,
     ResolutionError,
 )
-from src.mlpipelineholder.persistence.backup.recovery import _VariableOwnershipInventory
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder.persistence.backup.recovery import _VariableOwnershipInventory
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def current_callable(value: int) -> int:
@@ -239,7 +239,7 @@ class BackupRecoveryTests(unittest.TestCase):
                 raise OSError("injected commit failure")
 
             with patch("builtins.input", return_value="yes"), patch(
-                "src.mlpipelineholder.persistence.backup.service._assign_inventory",
+                "mlpipelineholder.persistence.backup.service._assign_inventory",
                 side_effect=fail_after_one_assignment,
             ):
                 with self.assertRaises(PersistenceError):
@@ -675,7 +675,7 @@ class BackupRecoveryTests(unittest.TestCase):
             later_path = Path(later_record.file_path)
 
             with patch(
-                "src.mlpipelineholder.persistence.backup.service._ArtifactRecoveryTransaction.commit",
+                "mlpipelineholder.persistence.backup.service._ArtifactRecoveryTransaction.commit",
                 side_effect=OSError("injected commit failure"),
             ):
                 with self.assertRaises(PersistenceError):
@@ -727,7 +727,7 @@ class BackupRecoveryTests(unittest.TestCase):
             self.assertNotIn("saved_blob", root.para_value_dict)
 
             with patch(
-                "src.mlpipelineholder.persistence.backup.service._ArtifactRecoveryTransaction.commit",
+                "mlpipelineholder.persistence.backup.service._ArtifactRecoveryTransaction.commit",
                 side_effect=OSError("injected commit failure"),
             ):
                 with self.assertRaises(PersistenceError):

@@ -4,8 +4,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.exceptions import RegistrationError, ResolutionError
+from mlpipelineholder import PipelineHandler
+from mlpipelineholder.exceptions import RegistrationError, ResolutionError
 
 
 def produce_one() -> int:

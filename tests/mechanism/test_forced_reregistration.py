@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.mlpipelineholder import PersistenceError, PipelineHandler, RegistrationError
-from src.mlpipelineholder.persistence.artifacts.store import ArtifactStore
-from src.mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder import PersistenceError, PipelineHandler, RegistrationError
+from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce() -> int:

@@ -6,9 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.execution.function_registry import _values_equal
-from src.mlpipelineholder.core.models import ArtifactRecord, TorchStateArtifactRecord
+from mlpipelineholder import PipelineHandler
+from mlpipelineholder.execution.function_registry import _values_equal
+from mlpipelineholder.core.models import ArtifactRecord, TorchStateArtifactRecord
 
 
 def produce_blob() -> dict[str, int]:

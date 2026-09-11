@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import PipelineHandler, RegistrationError, ResolutionError
+from mlpipelineholder import PipelineHandler, RegistrationError, ResolutionError
 
 
 def read_factor(factor: int) -> int:

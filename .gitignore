@@ -1,7 +1,18 @@
-.idea/
-*.iml
+# Ignore every hidden folder except .github
+.*/
+!.github/
+
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.venv/
+*.iml
+dist/
+uv.lock
+
+# Ignore markdown files except the pipeline creator skill
+*.md
+!PIPELINE_CREATOR_SKILL.md
+!README.md
+# Ignore everything in examples/ except the notebook
+examples/*
+!examples/comprehensive_pipeline.ipynb
 

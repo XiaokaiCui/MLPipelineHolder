@@ -4,14 +4,14 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder import (
+from mlpipelineholder import (
     ExecutionBlock,
     ExecutionError,
     PersistenceError,
     PipelineHandler,
     ResolutionError,
 )
-from src.mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
+from mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
 
 
 def make_value(seed: int) -> list[int]:
