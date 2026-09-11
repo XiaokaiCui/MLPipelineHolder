@@ -86,6 +86,7 @@ from .state.topology import TopologyMixin
 from .presentation.description import DescriptionMixin
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
+from .core.runtime_controls import RuntimeControlsMixin
 from .core.base import PipelineBase
 from .core.constants import (
     _IMMUTABLE_TYPES,
@@ -152,6 +153,7 @@ class PipelineHolder(
     PayloadMixin,
     PrintCaptureMixin,
     ConfigurationMixin,
+    RuntimeControlsMixin,
     ReconstructionMixin,
     PlaceholderRecoveryMixin,
     ExpressionRuntimeMixin,
