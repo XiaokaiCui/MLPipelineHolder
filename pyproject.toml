@@ -1,6 +1,6 @@
 [project]
 name = "mlpipelineholder"
-version = "0.3.9"
+version = "0.3.10"
 description = "MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks."
 authors = []
 readme = "README.md"
@@ -17,6 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

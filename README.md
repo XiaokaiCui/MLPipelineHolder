@@ -121,6 +121,13 @@ from mlpipelineholder import PipelineHolder      # preferred
 from mlpipelineholder import PipelineHandler     # legacy alias, same class
 ```
 
+### Upgrading from 0.3.8
+
+As of 0.3.10 the old flat module paths were removed (for example `mlpipelineholder.models` -> `mlpipelineholder.core.models`). See [CHANGELOG.md](CHANGELOG.md) for the full mapping. What is guaranteed:
+
+- `from mlpipelineholder import PipelineHandler` keeps working (same class as `PipelineHolder`).
+- Pipelines saved by earlier releases still load; historical module names are mapped while unpickling.
+
 ## API reference
 
 The full public API is documented in a standalone reference page:
