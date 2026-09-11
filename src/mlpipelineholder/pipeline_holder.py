@@ -53,12 +53,12 @@ from .persistence.validation import (
     validate_loaded_payload_placeholders,
     validate_loaded_payload_structure,
 )
-from .state.output_graph import OutputGraphMixin, _register_state_holder_base
-from .state.values import ValueAccessMixin, _register_values_holder_base
-from .state.visibility import VisibilityMixin, _register_visibility_holder_base
-from .state.invalidation import InvalidationMixin, _register_invalidation_holder_base
-from .state.mutation import MutationMixin, _register_mutation_holder_base
-from .state.storage import StorageMixin, _register_storage_holder_base
+from .state.output_graph import OutputGraphMixin
+from .state.values import ValueAccessMixin
+from .state.visibility import VisibilityMixin
+from .state.invalidation import InvalidationMixin
+from .state.mutation import MutationMixin
+from .state.storage import StorageMixin
 from .exceptions import (
     ExecutionError,
     PersistenceError,
@@ -2586,12 +2586,6 @@ class PipelineHolder(
 
 PipelineHandler = PipelineHolder
 _register_holder_base(PipelineHolder)
-_register_state_holder_base(PipelineHolder)
-_register_values_holder_base(PipelineHolder)
-_register_visibility_holder_base(PipelineHolder)
-_register_invalidation_holder_base(PipelineHolder)
-_register_mutation_holder_base(PipelineHolder)
-_register_storage_holder_base(PipelineHolder)
 _register_registration_holder_base(PipelineHolder)
 _register_engine_holder_base(PipelineHolder)
 _register_payloads_holder_base(PipelineHolder)

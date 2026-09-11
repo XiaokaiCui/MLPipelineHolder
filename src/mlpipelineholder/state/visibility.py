@@ -7,17 +7,11 @@ from typing import TYPE_CHECKING, Any
 from ..core.constants import _MISSING
 from ..core.models import ArtifactRecord, ExpressionRegistration
 
-_holder_base: type | None = None
-
-
-def _register_visibility_holder_base(holder_base: type) -> None:
-    """Register the holder class so visibility code can recognise child pipelines."""
-    global _holder_base
-    _holder_base = holder_base
+from ..core.base import PipelineBase
 
 
 def _is_child_pipeline(node: object) -> bool:
-    return _holder_base is not None and isinstance(node, _holder_base)
+    return isinstance(node, PipelineBase)
 
 
 class VisibilityMixin:
