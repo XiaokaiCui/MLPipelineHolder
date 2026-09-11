@@ -27,15 +27,6 @@ from ..persistence.object_storage import (
     warn_for_pickle_fallback,
 )
 
-_holder_base: type | None = None
-
-
-def _register_storage_holder_base(holder_base: type) -> None:
-    """Register the holder class for the object-storage mixin's host checks."""
-    global _holder_base
-    _holder_base = holder_base
-
-
 class StorageMixin:
     """Storing, updating, reading, and persisting root-pipeline stored objects."""
 

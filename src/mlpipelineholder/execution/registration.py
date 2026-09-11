@@ -11,17 +11,11 @@ from ..state.output_pointers import OutputAddress, is_strictly_upstream
 from .atom_registry import atom_pipeline_class
 from .function_registry import _values_equal, callable_identity_matches
 
-_holder_base: type | None = None
-
-
-def _register_registration_holder_base(holder_base: type) -> None:
-    """Register the holder class so atom comparison can recognise child pipelines."""
-    global _holder_base
-    _holder_base = holder_base
+from ..core.base import PipelineBase
 
 
 def _is_child_pipeline(node: object) -> bool:
-    return _holder_base is not None and isinstance(node, _holder_base)
+    return isinstance(node, PipelineBase)
 
 
 class AtomRegistrationMixin:

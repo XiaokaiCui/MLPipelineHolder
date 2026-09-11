@@ -9,17 +9,11 @@ from typing import TYPE_CHECKING, Any
 from ..core.models import ExpressionRegistration, FunctionRegistration
 from ..exceptions import ResolutionError
 
-_holder_base: type | None = None
-
-
-def _register_holder_base(holder_base: type) -> None:
-    """Register the holder class so presentation code can recognise child pipelines."""
-    global _holder_base
-    _holder_base = holder_base
+from ..core.base import PipelineBase
 
 
 def _is_child_pipeline(node: object) -> bool:
-    return _holder_base is not None and isinstance(node, _holder_base)
+    return isinstance(node, PipelineBase)
 
 
 class DescriptionMixin:
