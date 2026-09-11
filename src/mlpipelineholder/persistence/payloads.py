@@ -56,9 +56,17 @@ class PayloadMixin:
         para_value_dict: dict[str, Any] = {}
         artifact_registry: dict[str, Any] = {}
         run_history: list[Any] = []
+        project_root: Any = None
+        pipeline_backup_root: Any = None
+        manual_values: dict[str, Any] = {}
+        strict_mode: bool = False
+        memory_saving_mode: bool = False
+        memory_profile_logging: bool = False
+        logger: Any = None
 
         def qualified_node_name(self, node_name: str) -> str: ...
         def _sorted_nodes(self) -> list[Any]: ...
+        def _serialize_stored_objects_for_save(self, target_root: Path) -> Any: ...
         @staticmethod
         def _serialize_config_for_save(config: Any) -> Any: ...
         @staticmethod
@@ -578,4 +586,88 @@ class PayloadMixin:
             **func_payload,
             "args": serialized_args,
             "keywords": serialized_keywords,
+        }
+
+    def _serialize_payload_for_save(
+        self,
+        target_root: Path,
+        cache: dict[int, Any] | None = None,
+    ) -> dict[str, Any]:
+        cache = {} if cache is None else cache
+        traceback_settings = self.logger.get_traceback_settings()
+        return {
+            "registration_name": self.registration_name,
+            "config": (
+                {}
+                if self._is_atom
+                else self._serialize_config_for_save(self.config)
+            ),
+            "execution_priority": self.execution_priority,
+            "is_atom": self._is_atom,
+            "saved_project_root": str(self.project_root),
+            "pipeline_backup_directory": (
+                None
+                if self.pipeline_backup_root is None
+                else str(self.pipeline_backup_root)
+            ),
+            "expression_runtime_code": self.expression_runtime_code,
+            "memory_saving_mode": self.memory_saving_mode,
+            "memory_profile_logging": self.memory_profile_logging,
+            "log_traceback_to_file": traceback_settings["log_traceback_to_file"],
+            "show_traceback_locals": traceback_settings["show_traceback_locals"],
+            "use_rich_traceback_console": traceback_settings["use_rich_traceback_console"],
+            "torch_load_weights_only": self.torch_load_weights_only,
+            "strict_mode": self.strict_mode,
+            "historical_result_log_path": self.historical_result_log_path,
+            "gate": None if self.gate_block is None else self.gate_block.serialize(),
+            "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],
+            "manual_values": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "manual_values",
+                    output_name,
+                    sibling_outputs=self.manual_values,
+                )
+                for output_name, value in self.manual_values.items()
+            },
+            "producer_outputs": {
+                node_name: {
+                    output_name: self._serialize_runtime_value_for_save(
+                        value,
+                        target_root,
+                        cache,
+                        node_name,
+                        output_name,
+                        sibling_outputs=outputs,
+                    )
+                    for output_name, value in outputs.items()
+                }
+                for node_name, outputs in self.producer_outputs.items()
+            },
+            "para_value_dict": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "pipeline_state",
+                    output_name,
+                    sibling_outputs=self.para_value_dict,
+                )
+                for output_name, value in self.para_value_dict.items()
+            },
+            "artifact_registry": {
+                output_name: self._serialize_runtime_value_for_save(
+                    value,
+                    target_root,
+                    cache,
+                    "artifact_registry",
+                    output_name,
+                    sibling_outputs=self.artifact_registry,
+                )
+                for output_name, value in self.artifact_registry.items()
+            },
+            "object_storage": self._serialize_stored_objects_for_save(target_root),
+            "run_history": self.run_history,
         }
