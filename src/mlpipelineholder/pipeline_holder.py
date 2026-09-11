@@ -84,6 +84,7 @@ from .presentation.print_capture import PrintCaptureMixin
 from .presentation.description import DescriptionMixin, _register_holder_base
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
+from .core.base import PipelineBase
 from .core.constants import (
     _IMMUTABLE_TYPES,
     _MISSING,
@@ -149,6 +150,7 @@ class PipelineHolder(
     PayloadMixin,
     PrintCaptureMixin,
     ConfigurationMixin,
+    PipelineBase,
 ):
     _is_atom: bool = False
 
