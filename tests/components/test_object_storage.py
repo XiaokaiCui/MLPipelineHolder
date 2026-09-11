@@ -14,8 +14,8 @@ import pandas as pd
 
 from mlpipelineholder import PipelineHandler
 from mlpipelineholder.exceptions import PersistenceError, RegistrationError, ResolutionError
-from mlpipelineholder.models import ArtifactRecord
-from mlpipelineholder.object_storage import record_from_payload
+from mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder.persistence.object_storage import record_from_payload
 
 
 class _PickleStoredValue:
@@ -230,7 +230,7 @@ class TestObjectStorage(unittest.TestCase):
             child = PipelineHandler("child", local_folder_path=tmp_path / "child")
             collision_id = "00000000000000000000000000000001"
             with patch(
-                "mlpipelineholder.object_storage.uuid4",
+                "mlpipelineholder.persistence.object_storage.uuid4",
                 return_value=UUID(int=1),
             ):
                 root.save_to_storage("parent-copy", "parent")

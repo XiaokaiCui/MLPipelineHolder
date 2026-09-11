@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .output_pointers import OutputAddress
+from ..state.output_pointers import OutputAddress
 
 
 def _restore_dataclass_state(instance: Any, state: Any) -> None:

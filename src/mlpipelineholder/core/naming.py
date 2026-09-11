@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
-from .exceptions import RegistrationError
+from ..exceptions import RegistrationError
 
 
 _WINDOWS_RESERVED_NAMES = (

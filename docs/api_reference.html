@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.8) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.9) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -1164,11 +1164,11 @@ block.register_function(
 
 <!-- ================================================================ -->
 <h2 class="section" id="models">Data Models</h2>
-<p class="class-desc">Public dataclasses used across the API. All are importable from <code>mlpipelineholder.models</code>.</p>
+<p class="class-desc">Public dataclasses used across the API. All are importable from <code>mlpipelineholder.core.models</code>.</p>
 
 <h3 class="class-name" id="artifactrecord">ArtifactRecord</h3>
 <p class="class-desc">Metadata for one disk-backed pipeline value.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ArtifactRecord(variable_name: str, serializer: str, file_path: str, produced_by_block: str, produced_by_function: str, run_id: str, created_at: str = &lt;generated UTC timestamp&gt;, torch_load_weights_only: bool = False, metadata: dict[str, Any] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.ArtifactRecord(variable_name: str, serializer: str, file_path: str, produced_by_block: str, produced_by_function: str, run_id: str, created_at: str = &lt;generated UTC timestamp&gt;, torch_load_weights_only: bool = False, metadata: dict[str, Any] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>variable_name</code></td><td>str</td><td>Pipeline-facing name of the value.</td></tr>
@@ -1187,7 +1187,7 @@ block.register_function(
 
 <h3 class="class-name" id="torchstateartifactrecord">TorchStateArtifactRecord</h3>
 <p class="class-desc">Artifact metadata for torch objects restored from state-dict style persistence.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.TorchStateArtifactRecord(variable_name: str, file_path: str, object_kind: str, metadata: dict[str, Any] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.TorchStateArtifactRecord(variable_name: str, file_path: str, object_kind: str, metadata: dict[str, Any] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>variable_name</code></td><td>str</td><td>Pipeline-facing name of the value.</td></tr>
@@ -1198,7 +1198,7 @@ block.register_function(
 
 <h3 class="class-name" id="runrecord">RunRecord</h3>
 <p class="class-desc">Execution summary for one pipeline or sub-pipeline run.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.RunRecord(run_id: str, mode: str, executed_blocks: list[str], started_at: str, finished_at: str | None = None, status: str = "running", error_message: str | None = None, config_snapshot_path: str | None = None, produced_outputs: list[str] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.RunRecord(run_id: str, mode: str, executed_blocks: list[str], started_at: str, finished_at: str | None = None, status: str = "running", error_message: str | None = None, config_snapshot_path: str | None = None, produced_outputs: list[str] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>run_id</code></td><td>str</td><td>Unique run identifier.</td></tr>
@@ -1214,7 +1214,7 @@ block.register_function(
 
 <h3 class="class-name" id="functionregistration">FunctionRegistration</h3>
 <p class="class-desc">Captured registration metadata used for execution, charting, and persistence.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionRegistration(function_name: str, import_path: str | None, callable_obj: Any, input_names: list[str], output_names: list[str], save_to_disk: set[str], param_mapping: dict[str, str | None] = &lt;factory&gt;, var_pos_name: str | None = None, var_kw_name: str | None = None, args_registration_state: list[str] | None = None, kwargs_registration_state: dict[str, str] | None = None, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.FunctionRegistration(function_name: str, import_path: str | None, callable_obj: Any, input_names: list[str], output_names: list[str], save_to_disk: set[str], param_mapping: dict[str, str | None] = &lt;factory&gt;, var_pos_name: str | None = None, var_kw_name: str | None = None, args_registration_state: list[str] | None = None, kwargs_registration_state: dict[str, str] | None = None, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>function_name</code></td><td>str</td><td>Registered name of the function.</td></tr>
@@ -1233,7 +1233,7 @@ block.register_function(
 
 <h3 class="class-name" id="expressionregistration">ExpressionRegistration</h3>
 <p class="class-desc">Registration metadata for an expression registered via <code>register_expression()</code>.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.ExpressionRegistration(code: str, input_names: list[str], output_names: list[str], save_to_disk: set[str], warn_on_input_mutation: bool = False, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.ExpressionRegistration(code: str, input_names: list[str], output_names: list[str], save_to_disk: set[str], warn_on_input_mutation: bool = False, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>code</code></td><td>str</td><td>Validated one-statement expression source.</td></tr>
@@ -1247,7 +1247,7 @@ block.register_function(
 
 <h3 class="class-name" id="blockargsregistration">BlockArgsRegistration</h3>
 <p class="class-desc">Block-scoped ordered items used to build <code>*args</code> for specific functions.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.BlockArgsRegistration(name, ordered_items)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.BlockArgsRegistration(name, ordered_items)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>name</code></td><td>str</td><td>Registration name.</td></tr>
@@ -1256,7 +1256,7 @@ block.register_function(
 
 <h3 class="class-name" id="blockkwargsregistration">BlockKwargsRegistration</h3>
 <p class="class-desc">Block-scoped name mapping used to build <code>**kwargs</code> for specific functions.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.BlockKwargsRegistration(name, mapping_dct)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.BlockKwargsRegistration(name, mapping_dct)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>name</code></td><td>str</td><td>Registration name.</td></tr>
@@ -1265,7 +1265,7 @@ block.register_function(
 
 <h3 class="class-name" id="functionexecutionresult">FunctionExecutionResult</h3>
 <p class="class-desc">Normalized result of one registered function invocation.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.FunctionExecutionResult(function_name, outputs, loaded_artifact_inputs)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.FunctionExecutionResult(function_name, outputs, loaded_artifact_inputs)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>function_name</code></td><td>str</td><td>Name of the executed function.</td></tr>
@@ -1275,7 +1275,7 @@ block.register_function(
 
 <h3 class="class-name" id="runtimevaluereference">RuntimeValueReference</h3>
 <p class="class-desc">Fallback reference used when a runtime value cannot be safely persisted.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.RuntimeValueReference(type_name: str, repr_text: str, reason: str)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.RuntimeValueReference(type_name: str, repr_text: str, reason: str)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>type_name</code></td><td>str</td><td>Qualified or display type name of the unavailable runtime value.</td></tr>
@@ -1286,7 +1286,7 @@ block.register_function(
 
 <h3 class="class-name" id="dataclassvaluereference">DataclassValueReference</h3>
 <p class="class-desc">Structured reference to a pure dataclass that could not be pickled.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.DataclassValueReference(class_name: str, data: dict[str, Any], reason: str, module: str | None = None)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.DataclassValueReference(class_name: str, data: dict[str, Any], reason: str, module: str | None = None)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>class_name</code></td><td>str</td><td>Original dataclass name.</td></tr>
@@ -1298,7 +1298,7 @@ block.register_function(
 
 <h3 class="class-name" id="callablevaluereference">CallableValueReference</h3>
 <p class="class-desc">Reference to an importable callable stored as a pipeline value.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.CallableValueReference(callable_name: str, import_path: str)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.CallableValueReference(callable_name: str, import_path: str)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>callable_name</code></td><td>str</td><td>Original callable name.</td></tr>
@@ -1307,7 +1307,7 @@ block.register_function(
 <p>Used when a callable value is persisted by its import path so it can be restored on load.</p>
 
 <h3 class="class-name" id="runtimecallablereference">RuntimeCallableReference</h3>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.models.RuntimeCallableReference(callable_name: str)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.RuntimeCallableReference(callable_name: str)</div>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>callable_name</code>: required <code>__main__</code> name used to reconnect the runtime callable.</li></ul>
 <p>Reference placeholder for a <code>__main__</code>-scoped callable that must be redefined under the same name before loading.</p>

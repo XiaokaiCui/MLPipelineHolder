@@ -6,7 +6,7 @@ from enum import StrEnum, unique
 from pathlib import Path
 from typing import Any, Final, Protocol, TypeAlias, TypeGuard
 
-from .models import ArtifactRecord
+from ...core.models import ArtifactRecord
 
 SlotMapping: TypeAlias = dict[str, Any]
 YesInput: TypeAlias = Callable[[str], str]

@@ -4,7 +4,8 @@ from pathlib import Path
 from tomllib import load
 from typing import Final, TypeAlias
 
-from .execution_block import ExecutionBlock
+from .execution.atom_pipeline import AtomPipeline
+from .execution.block import ExecutionBlock
 from .exceptions import (
     ExecutionError,
     PersistenceError,
@@ -12,10 +13,10 @@ from .exceptions import (
     RegistrationError,
     ResolutionError,
 )
-from .function_registry import rename_args
-from .gate_block import GateBlock
-from .logger import PipelineLogger
-from .pipeline_handler import PipelineHandler
+from .execution.function_registry import rename_args
+from .execution.gate_block import GateBlock
+from .presentation.logger import PipelineLogger
+from .pipeline_holder import PipelineHandler, PipelineHolder
 
 _TomlValue: TypeAlias = (
     str
@@ -48,6 +49,7 @@ def _read_version() -> str:
 __version__: Final = _read_version()
 
 __all__ = [
+    "AtomPipeline",
     "ExecutionBlock",
     "ExecutionError",
     "GateBlock",
@@ -55,6 +57,7 @@ __all__ = [
     "PersistenceError",
     "PipelineError",
     "PipelineHandler",
+    "PipelineHolder",
     "RegistrationError",
     "ResolutionError",
     "__version__",

@@ -504,7 +504,7 @@ def produce_lock() -> _Lock:
 
 
 def produce_pointer() -> object:
-    from src.mlpipelineholder.output_pointers import OutputAddress, OutputPointer
+    from src.mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
 
     return OutputPointer(OutputAddress("pipeline", "producer", "value"))
 
@@ -556,7 +556,7 @@ class CrossCuttingVisibilityTests(unittest.TestCase):
                     side_effect=AssertionError("artifact loaded"),
                 ),
                 mock.patch(
-                    "src.mlpipelineholder.pipeline_handler.resolve_pointer_chain",
+                    "src.mlpipelineholder.pipeline_holder.resolve_pointer_chain",
                     side_effect=AssertionError("pointer resolved"),
                 ),
                 mock.patch.object(
@@ -565,7 +565,7 @@ class CrossCuttingVisibilityTests(unittest.TestCase):
                     side_effect=AssertionError("recovered"),
                 ),
                 mock.patch(
-                    "src.mlpipelineholder.backup_recovery_service.recover_variable_from_backup",
+                    "src.mlpipelineholder.persistence.backup.service.recover_variable_from_backup",
                     side_effect=AssertionError("recovered (service)"),
                 ),
             ):

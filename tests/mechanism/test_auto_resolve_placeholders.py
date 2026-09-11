@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 from mlpipelineholder import PipelineHandler
 from mlpipelineholder.exceptions import ResolutionError
-from mlpipelineholder.models import RuntimeValueReference
+from mlpipelineholder.core.models import RuntimeValueReference
 
 
 @dataclass

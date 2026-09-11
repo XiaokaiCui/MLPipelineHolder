@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import math
 import pickle
-from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
-from .optuna_support import is_optuna_sampler
-
-_DASK_TARGET_PARTITION_SIZE: Final = "256MiB"
+from ...integrations.dataframe import (
+    choose_dask_serializer,
+    choose_pandas_serializer,
+    dump_dataframe,
+    load_dataframe,
+)
+from ...integrations.optuna.support import is_optuna_sampler
 
 
 def choose_serializer(value: Any) -> str:
@@ -18,13 +21,9 @@ def choose_serializer(value: Any) -> str:
     if is_optuna_sampler(value):
         return "pickle"
 
-    try:
-        import dask.dataframe as dd  # type: ignore
-
-        if isinstance(value, dd.DataFrame):
-            return "parquet"
-    except Exception:
-        pass
+    dask_serializer = choose_dask_serializer(value)
+    if dask_serializer is not None:
+        return dask_serializer
 
     if _is_json_safe(value):
         return "json"
@@ -49,17 +48,9 @@ def choose_serializer(value: Any) -> str:
     except Exception:
         pass
 
-    try:
-        import pandas as pd  # type: ignore
-
-        if isinstance(value, pd.DataFrame):
-            if len(value) > 3_000_000:
-                return "parquet"
-            if find_spec("pyarrow") is not None:
-                return "feather"
-            return "pickle"
-    except Exception:
-        pass
+    pandas_serializer = choose_pandas_serializer(value)
+    if pandas_serializer is not None:
+        return pandas_serializer
 
     return "pickle"
 
@@ -144,27 +135,8 @@ def dump_value(value: Any, serializer: str, path: Path) -> None:
 
         torch.save(value, path)
         return
-    if serializer == "feather":
-        import pyarrow as pa  # type: ignore
-        import pyarrow.ipc as ipc  # type: ignore
-
-        table = pa.Table.from_pandas(value, preserve_index=True)
-        with path.open("wb") as handle:
-            with ipc.new_file(handle, table.schema) as writer:
-                writer.write_table(table)
-        return
-    if serializer == "parquet":
-        try:
-            import dask.dataframe as dd  # type: ignore
-        except ImportError:
-            dd = None
-        if dd is not None and isinstance(value, dd.DataFrame):
-            value = value.repartition(partition_size=_DASK_TARGET_PARTITION_SIZE)
-            if value.npartitions == 1:
-                value = value.repartition(npartitions=2)
-            value.to_parquet(path)
-            return
-        value.to_parquet(path)
+    if serializer in ("feather", "parquet"):
+        dump_dataframe(value, serializer, path)
         return
     raise ValueError(f"Unsupported serializer: {serializer}")
 
@@ -191,22 +163,6 @@ def load_value(
         import torch  # type: ignore
 
         return torch.load(path, weights_only=torch_weights_only)
-    if serializer == "feather":
-        import pyarrow.ipc as ipc  # type: ignore
-
-        with path.open("rb") as handle:
-            table = ipc.open_file(handle).read_all()
-        return table.to_pandas()
-    if serializer == "parquet":
-        try:
-            import dask.dataframe as dd  # type: ignore
-
-            parquet_path = Path(path)
-            if parquet_path.is_dir():
-                return dd.read_parquet(parquet_path)
-        except Exception:
-            pass
-        import pandas as pd  # type: ignore
-
-        return pd.read_parquet(path)
+    if serializer in ("feather", "parquet"):
+        return load_dataframe(serializer, path)
     raise ValueError(f"Unsupported serializer: {serializer}")

@@ -7,9 +7,9 @@ import shutil
 import unittest
 from unittest.mock import patch
 
-from src.mlpipelineholder.artifact_store import ArtifactStore
+from src.mlpipelineholder.persistence.artifacts.store import ArtifactStore
 from src.mlpipelineholder.exceptions import PersistenceError
-from src.mlpipelineholder.models import ArtifactRecord
+from src.mlpipelineholder.core.models import ArtifactRecord
 
 
 class ArtifactRecoveryBaselineTests(unittest.TestCase):
@@ -70,7 +70,7 @@ class ArtifactRecoveryTransactionTests(unittest.TestCase):
         )
 
     def _build_torch_artifact(self, project_root: Path):
-        from src.mlpipelineholder.models import TorchStateArtifactRecord
+        from src.mlpipelineholder.core.models import TorchStateArtifactRecord
 
         torch = import_module("torch")
 
@@ -88,7 +88,7 @@ class ArtifactRecoveryTransactionTests(unittest.TestCase):
         shutil.copytree(saved_root, backup_root)
 
     def _artifact_recovery_module(self):
-        return import_module("src.mlpipelineholder.artifact_recovery")
+        return import_module("src.mlpipelineholder.persistence.artifact_recovery")
 
     def test_clone_value_copies_file_directory_and_torch_records(self) -> None:
         artifact_recovery = self._artifact_recovery_module()
@@ -198,7 +198,7 @@ class ArtifactRecoveryTransactionTests(unittest.TestCase):
             self._make_backup(saved_root, backup_root)
             transaction = artifact_recovery._ArtifactRecoveryTransaction(saved_root, backup_root, live_root)
 
-            with patch("src.mlpipelineholder.artifact_recovery.shutil.copy2", side_effect=OSError("copy failed")):
+            with patch("src.mlpipelineholder.persistence.artifact_recovery.shutil.copy2", side_effect=OSError("copy failed")):
                 with self.assertRaises(PersistenceError):
                     transaction.clone_value(file_record)
 
@@ -230,7 +230,7 @@ class ArtifactRecoveryTransactionTests(unittest.TestCase):
                     raise OSError("rename failed")
                 source.rename(target)
 
-            with patch("src.mlpipelineholder.artifact_recovery._rename_path", side_effect=fail_on_second_rename):
+            with patch("src.mlpipelineholder.persistence.artifact_recovery._rename_path", side_effect=fail_on_second_rename):
                 with self.assertRaises(PersistenceError):
                     transaction.commit()
 

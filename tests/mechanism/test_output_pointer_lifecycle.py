@@ -11,7 +11,7 @@ from src.mlpipelineholder import (
     PipelineHandler,
     ResolutionError,
 )
-from src.mlpipelineholder.output_pointers import OutputAddress, OutputPointer
+from src.mlpipelineholder.state.output_pointers import OutputAddress, OutputPointer
 
 
 def make_value(seed: int) -> list[int]:

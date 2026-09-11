@@ -8,7 +8,7 @@ from unittest.mock import patch
 import optuna
 
 from mlpipelineholder import PipelineHandler
-from mlpipelineholder.models import ArtifactRecord
+from mlpipelineholder.core.models import ArtifactRecord
 
 
 def build_named_study(study_name: str) -> optuna.study.Study:

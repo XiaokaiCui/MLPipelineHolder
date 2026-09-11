@@ -5,9 +5,9 @@ import hashlib
 from pathlib import Path
 from typing import Callable, cast
 
-from .backup_recovery import _PipelineProtocol
-from .exceptions import PersistenceError, ResolutionError
-from .models import ArtifactRecord, TorchStateArtifactRecord
+from .recovery import _PipelineProtocol
+from ...exceptions import PersistenceError, ResolutionError
+from ...core.models import ArtifactRecord, TorchStateArtifactRecord
 
 
 @dataclass(frozen=True, slots=True)

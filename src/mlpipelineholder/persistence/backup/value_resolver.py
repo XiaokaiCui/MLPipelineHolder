@@ -5,9 +5,9 @@ from dataclasses import dataclass, fields, is_dataclass
 from types import SimpleNamespace
 import sys
 
-from .exceptions import PersistenceError, RegistrationError, ResolutionError
-from .function_registry import resolve_callable
-from .models import (
+from ...exceptions import PersistenceError, RegistrationError, ResolutionError
+from ...execution.function_registry import resolve_callable
+from ...core.models import (
     CallableValueReference,
     DataclassValueReference,
     RuntimeCallableReference,

@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from src.mlpipelineholder import PipelineHandler
-from src.mlpipelineholder.models import ArtifactRecord
+from src.mlpipelineholder.core.models import ArtifactRecord
 
 
 def produce_early_value() -> int:

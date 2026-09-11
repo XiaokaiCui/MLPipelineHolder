@@ -4,8 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Final
 
-from .exceptions import PersistenceError
-from .optuna_api import OptunaStudy
+from ...exceptions import PersistenceError
+from .api import OptunaStudy
 
 
 _REQUIRED_COLUMNS: Final = {

@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from src.mlpipelineholder.artifact_store import ArtifactStore
+from src.mlpipelineholder.persistence.artifacts.store import ArtifactStore
 from src.mlpipelineholder.exceptions import PersistenceError
-from src.mlpipelineholder.models import ArtifactRecord
+from src.mlpipelineholder.core.models import ArtifactRecord
 
 
 def make_record(file_path: Path) -> ArtifactRecord:

@@ -8,7 +8,7 @@ from functools import partial, wraps
 from typing import Any, get_type_hints
 
 from .code_comparison import code_objects_equal
-from .exceptions import RegistrationError
+from ..exceptions import RegistrationError
 
 
 def callable_signature(callable_obj: Any) -> inspect.Signature:
