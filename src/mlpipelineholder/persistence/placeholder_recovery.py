@@ -33,6 +33,7 @@ class PlaceholderRecoveryMixin:
         para_value_dict: dict[str, Any] = {}
         producer_outputs: dict[str, dict[str, Any]] = {}
         run_history: list[Any] = []
+        strict_mode: bool = False
 
         def full_path(self) -> str: ...
         def _sorted_nodes(self) -> list[Any]: ...
@@ -218,8 +219,18 @@ class PlaceholderRecoveryMixin:
             defaults = (
                 {}
                 if isinstance(registration, ExpressionRegistration)
+                else {}
+                if self.strict_mode
                 else default_map(registration.callable_obj)
             )
+            unmapped_required = self._strict_unmapped_required_input(registration)
+            if unmapped_required is not None:
+                self._warn_placeholder_unrecoverable(
+                    placeholder_names,
+                    f"required input '{unmapped_required}' has no explicit mapping or callable default",
+                    verbose=verbose,
+                )
+                return
             for input_name in self._recovery_input_names(node, registration):
                 status = self._recovery_input_status(
                     input_name,
@@ -305,10 +316,30 @@ class PlaceholderRecoveryMixin:
                 if kwargs_registration is not None:
                     input_names.extend(kwargs_registration.mapping_dct.values())
                 continue
-            mapped_name = registration.param_mapping.get(parameter.name, parameter.name)
+            if parameter.name in registration.param_mapping:
+                mapped_name = registration.param_mapping[parameter.name]
+            elif self.strict_mode:
+                mapped_name = "logger" if parameter.name == "logger" else None
+            else:
+                mapped_name = parameter.name
             if mapped_name is not None:
                 input_names.append(mapped_name)
         return input_names
+
+    def _strict_unmapped_required_input(self, registration: Any) -> str | None:
+        if not self.strict_mode or isinstance(registration, ExpressionRegistration):
+            return None
+        for parameter in callable_signature(registration.callable_obj).parameters.values():
+            if parameter.kind in (
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            if parameter.name == "logger" or parameter.name in registration.param_mapping:
+                continue
+            if parameter.default is inspect.Parameter.empty:
+                return parameter.name
+        return None
 
     def _recovery_input_status(
         self,

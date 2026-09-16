@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.12) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.13) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -265,7 +265,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   show_traceback_locals: <span class="arg">bool</span> = False,
   use_rich_traceback_console: <span class="arg">bool</span> = True,
   torch_load_weights_only: <span class="arg">bool</span> = False,
-  strict_mode: <span class="arg">bool</span> = False
+  strict_mode: <span class="arg">bool</span> = False,
+  colourful_logs: <span class="arg">bool</span> = False
 ) -&gt; <span class="ret">None</span>
 </div>
 
@@ -284,12 +285,13 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>show_traceback_locals</code></td><td>bool</td><td>Show local variables in the Rich console traceback.</td></tr>
   <tr><td><code>use_rich_traceback_console</code></td><td>bool</td><td>Render console tracebacks with Rich instead of plain stdlib text.</td></tr>
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
-  <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation: violations of the strict checks raise <code>RegistrationError</code> instead of logging warnings. Attached children inherit strict mode from the root pipeline; the setting is persisted with the pipeline.</td></tr>
+  <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation and explicit registered-function input resolution. Pipeline values are resolved only through <code>param_mapping</code>, registered args/kwargs helpers, or the automatic <code>logger</code> injection; other unmapped parameters use their callable defaults, and unmapped required parameters raise <code>ResolutionError</code> at execution. Attached children inherit strict mode from the root pipeline; the setting is persisted.</td></tr>
+  <tr><td><code>colourful_logs</code></td><td>bool</td><td>Emit ANSI-coloured logger console messages and Rich tracebacks when <code>True</code>. The default <code>False</code> uses terminal-default text colour. This affects logger output only: pipeline structure/chart rendering remains colourful. Attached children inherit the root value; the setting is persisted.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
 <ul>
-  <li>Attached child pipelines inherit <code>memory_saving_mode</code> and <code>memory_profile_logging</code> from their parent.</li>
+  <li>Attached child pipelines inherit <code>memory_saving_mode</code>, <code>memory_profile_logging</code>, <code>strict_mode</code>, and <code>colourful_logs</code> from their root pipeline.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
@@ -399,6 +401,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </ul>
 <p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
+<p>In strict mode, atom function arguments resolve only from <code>param_mapping</code>/<code>param_mapping_dct</code>, <code>args_lst</code>, <code>kwargs_dct</code>, the callable's own defaults, and the automatic pipeline <code>logger</code> injection. A same-named visible config, output, constant, or runtime override is not consumed unless it was explicitly mapped.</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
 <p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
@@ -779,7 +782,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHolder.set_strict_mode">set_strict_mode()</h4>
 <div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
-<p>Enables or disables strict-mode registration validation for this pipeline and all attached descendants. In strict mode, violations of the strict registration checks (kwargs usage, gate config resolution, param_mapping and kwargs_dct value/key validation) raise <code>RegistrationError</code> instead of logging warnings. The setting is persisted with the pipeline.</p>
+<p>Enables or disables strict-mode registration validation and explicit registered-function input resolution for this pipeline and all attached descendants. Strict functions resolve pipeline values only through <code>param_mapping</code> and registered args/kwargs helpers; unmapped parameters use callable defaults, except <code>logger</code>, which is injected automatically. Unmapped required parameters raise <code>ResolutionError</code> at execution. Callable gates retain their existing implicit input resolution. The setting is persisted with the pipeline.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>enabled</code>: strict-mode state propagated through the attached tree.</li></ul>
 
@@ -1078,6 +1081,7 @@ block.register_function(
   log_traceback_to_file: <span class="arg">bool</span> = True,
   show_traceback_locals: <span class="arg">bool</span> = False,
   use_rich_traceback_console: <span class="arg">bool</span> = True,
+  colourful_logs: <span class="arg">bool</span> = False,
   truncate: <span class="arg">bool</span> = True
 ) -&gt; <span class="ret">None</span>
 </div>
@@ -1088,19 +1092,20 @@ block.register_function(
   <li><code>log_traceback_to_file</code>: append plain stdlib traceback bodies when exceptions are logged.</li>
   <li><code>show_traceback_locals</code>: include local variables in Rich console tracebacks.</li>
   <li><code>use_rich_traceback_console</code>: prefer Rich console tracebacks when Rich is installed.</li>
+  <li><code>colourful_logs</code>: emit ANSI-coloured logger messages and Rich tracebacks; defaults to terminal-default text colour.</li>
   <li><code>truncate</code>: clear an existing log file at construction; <code>False</code> appends to it.</li>
 </ul>
 
 <h4 class="method-name" id="PipelineLogger.debug">debug() / info() / warning() / error() / critical()</h4>
 <div class="sig"><span class="kw">debug</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">info</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">warning</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <div class="sig"><span class="kw">error</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span> &nbsp;&nbsp; <span class="kw">critical</span>(message: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
-<p>Log a message at the given level. All lines are appended to <code>metadata/pipeline.log</code> and forwarded to the parent logger when attached.</p>
+<p>Log a message at the given level. All lines are appended to <code>metadata/pipeline.log</code> and forwarded to the parent logger when attached. Console text is coloured only when <code>colourful_logs=True</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>message</code>: text written at the selected level, subject to the current minimum level.</li></ul>
 
 <h4 class="method-name" id="PipelineLogger.log_exception">log_exception()</h4>
 <div class="sig"><span class="kw">log_exception</span>(exc: <span class="arg">BaseException</span>, message: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
-<p>Logs an <code>ERROR</code> entry for an exception. The message defaults to <code>repr(exc)</code>. When <code>log_traceback_to_file</code> is enabled the plain stdlib traceback (never Rich formatting or ANSI codes) is appended to the log file. The console receives a Rich-rendered traceback by default (falling back to plain stdlib text when <code>use_rich_traceback_console</code> is disabled), subject to the current log level.</p>
+<p>Logs an <code>ERROR</code> entry for an exception. The message defaults to <code>repr(exc)</code>. When <code>log_traceback_to_file</code> is enabled the plain stdlib traceback (never Rich formatting or ANSI codes) is appended to the log file. The console receives a Rich-rendered traceback by default (falling back to plain stdlib text when <code>use_rich_traceback_console</code> is disabled), subject to the current log level; ANSI colour is emitted only when <code>colourful_logs=True</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>exc</code>: active exception whose traceback should be rendered.</li>

@@ -60,6 +60,7 @@ class PayloadMixin:
         pipeline_backup_root: Any = None
         manual_values: dict[str, Any] = {}
         strict_mode: bool = False
+        colourful_logs: bool = False
         memory_saving_mode: bool = False
         memory_profile_logging: bool = False
         logger: Any = None
@@ -618,6 +619,7 @@ class PayloadMixin:
             "use_rich_traceback_console": traceback_settings["use_rich_traceback_console"],
             "torch_load_weights_only": self.torch_load_weights_only,
             "strict_mode": self.strict_mode,
+            "colourful_logs": self.colourful_logs,
             "historical_result_log_path": self.historical_result_log_path,
             "gate": None if self.gate_block is None else self.gate_block.serialize(),
             "nodes": [self._serialize_node_for_save(node, target_root, cache) for node in self._sorted_nodes()],

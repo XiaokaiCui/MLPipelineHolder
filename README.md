@@ -110,24 +110,6 @@ Your final output must include:
 I will now provide my notebook/code.
 ```
 
-## Package layout and compatibility
-
-The package is organised by responsibility: `core/` (value models and naming rules), `execution/` (blocks, gates, atom pipelines, the function registry), `state/` (output addresses and pointers), `persistence/` (artifacts, object storage, save/load, backups, recovery), `integrations/` (Optuna and dataframe support) and `presentation/` (logging and rendering).
-
-`PipelineHolder` is the canonical class. `PipelineHandler` remains available as an alias for the same class, so existing notebooks keep working unchanged:
-
-```python
-from mlpipelineholder import PipelineHolder      # preferred
-from mlpipelineholder import PipelineHandler     # legacy alias, same class
-```
-
-### Upgrading from 0.3.8
-
-As of 0.3.10 the old flat module paths were removed (for example `mlpipelineholder.models` -> `mlpipelineholder.core.models`). See [CHANGELOG.md](CHANGELOG.md) for the full mapping. What is guaranteed:
-
-- `from mlpipelineholder import PipelineHandler` keeps working (same class as `PipelineHolder`).
-- Pipelines saved by earlier releases still load; historical module names are mapped while unpickling.
-
 ## API reference
 
 The full public API is documented in a standalone reference page:

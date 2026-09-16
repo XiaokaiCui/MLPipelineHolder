@@ -178,6 +178,7 @@ class PipelineHolder(
         use_rich_traceback_console: bool = True,
         torch_load_weights_only: bool = False,
         strict_mode: bool = False,
+        colourful_logs: bool = False,
         _allow_existing_root: bool = False,
         _allow_legacy_config_object: bool = False,
         _preserve_existing_log: bool = False,
@@ -214,11 +215,13 @@ class PipelineHolder(
             self.project_root.mkdir(parents=True, exist_ok=True)
             self.metadata_root = self.project_root / "metadata"
             self.metadata_root.mkdir(parents=True, exist_ok=True)
+            self.colourful_logs = bool(colourful_logs)
             self.logger = PipelineLogger(
                 self.metadata_root / "pipeline.log",
                 log_traceback_to_file=log_traceback_to_file,
                 show_traceback_locals=show_traceback_locals,
                 use_rich_traceback_console=use_rich_traceback_console,
+                colourful_logs=self.colourful_logs,
                 truncate=not _preserve_existing_log,
             )
             self.logger._pipeline = self
@@ -1397,8 +1400,12 @@ class PipelineHolder(
         self.memory_saving_mode = parent.memory_saving_mode
         self.memory_profile_logging = parent.memory_profile_logging
         inherited_strict_mode = parent._root_pipeline().strict_mode
+        inherited_colourful_logs = parent._root_pipeline().colourful_logs
         for pipeline in self._iter_attached_pipelines():
             pipeline.strict_mode = inherited_strict_mode
+            pipeline.colourful_logs = inherited_colourful_logs
+            for block in pipeline.blocks:
+                block._refresh_function_input_names()
         self._rewrite_artifact_paths(original_root, target_root)
         self._rewrite_run_history_paths(original_root, target_root)
         self._refresh_descendant_roots(original_root, target_root)

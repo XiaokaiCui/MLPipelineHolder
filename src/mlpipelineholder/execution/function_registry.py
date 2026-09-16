@@ -239,6 +239,8 @@ def inspect_exposed_input_names(
     param_mapping: dict[str, str | None] | None = None,
     var_pos_name: str | None = None,
     var_kw_name: str | None = None,
+    *,
+    strict_mode: bool = False,
 ) -> list[str]:
     signature = callable_signature(callable_obj)
     param_mapping = param_mapping or {}
@@ -246,11 +248,15 @@ def inspect_exposed_input_names(
     seen: set[str] = set()
     for parameter in signature.parameters.values():
         if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
-            exposed_name = var_pos_name or parameter.name
+            exposed_name = var_pos_name or (None if strict_mode else parameter.name)
         elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
-            exposed_name = var_kw_name or parameter.name
+            exposed_name = var_kw_name or (None if strict_mode else parameter.name)
+        elif parameter.name in param_mapping:
+            exposed_name = param_mapping[parameter.name]
+        elif strict_mode:
+            exposed_name = "logger" if parameter.name == "logger" else None
         else:
-            exposed_name = param_mapping.get(parameter.name, parameter.name)
+            exposed_name = parameter.name
         if exposed_name is None:
             continue
         if exposed_name in seen:

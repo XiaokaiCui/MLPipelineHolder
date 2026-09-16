@@ -16,6 +16,7 @@ class RuntimeControlsMixin:
         _invalidation_forbidden: bool = False
         print_capture_mode: str = "tee"
         torch_load_weights_only: bool = False
+        blocks: list[Any] = []
 
         def _iter_attached_pipelines(self) -> list[Any]: ...
 
@@ -38,6 +39,8 @@ class RuntimeControlsMixin:
         """Enable or disable strict-mode registration validation for this pipeline and all attached descendants."""
         for pipeline in self._iter_attached_pipelines():
             pipeline.strict_mode = bool(enabled)
+            for block in pipeline.blocks:
+                block._refresh_function_input_names()
 
     def _sync_invalidation_flag(self) -> None:
         """Copy this pipeline's invalidation flag to its whole attached subtree."""
