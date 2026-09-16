@@ -34,6 +34,7 @@ class PipelineLogger:
         log_traceback_to_file: bool = True,
         show_traceback_locals: bool = False,
         use_rich_traceback_console: bool = True,
+        colourful_logs: bool = False,
         truncate: bool = True,
     ) -> None:
         self.log_file_path = Path(log_file_path)
@@ -51,6 +52,7 @@ class PipelineLogger:
         self._log_traceback_to_file = bool(log_traceback_to_file)
         self._show_traceback_locals = bool(show_traceback_locals)
         self._use_rich_traceback_console = bool(use_rich_traceback_console)
+        self._colourful_logs = bool(colourful_logs)
 
     def set_traceback_writing(self, enable: bool = True) -> None:
         """Enable or disable appending the traceback to the log file in log_exception()."""
@@ -149,7 +151,12 @@ class PipelineLogger:
             return stdlib_text
 
         buffer = StringIO()
-        console = Console(file=buffer, force_terminal=True, highlight=False)
+        console = Console(
+            file=buffer,
+            force_terminal=self._colourful_logs,
+            no_color=not self._colourful_logs,
+            highlight=False,
+        )
         console.print(
             Traceback.from_exception(
                 type(exc),
@@ -327,6 +334,8 @@ class PipelineLogger:
         self._file_handle = None
 
     def _colorize(self, level: str, entry: str) -> str:
+        if not self._colourful_logs:
+            return entry
         color_map = {
             "DEBUG": "cyan",
             "INFO": "blue",

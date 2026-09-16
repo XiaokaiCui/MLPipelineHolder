@@ -24,6 +24,7 @@ class ArgumentMixin:
         manual_values: dict[str, Any] = {}
         config: Any = None
         artifact_store: Any = None
+        strict_mode: bool = False
 
         def list_declared_outputs(self) -> set[str]: ...
         def _ancestor_manual_values(self) -> dict[str, Any]: ...
@@ -43,6 +44,8 @@ class ArgumentMixin:
         defaults = default_map(registration.callable_obj)
         signature = callable_signature(registration.callable_obj)
         parameters = list(signature.parameters.values())
+        strict_function_resolution = self.strict_mode and block is not None
+        resolver_defaults = {} if strict_function_resolution else defaults
         declared_output_names = set(visible_outputs).union(self.list_declared_outputs())
         if block is not None:
             declared_output_names.update(block.declared_outputs())
@@ -69,12 +72,14 @@ class ArgumentMixin:
                             overrides,
                             visible_outputs,
                             parent_config,
-                            defaults,
+                            resolver_defaults,
                             loaded_artifacts,
                             declared_output_names,
                         )
                         for item_name in block.registered_args[input_name].ordered_items
                     ]
+                elif strict_function_resolution:
+                    value = []
                 else:
                     value = self._resolve_named_input(
                         input_name,
@@ -105,12 +110,14 @@ class ArgumentMixin:
                             overrides,
                             visible_outputs,
                             parent_config,
-                            defaults,
+                            resolver_defaults,
                             loaded_artifacts,
                             declared_output_names,
                         )
                         for key, item_name in block.registered_kwargs[input_name].mapping_dct.items()
                     }
+                elif strict_function_resolution:
+                    value = {}
                 else:
                     value = self._resolve_named_input(
                         input_name,
@@ -136,17 +143,41 @@ class ArgumentMixin:
                 keyword_args.update(value)
                 continue
 
-            input_name = registration.param_mapping.get(parameter.name, parameter.name)
-            if input_name is None:
-                value = None
+            if parameter.name in registration.param_mapping:
+                input_name = registration.param_mapping[parameter.name]
+                if input_name is None:
+                    value = None
+                else:
+                    value = self._resolve_named_input(
+                        input_name,
+                        registration.function_name,
+                        overrides,
+                        visible_outputs,
+                        parent_config,
+                        resolver_defaults,
+                        loaded_artifacts,
+                        declared_output_names,
+                    )
+            elif strict_function_resolution:
+                if parameter.name == "logger":
+                    value = self.logger
+                elif parameter.default is not inspect.Parameter.empty:
+                    value = parameter.default
+                else:
+                    raise ResolutionError(
+                        f"Cannot resolve argument '{parameter.name}' for function "
+                        f"'{registration.function_name}': strict mode requires an "
+                        "explicit mapping or a callable default"
+                    )
             else:
+                input_name = parameter.name
                 value = self._resolve_named_input(
                     input_name,
                     registration.function_name,
                     overrides,
                     visible_outputs,
                     parent_config,
-                    defaults,
+                    resolver_defaults,
                     loaded_artifacts,
                     declared_output_names,
                 )

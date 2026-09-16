@@ -97,6 +97,11 @@ class ReconstructionMixin:
             use_rich_traceback_console=payload.get("use_rich_traceback_console", True),
             torch_load_weights_only=payload.get("torch_load_weights_only", False),
             strict_mode=payload.get("strict_mode", False),
+            colourful_logs=(
+                parent.colourful_logs
+                if parent is not None
+                else payload.get("colourful_logs", False)
+            ),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
             _allow_existing_root=True,
             _allow_legacy_config_object=True,

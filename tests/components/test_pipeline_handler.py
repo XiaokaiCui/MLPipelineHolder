@@ -1049,7 +1049,7 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("ValueError: traceback boom", log_text)
             self.assertNotIn("\x1b[", log_text)
 
-    def test_log_exception_console_uses_rich_by_default(self) -> None:
+    def test_log_exception_console_uses_uncoloured_rich_by_default(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("traceback", DemoConfig(base=1), tmp_path)
@@ -1062,8 +1062,27 @@ class PipelineHandlerTests(unittest.TestCase):
                     pipeline.run_all()
 
             console_out = captured_stdout.getvalue()
-            self.assertIn("\x1b[", console_out)
+            self.assertNotIn("\x1b[", console_out)
             self.assertTrue("╭" in console_out or "│" in console_out)
+
+    def test_log_exception_console_uses_colourful_rich_when_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "traceback",
+                DemoConfig(base=1),
+                tmp_path,
+                colourful_logs=True,
+            )
+            block = pipeline.add_block("failing", 1)
+            block.register_function(boom_function, ["out"])
+
+            captured_stdout = StringIO()
+            with patch("mlpipelineholder.presentation.logger.sys_stdout", captured_stdout):
+                with self.assertRaises(ExecutionError):
+                    pipeline.run_all()
+
+            self.assertIn("\x1b[", captured_stdout.getvalue())
 
     def test_nested_atom_failure_logs_one_outer_traceback(self) -> None:
         with TemporaryDirectory() as temp_dir:

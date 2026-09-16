@@ -45,7 +45,7 @@ Always create the root with strict mode:
 pipeline = PipelineHolder(..., strict_mode=True)
 ```
 
-Strict mode turns unsafe registrations into immediate `RegistrationError`s. Register upstream producers before downstream consumers so their outputs are already declared; producers do **not** need to run before downstream registration. Attached children inherit strict mode from the root.
+Strict mode turns unsafe registrations into immediate `RegistrationError`s. Register upstream producers before downstream consumers so their outputs are already declared; producers do **not** need to run before downstream registration. Attached children inherit strict mode from the root. A registered function receives pipeline values only through `param_mapping`, registered `args_lst`/`kwargs_dct` helpers, or the automatic `logger` injection. Every other unmapped parameter uses its callable default; an unmapped required parameter fails at execution instead of resolving a same-named config, output, constant, or runtime override implicitly.
 
 Use these structure rules:
 

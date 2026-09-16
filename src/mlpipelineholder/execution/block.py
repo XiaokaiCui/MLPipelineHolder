@@ -562,12 +562,6 @@ class ExecutionBlock:
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         declared_output_count = infer_declared_output_count(callable_obj)
-        input_names = inspect_exposed_input_names(
-            callable_obj,
-            param_mapping=param_mapping,
-            var_pos_name=var_pos_name,
-            var_kw_name=var_kw_name,
-        )
         args_state, kwargs_state = self._variadic_registration_state(
             var_pos_name,
             var_kw_name,
@@ -589,7 +583,7 @@ class ExecutionBlock:
             function_name=function_name,
             import_path=import_path,
             callable_obj=callable_obj,
-            input_names=input_names,
+            input_names=[],
             output_names=output_names,
             save_to_disk=disk_names,
             param_mapping=dict(param_mapping or {}),
@@ -599,6 +593,7 @@ class ExecutionBlock:
             kwargs_registration_state=kwargs_state,
             overridden_outputs=normalized_overrides,
         )
+        registration.input_names = self._function_input_names(registration)
         self._strict_validate_registration(registration)
         self._warn_on_unmapped_resolvable_inputs(callable_obj, registration)
         self._warn_on_disk_backed_input_persistence_pitfall(registration)
@@ -612,6 +607,8 @@ class ExecutionBlock:
         callable_obj: Any,
         registration: FunctionRegistration,
     ) -> None:
+        if self.parent.strict_mode:
+            return
         try:
             signature = callable_signature(callable_obj)
             visible_names = (
@@ -645,6 +642,35 @@ class ExecutionBlock:
                     )
         except Exception:
             return
+
+    def _refresh_function_input_names(self) -> None:
+        for registration in self.functions:
+            if not isinstance(registration, FunctionRegistration):
+                continue
+            registration.input_names = self._function_input_names(registration)
+
+    def _function_input_names(
+        self,
+        registration: FunctionRegistration,
+    ) -> list[str]:
+        strict = self.parent.strict_mode
+        input_names = inspect_exposed_input_names(
+            registration.callable_obj,
+            param_mapping=registration.param_mapping,
+            var_pos_name=None if strict else registration.var_pos_name,
+            var_kw_name=None if strict else registration.var_kw_name,
+            strict_mode=strict,
+        )
+        if not strict:
+            return input_names
+        explicit_variadic_names = list(registration.args_registration_state or [])
+        explicit_variadic_names.extend(
+            (registration.kwargs_registration_state or {}).values()
+        )
+        for input_name in explicit_variadic_names:
+            if input_name not in input_names:
+                input_names.append(input_name)
+        return input_names
 
     def _warn_on_disk_backed_input_persistence_pitfall(
         self,

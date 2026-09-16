@@ -149,6 +149,7 @@ class AtomPipeline(PipelineHolder):
             execution_priority=execution_priority,
             forced=forced,
             strict_mode=parent._root_pipeline().strict_mode,
+            colourful_logs=parent._root_pipeline().colourful_logs,
             _allow_existing_root=allow_existing_root,
         )
         temp_pipeline.logger = parent.logger
