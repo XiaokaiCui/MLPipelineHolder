@@ -297,7 +297,7 @@ class RegistrationMixin:
         def _is_execution_block(node: Any) -> bool: ...
 
     def add_block(
-        self: Any, registration_name: str, execution_priority: float, forced: bool = False
+        self: Any, registration_name: str, execution_priority: float, forced: bool = True
     ) -> Any:
         validate_registration_name(registration_name, owner_label="block")
         block = self._create_execution_block(registration_name, execution_priority)
@@ -344,7 +344,7 @@ class RegistrationMixin:
         child_pipeline: Any,
         execution_priority: float,
         registration_name: str | None = None,
-        forced: bool = False,
+        forced: bool = True,
     ) -> Any:
         if child_pipeline is self:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")

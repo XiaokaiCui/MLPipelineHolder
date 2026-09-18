@@ -505,7 +505,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             block = pipeline.add_block("b", 1)
             block.register_expression("x = 1")
             with self.assertRaisesRegex(RegistrationError, "at most one expression"):
-                block.register_expression("y = 2")
+                block.register_expression("y = 2", forced=False)
 
     def test_mixed_logging_and_assignment_is_rejected(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -513,11 +513,11 @@ class ForcedReRegistrationTests(unittest.TestCase):
             block = pipeline.add_block("b", 1)
             block.register_expression("print('hi')")
             with self.assertRaisesRegex(RegistrationError, "at most one expression"):
-                block.register_expression("x = 1")
+                block.register_expression("x = 1", forced=False)
             block2 = pipeline.add_block("b2", 2)
             block2.register_expression("x = 1")
             with self.assertRaisesRegex(RegistrationError, "at most one expression"):
-                block2.register_expression("print('hi')")
+                block2.register_expression("print('hi')", forced=False)
 
     def test_same_identity_expression_forced_replaces(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -37,7 +37,7 @@ class AtomPipeline(PipelineHolder):
             )
 
     def add_block(
-        self, registration_name: str, execution_priority: float, forced: bool = False
+        self, registration_name: str, execution_priority: float, forced: bool = True
     ) -> Any:
         self._assert_mutable("accept new blocks")
         return super().add_block(registration_name, execution_priority, forced=forced)
@@ -51,7 +51,7 @@ class AtomPipeline(PipelineHolder):
         child_pipeline: Any,
         execution_priority: float,
         registration_name: str | None = None,
-        forced: bool = False,
+        forced: bool = True,
     ) -> Any:
         self._assert_mutable("accept child pipelines")
         return super().add_child_pipeline(

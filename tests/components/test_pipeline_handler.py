@@ -1755,13 +1755,19 @@ class PipelineHandlerTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
 
-    def test_pipeline_creation_rejects_non_empty_root(self) -> None:
+    def test_pipeline_creation_can_reject_non_empty_root_explicitly(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
 
             with self.assertRaises(RegistrationError):
-                PipelineHandler("root-check", DemoConfig(base=1), tmp_path)
+                PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    tmp_path,
+                    forced=False,
+                    _allow_existing_root=False,
+                )
 
     def test_forced_pipeline_creation_clears_non_empty_root_after_yes(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1769,7 +1775,13 @@ class PipelineHandlerTests(unittest.TestCase):
             (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
 
             with patch("builtins.input", return_value="yes"):
-                pipeline = PipelineHandler("root-check", DemoConfig(base=1), tmp_path, forced=True)
+                pipeline = PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    tmp_path,
+                    forced=True,
+                    _allow_existing_root=False,
+                )
 
             self.assertTrue(pipeline.project_root.exists())
             self.assertFalse((tmp_path / "marker.txt").exists())

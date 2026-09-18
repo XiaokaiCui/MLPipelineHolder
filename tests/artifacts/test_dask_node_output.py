@@ -6,9 +6,11 @@ from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mlpipelineholder import PipelineHandler
 from mlpipelineholder.core.models import ArtifactRecord
+from mlpipelineholder.integrations.dataframe import dump_dataframe
 
 
 def produce_disk_frame():
@@ -19,6 +21,22 @@ def produce_disk_frame():
 
 def produce_memory_value() -> int:
     return 0
+
+
+def produce_list_frame():
+    dask = import_module("dask")
+    dd = import_module("dask.dataframe")
+    pd = import_module("pandas")
+    with dask.config.set({"dataframe.convert-string": False}):
+        return dd.from_pandas(
+            pd.DataFrame(
+                {
+                    "ticker": ["A", "B"],
+                    "weekly_return_list": [[0.1, 0.2], [0.3]],
+                }
+            ),
+            npartitions=1,
+        )
 
 
 def limited_read_frame(read_count: list[int]):
@@ -42,6 +60,36 @@ def limited_read_frame(read_count: list[int]):
     "dask.dataframe is not available",
 )
 class DaskNodeOutputTests(unittest.TestCase):
+    def test_disk_backed_list_column_retries_without_global_arrow_schema(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", {}, Path(temp_dir) / "project")
+            block = pipeline.add_block("producer", 1)
+            if block is None:
+                raise AssertionError("add_block should return a block")
+            block.register_function(
+                produce_list_frame,
+                ["value"],
+                save_to_disk=["value"],
+            )
+
+            with self.assertWarnsRegex(UserWarning, "retrying with schema=None"):
+                _ = pipeline.run_all()
+
+            actual = pipeline.get_node_output("producer", "value").compute()
+            self.assertEqual(actual["ticker"].tolist(), ["A", "B"])
+            self.assertEqual(list(actual["weekly_return_list"].iloc[0]), [0.1, 0.2])
+            self.assertEqual(list(actual["weekly_return_list"].iloc[1]), [0.3])
+
+    def test_non_arrow_dask_parquet_failure_is_not_retried(self) -> None:
+        frame = produce_list_frame()
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "frame.parquet"
+            with patch.object(type(frame), "to_parquet", side_effect=OSError("disk full")) as save:
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    dump_dataframe(frame, "parquet", path)
+
+            save.assert_called_once_with(path)
+
     def test_disk_backed_target_stages_dask_replacement_before_saving(self) -> None:
         # Given: a disk-backed target and a valid Dask replacement whose source
         # can be evaluated only twice.

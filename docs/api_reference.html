@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.13) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.14) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -257,7 +257,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   configuration: <span class="arg">Any | None</span> = None,
   local_folder_path: <span class="arg">str | Path | None</span> = None,
   execution_priority: <span class="arg">float | None</span> = None,
-  forced: <span class="arg">bool</span> = False,
+  forced: <span class="arg">bool</span> = True,
   memory_saving_mode: <span class="arg">bool</span> = False,
   memory_profile_logging: <span class="arg">bool</span> = False,
   pipeline_backup_directory: <span class="arg">str | Path | None</span> = None,
@@ -277,7 +277,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dict or pure dataclass instance (fields only) used as the pipeline configuration. Every field value must be picklable; use <code>set_constant_value</code> for non-picklable values. Omitted values start with an empty config.</td></tr>
   <tr><td><code>local_folder_path</code></td><td>str | Path | None</td><td>Optional working directory. When omitted, a temporary staging root is used; attaching to a parent relocates the pipeline under the parent tree.</td></tr>
   <tr><td><code>execution_priority</code></td><td>float | None</td><td>Optional priority used when this pipeline is a child node of a parent.</td></tr>
-  <tr><td><code>forced</code></td><td>bool</td><td>If True, allows replacing an existing pipeline registered under the same name.</td></tr>
+  <tr><td><code>forced</code></td><td>bool</td><td>Defaults to <code>True</code>. When existing-root reuse is explicitly disabled, allows clearing a non-empty working directory after confirmation.</td></tr>
   <tr><td><code>memory_saving_mode</code></td><td>bool</td><td>Best-effort cleanup of intermediate values after each block finishes.</td></tr>
   <tr><td><code>memory_profile_logging</code></td><td>bool</td><td>Log memory usage after computation and cleanup for each block.</td></tr>
   <tr><td><code>pipeline_backup_directory</code></td><td>str | Path | None</td><td>Optional backup directory used by backup-aware save/load and single-item recovery. Must not overlap the working directory.</td></tr>
@@ -292,6 +292,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <div class="field-label">Notes</div>
 <ul>
   <li>Attached child pipelines inherit <code>memory_saving_mode</code>, <code>memory_profile_logging</code>, <code>strict_mode</code>, and <code>colourful_logs</code> from their root pipeline.</li>
+  <li>Direct construction reuses an existing working directory by default (<code>_allow_existing_root=True</code>). Pass <code>_allow_existing_root=False</code> to restore non-empty-root validation; pair it with <code>forced=True</code> only when confirmed clearing is intended.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
@@ -337,25 +338,25 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
 
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
-<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">ExecutionBlock | None</span></div>
+<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>registration_name</code>: unique public name used for lookup, path targeting, logs, and persistence.</li>
   <li><code>execution_priority</code>: numeric position in this pipeline. Priorities with the same integer part form an alternative group.</li>
-  <li><code>forced</code>: replace a conflicting node when <code>True</code>; otherwise log a warning and return <code>None</code>.</li>
+  <li><code>forced</code>: replace a conflicting node by default; pass <code>False</code> to log a warning and return <code>None</code> instead.</li>
 </ul>
 <p>Returns the new <code>ExecutionBlock</code>, an identical existing expression block during a forced re-registration, or <code>None</code> when non-strict registration is skipped. Invalid names and strict-mode conflicts raise <code>RegistrationError</code>.</p>
 
 <h4 class="method-name" id="PipelineHolder.add_child_pipeline">add_child_pipeline()</h4>
-<div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHolder</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineHolder | None</span></div>
+<div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHolder</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder | None</span></div>
 <p>Attaches an existing <code>PipelineHolder</code> as an immediate child node. The child is relocated under this pipeline's project tree, inherits the root's strict and memory settings, and participates in parent visibility and execution ordering.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>child_pipeline</code>: detached or re-attachable pipeline to place under this parent; a pipeline cannot attach itself.</li>
   <li><code>execution_priority</code>: numeric position of the child among this parent's blocks and child pipelines.</li>
   <li><code>registration_name</code>: optional replacement for the child's current public name before attachment.</li>
-  <li><code>forced</code>: replace a conflicting registered node and detach the child from a previous parent when permitted.</li>
+  <li><code>forced</code>: by default, replace a conflicting registered node and detach the child from a previous parent when permitted; pass <code>False</code> to skip conflicts.</li>
 </ul>
 <p>Returns the attached child, or <code>None</code> when a non-forced duplicate is skipped.</p>
 <p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the child's declared output names conflict with visible configuration fields or pipeline constants anywhere in the tree.</p>
@@ -937,6 +938,7 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>param_mapping</code> exposes safer pipeline-facing parameter names without changing the callable.</li>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
+  <li>When global Arrow schema inference fails for a disk-backed Dask DataFrame, persistence warns and retries with <code>schema=None</code>. Each partition then infers its own Parquet schema, so partition schemas must remain compatible.</li>
   <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
   <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
   <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
@@ -963,7 +965,7 @@ block.register_function(
   *,
   output_variable_name: <span class="arg">str | None</span> = None,
   save_to_disk: <span class="arg">bool</span> = False,
-  forced: <span class="arg">bool</span> = False,
+  forced: <span class="arg">bool</span> = True,
   warn_on_input_mutation: <span class="arg">bool</span> = False,
   overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
 ) -&gt; <span class="ret">ExpressionRegistration | None</span>
@@ -974,13 +976,13 @@ block.register_function(
   <li><code>code</code>: one supported assignment or print/logger expression.</li>
   <li><code>output_variable_name</code>: optional explicit assignment output name; normally inferred from <code>code</code>.</li>
   <li><code>save_to_disk</code>: persist the expression output as an artifact when <code>True</code>.</li>
-  <li><code>forced</code>: replace the block's existing expression when the definition differs.</li>
+  <li><code>forced</code>: replace the block's existing expression by default when the definition differs; pass <code>False</code> to reject a duplicate.</li>
   <li><code>warn_on_input_mutation</code>: warn when evaluation appears to mutate an input object in place.</li>
   <li><code>overridden_outputs</code>: expression output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
   <li>Returns <code>None</code> when the registration is rejected (for example output name conflicts).</li>
   <li>Imports used by expressions are supplied through <code>define_expression_runtime()</code>.</li>
   <li><code>overridden_outputs</code> uses the same upstream-address contract as function and atom registrations.</li>
-  <li>A block holds <strong>at most one expression</strong>: a second assignment, a second logging expression, or a mixed pair raises <code>RegistrationError</code>; re-registering the existing expression with <code>forced=True</code> replaces it.</li>
+  <li>A block holds <strong>at most one expression</strong>: a second assignment, logging expression, or mixed pair replaces the existing expression by default. Pass <code>forced=False</code> to raise <code>RegistrationError</code> instead.</li>
   <li>Forced replacement follows the same unified rule as <code>register_function</code> and <code>create_atom_child_pipeline</code>: an <strong>identical</strong> re-registration is a no-op that preserves all outputs; any real change erases the expression's own output, then invalidates from the earliest downstream block that consumes any affected output name (old outputs plus new outputs colliding with downstream inputs), warning about the consumers. Unrelated downstream blocks and consumers shielded by a later same-name producer are left untouched.</li>
 </ul>
 

@@ -59,7 +59,7 @@ class ExecutionBlock:
         *,
         output_variable_name: str | None = None,
         save_to_disk: bool = False,
-        forced: bool = False,
+        forced: bool = True,
         warn_on_input_mutation: bool = False,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
