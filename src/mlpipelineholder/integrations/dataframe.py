@@ -4,13 +4,35 @@ from __future__ import annotations
 
 from importlib.util import find_spec
 from pathlib import Path
+import shutil
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Final
+import warnings
 
 if TYPE_CHECKING:
     from contextlib import ExitStack
 
 _DASK_TARGET_PARTITION_SIZE: Final = "256MiB"
+
+
+def _dump_dask_parquet(value: Any, path: Path) -> None:
+    """Write a Dask DataFrame, retrying when Arrow cannot infer object metadata."""
+    import pyarrow as pa  # type: ignore
+
+    try:
+        value.to_parquet(path)
+    except pa.ArrowInvalid:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+        warnings.warn(
+            "Dask Parquet schema inference failed; retrying with schema=None. "
+            "Each partition will infer its own schema, so partition schemas must remain compatible.",
+            UserWarning,
+            stacklevel=2,
+        )
+        value.to_parquet(path, schema=None)
 
 
 def choose_dask_serializer(value: Any) -> str | None:
@@ -61,7 +83,7 @@ def dump_dataframe(value: Any, serializer: str, path: Path) -> None:
             value = value.repartition(partition_size=_DASK_TARGET_PARTITION_SIZE)
             if value.npartitions == 1:
                 value = value.repartition(npartitions=2)
-            value.to_parquet(path)
+            _dump_dask_parquet(value, path)
             return
         value.to_parquet(path)
         return
@@ -107,5 +129,5 @@ def stage_dask_dataframe_for_copy(
         TemporaryDirectory(prefix=".dask-replacement-", dir=temp_parent)
     )
     snapshot_path = Path(temp_dir) / "snapshot.parquet"
-    value.to_parquet(snapshot_path)
+    _dump_dask_parquet(value, snapshot_path)
     return dd.read_parquet(snapshot_path)

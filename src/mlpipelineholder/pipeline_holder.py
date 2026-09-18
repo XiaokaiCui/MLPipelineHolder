@@ -169,7 +169,7 @@ class PipelineHolder(
         configuration: Any | None = None,
         local_folder_path: str | Path | None = None,
         execution_priority: float | None = None,
-        forced: bool = False,
+        forced: bool = True,
         memory_saving_mode: bool = False,
         memory_profile_logging: bool = False,
         pipeline_backup_directory: str | Path | None = None,
@@ -179,7 +179,7 @@ class PipelineHolder(
         torch_load_weights_only: bool = False,
         strict_mode: bool = False,
         colourful_logs: bool = False,
-        _allow_existing_root: bool = False,
+        _allow_existing_root: bool = True,
         _allow_legacy_config_object: bool = False,
         _preserve_existing_log: bool = False,
     ) -> None:
