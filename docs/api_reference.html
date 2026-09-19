@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.14) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.15) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -939,6 +939,7 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
   <li>When global Arrow schema inference fails for a disk-backed Dask DataFrame, persistence warns and retries with <code>schema=None</code>. Each partition then infers its own Parquet schema, so partition schemas must remain compatible.</li>
+  <li>Artifact loading inspects Parquet metadata before reading. If pandas cannot parse a nested or third-party Arrow extension declaration such as <code>list&lt;item: double&gt;[pyarrow]</code>, the unreadable declaration is neutralized in the in-memory Arrow schema before conversion. PyArrow then performs its normal metadata-driven pandas reconstruction globally, covering current and future supported column and index dtypes without type-specific conversion code; unreadable Arrow-backed fields retain their physical Arrow dtype. Directory artifacts remain lazy Dask DataFrames and projected reads use the same safe partition loader.</li>
   <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
   <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
   <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
