@@ -126,7 +126,7 @@ class AtomPipelineSealedClassTests(unittest.TestCase):
                 output_variable_names="result",
             )
             saved = pipeline.save_pipeline(root / "saved")
-            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True, trust_project=True)
             atom = loaded.get_child_pipeline("atom")
 
             self.assertIs(type(atom), AtomPipeline)

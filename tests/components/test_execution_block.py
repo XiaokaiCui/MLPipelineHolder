@@ -352,7 +352,7 @@ class ExecutionBlockTests(unittest.TestCase):
             pipeline = PipelineHandler("warn", BlockConfig(value=1), tmp_path)
             first = pipeline.add_block("first", 1)
             first.register_function(source, ["shared"], save_to_disk=["shared"])
-            pipeline.run_all()
+            self.assertNotIn("shared", pipeline.artifact_registry)
             second = pipeline.add_block("second", 2)
 
             registration = second.register_function(mutate_disk_backed_input, ["result"])

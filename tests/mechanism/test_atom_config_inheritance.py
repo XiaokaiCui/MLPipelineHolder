@@ -132,7 +132,7 @@ class AtomConfigInheritanceTests(unittest.TestCase):
                 output_variable_names="selected_branch",
             )
             saved = pipeline.save_pipeline(root / "saved")
-            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True, trust_project=True)
 
             # When: the loaded root flag changes before the atom runs.
             loaded.set_configs({"joint_use_median_param": False})

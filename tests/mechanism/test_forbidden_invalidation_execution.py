@@ -44,7 +44,7 @@ class ForbiddenInvalidationExecutionTests(unittest.TestCase):
             _ = root.run_all()
             _ = root.save_pipeline()
 
-            loaded = PipelineHandler.load_pipeline(project_root)
+            loaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
             loaded_later = loaded.get_child_pipeline("later")
             stored = loaded_later.producer_outputs["later_block"]["later_value"]
             if not isinstance(stored, ArtifactRecord):
@@ -60,7 +60,7 @@ class ForbiddenInvalidationExecutionTests(unittest.TestCase):
             # Then: the unrelated later output remains persisted and loadable.
             self.assertTrue(artifact_path.exists())
             self.assertEqual(loaded_later.get_value("later_value"), 2)
-            reloaded = PipelineHandler.load_pipeline(project_root)
+            reloaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
             self.assertEqual(
                 reloaded.get_child_pipeline("later").get_value("later_value"),
                 2,

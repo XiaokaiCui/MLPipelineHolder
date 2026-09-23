@@ -111,11 +111,11 @@ def callable_identity_matches(
     is matched recursively (import path, or identity for runtime callables) and
     the bound ``args``/``keywords`` must be equal — so rebuilding an identical
     partial inline still no-ops, while a changed binding or a redefined wrapped
-    function correctly replaces. Importable module functions are matched by
-    import path (both the loaded registration and a freshly resolved callable
-    point at the same module attribute). Redefined ``__main__`` functions are
-    matched by executable definition so rerunning an unchanged notebook cell
-    no-ops, while runtime-only callables still require object identity.
+    function correctly replaces. Importable module functions require the same
+    import path and callable object, so reloading a module invalidates registrations
+    even when the path is unchanged. Redefined ``__main__`` functions are matched
+    by executable definition so rerunning an unchanged notebook cell no-ops, while
+    runtime-only callables still require object identity.
     """
     if isinstance(existing_callable, partial) and isinstance(callable_obj, partial):
         return _partial_identity_matches(existing_callable, callable_obj)
@@ -125,11 +125,20 @@ def callable_identity_matches(
             or import_path.startswith("__main__")
         ):
             return existing_import_path == import_path and (
-                existing_callable is callable_obj
+                _callable_objects_identical(existing_callable, callable_obj)
                 or _main_function_definitions_equal(existing_callable, callable_obj)
             )
-        return existing_import_path == import_path
-    return existing_callable is callable_obj
+        return existing_import_path == import_path and _callable_objects_identical(
+            existing_callable,
+            callable_obj,
+        )
+    return _callable_objects_identical(existing_callable, callable_obj)
+
+
+def _callable_objects_identical(existing: Any, new: Any) -> bool:
+    if inspect.ismethod(existing) and inspect.ismethod(new):
+        return existing.__self__ is new.__self__ and existing.__func__ is new.__func__
+    return existing is new
 
 
 def _main_function_definitions_equal(existing: Any, new: Any) -> bool:

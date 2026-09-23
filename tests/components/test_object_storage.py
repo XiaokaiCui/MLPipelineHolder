@@ -148,7 +148,7 @@ class TestObjectStorage(unittest.TestCase):
                 )
 
             _ = pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(project_root)
+            loaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
 
             self.assertEqual(loaded.get_from_storage(hash_id=json_id), {"answer": 42})
             restored = loaded.get_from_storage(hash_id=pickle_id)
@@ -169,7 +169,7 @@ class TestObjectStorage(unittest.TestCase):
             storage_artifacts = list((project_root / "artifacts" / "storage").glob("*"))
             self.assertEqual(len(storage_artifacts), 1)
             self.assertFalse(first_artifact.exists())
-            loaded = PipelineHandler.load_pipeline(project_root)
+            loaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
             self.assertEqual(
                 loaded.get_from_storage(hash_id=hash_id),
                 {"version": 2},
@@ -190,7 +190,7 @@ class TestObjectStorage(unittest.TestCase):
             messages = [str(item.message) for item in caught]
             self.assertTrue(any("falling back to pickle" in item for item in messages))
             self.assertTrue(any("could not be pickled" in item for item in messages))
-            loaded = PipelineHandler.load_pipeline(project_root)
+            loaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
             with self.assertRaisesRegex(ResolutionError, "No stored object"):
                 loaded.get_from_storage(hash_id=hash_id)
 
@@ -268,7 +268,7 @@ class TestObjectStorage(unittest.TestCase):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     with self.assertRaisesRegex(PersistenceError, "invalid record"):
-                        PipelineHandler.load_pipeline(project_root)
+                        PipelineHandler.load_pipeline(project_root, trust_project=True)
 
             restore.assert_not_called()
 

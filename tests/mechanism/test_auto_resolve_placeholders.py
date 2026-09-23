@@ -160,7 +160,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertIsInstance(loaded.get_value("out"), Lock)
             self.assertTrue(
@@ -190,6 +190,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
 
             with self.assertRaises(ResolutionError):
@@ -216,7 +217,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.save_pipeline(tmp / "bundle")
 
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True, verbose=True
+                tmp / "bundle", forced_deleting=True, verbose=True, trust_project=True
             )
             log_text = self._log_text(tmp / "project")
 
@@ -272,7 +273,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             log_text = self._log_text(tmp / "project")
 
             self.assertIn("not recoverable", log_text)
@@ -407,7 +408,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertIsInstance(loaded.get_value("lock_out"), Lock)
             self.assertEqual(loaded.get_value("plain_out"), "plain-value")
@@ -427,7 +428,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             value = loaded.get_value("out")
             self.assertIsInstance(value, Holder)
@@ -443,7 +444,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             pipeline.save_pipeline(tmp / "bundle")
 
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True, verbose=True
+                tmp / "bundle", forced_deleting=True, verbose=True, trust_project=True
             )
             log_text = self._log_text(tmp / "project")
 
@@ -464,6 +465,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
 
             self.assertIsInstance(loaded.config, PipelineSettings)
@@ -496,7 +498,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             root.run_all()
             root.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             loaded_child = loaded.get_child_pipeline("child")
 
             self.assertIs(
@@ -531,6 +533,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
 
             value = loaded.get_value("settings")
@@ -554,6 +557,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
                 verbose=True,
+                trust_project=True,
             )
             log_text = self._log_text(tmp / "project")
 
@@ -576,6 +580,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
                 verbose=True,
+                trust_project=True,
             )
             self.assertIn(
                 "rather than a real value",
@@ -586,6 +591,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
             self.assertNotIn(
                 "rather than a real value",
@@ -615,7 +621,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             root._rebuild_visible_state({})
             root.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertIsInstance(loaded.get_value("out"), Lock)
 
@@ -646,6 +652,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 verbose=True,
+                trust_project=True,
             )
             log_text = self._log_text(tmp / "project")
 
@@ -670,7 +677,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             root.save_pipeline(tmp / "bundle")
 
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True
+                tmp / "bundle", forced_deleting=True, trust_project=True
             )
             loaded_parent = loaded.get_child_pipeline("parent")
             loaded_leaf = loaded_parent.get_child_pipeline("leaf")
@@ -697,7 +704,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
             root.save_pipeline(tmp / "bundle")
 
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True
+                tmp / "bundle", forced_deleting=True, trust_project=True
             )
             loaded_parent = loaded.get_child_pipeline("parent")
             loaded_leaf = loaded_parent.get_child_pipeline("leaf")
@@ -926,6 +933,7 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
                 tmp / "bundle",
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
 
             self.assertIsInstance(loaded.config, ConfigWithDerived)

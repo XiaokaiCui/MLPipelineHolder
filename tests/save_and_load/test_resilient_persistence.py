@@ -60,7 +60,7 @@ class ResilientPersistenceTests(unittest.TestCase):
             )
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded = PipelineHandler.load_pipeline(root.project_root, trust_project=True)
             loaded_grandchild = (
                 loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
             )
@@ -126,7 +126,7 @@ class ResilientPersistenceTests(unittest.TestCase):
                     raise AssertionError("test value should be disk-backed")
                 Path(artifact.file_path).unlink()
 
-            loaded = PipelineHandler.load_pipeline(project_root)
+            loaded = PipelineHandler.load_pipeline(project_root, trust_project=True)
 
             self.assertIsNone(loaded.get_value("bad_output"))
             self.assertEqual(loaded.get_value("good_output"), {"good": 2})
@@ -175,7 +175,7 @@ class ResilientPersistenceTests(unittest.TestCase):
             )
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded = PipelineHandler.load_pipeline(root.project_root, trust_project=True)
             loaded_grandchild = (
                 loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
             )
@@ -210,7 +210,7 @@ class ResilientPersistenceTests(unittest.TestCase):
             )
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(pipeline.project_root)
+            loaded = PipelineHandler.load_pipeline(pipeline.project_root, trust_project=True)
 
             self.assertIsNone(loaded.get_value("value"))
             loaded._validate_runtime_output_pointers()
@@ -273,7 +273,7 @@ class ResilientPersistenceTests(unittest.TestCase):
             child_payload["producer_outputs"].pop("grandchild")
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(root.project_root)
+            loaded = PipelineHandler.load_pipeline(root.project_root, trust_project=True)
             loaded_grandchild = (
                 loaded.get_child_pipeline("child").get_child_pipeline("grandchild")
             )
@@ -321,6 +321,7 @@ class ResilientPersistenceTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(
                 pipeline.project_root,
                 forced_deleting=True,
+                trust_project=True,
             )
             loaded._validate_runtime_output_pointers()
 

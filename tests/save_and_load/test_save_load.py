@@ -7,7 +7,9 @@ from pathlib import Path
 import pickle
 import shutil
 from tempfile import TemporaryDirectory
+from typing import Any
 import unittest
+from unittest.mock import patch
 
 from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
 from mlpipelineholder.core.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
@@ -59,6 +61,31 @@ class SaveLoadTests(unittest.TestCase):
     def local_callable(self, value):
         return value + 1
 
+    def test_loading_requires_explicit_trust_before_accessing_project(self) -> None:
+        loaders: tuple[Any, ...] = (
+            PipelineHandler.load_pipeline,
+            PipelineHandler.load_project,
+        )
+        untrusted_values = (False, None, 1, "yes")
+        with TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "does-not-exist"
+            for loader in loaders:
+                with self.subTest(loader=loader.__name__, trust_project="omitted"):
+                    with self.assertRaisesRegex(TypeError, "trust_project"):
+                        loader(project)
+                for trust_project in untrusted_values:
+                    with self.subTest(
+                        loader=loader.__name__,
+                        trust_project=trust_project,
+                    ):
+                        with patch.object(Path, "open") as open_file:
+                            with self.assertRaisesRegex(
+                                PersistenceError,
+                                "only self-created or fully trusted pipeline projects",
+                            ):
+                                loader(project, trust_project=trust_project)
+                            open_file.assert_not_called()
+
     def test_runtime_registered_callable_must_be_available_during_load(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -78,7 +105,7 @@ class SaveLoadTests(unittest.TestCase):
                 PersistenceError,
                 "local_callable.*__main__.*before loading",
             ):
-                PipelineHandler.load_project(save_dir, forced_deleting=True)
+                PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
     def test_importable_callable_round_trips(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -90,7 +117,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.para_value_dict["result"], 3)
 
@@ -108,7 +135,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             loaded_registration = loaded.get_block("block").functions[0]
             self.assertEqual(
@@ -141,7 +168,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             _ = pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             child = loaded.get_child_pipeline("metrics")
             registration = child.blocks[0].functions[0]
 
@@ -176,7 +203,7 @@ class SaveLoadTests(unittest.TestCase):
             pipeline.save_pipeline(backup_dir)
             shutil.rmtree(project_dir)
 
-            loaded = PipelineHandler.load_pipeline(backup_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(backup_dir, forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.get_value("output_df"), 3)
 
@@ -229,7 +256,7 @@ class SaveLoadTests(unittest.TestCase):
                 )
                 self.assertNotIn("callable_obj", function_payload)
 
-                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
                 loaded.run_all()
 
                 bound_callable = loaded.get_value("bound_callable")
@@ -275,7 +302,7 @@ class SaveLoadTests(unittest.TestCase):
 
                 save_dir = tmp_path / "bundle"
                 pipeline.save_pipeline(save_dir)
-                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
                 loaded.run_all()
 
                 self.assertIs(loaded.get_constant_value("target_callable"), runtime_increment)
@@ -324,7 +351,7 @@ class SaveLoadTests(unittest.TestCase):
 
                 save_dir = tmp_path / "bundle"
                 pipeline.save_pipeline(save_dir)
-                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
                 loaded.run_all()
 
                 self.assertIs(
@@ -365,7 +392,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 51)
@@ -380,7 +407,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 7)
@@ -405,7 +432,7 @@ class SaveLoadTests(unittest.TestCase):
                 pipeline.save_project(save_dir)
                 delattr(__main__, "NotebookMainConfig")
 
-                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
                 self.assertEqual(loaded.get_value("result"), 3)
                 self.assertEqual(loaded.get_config_value("value"), 2)
@@ -441,7 +468,7 @@ class SaveLoadTests(unittest.TestCase):
                     pickle.dump({"pipeline_directory": str(save_dir)}, handle)
                 delattr(__main__, "LegacyMainConfig")
 
-                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
                 self.assertEqual(loaded.get_value("result"), 3)
                 self.assertEqual(loaded.get_config_value("value"), 2)
@@ -481,7 +508,7 @@ class SaveLoadTests(unittest.TestCase):
                     pickle.dump({"pipeline_directory": str(save_dir)}, handle)
                 delattr(__main__, "LegacyMainConfig")
 
-                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
                 loaded_child = loaded.get_child_pipeline("child")
 
                 self.assertEqual(loaded_child.get_config_value("value"), 2)
@@ -523,6 +550,7 @@ class SaveLoadTests(unittest.TestCase):
                 loaded = PipelineHandler.load_project(
                     save_dir,
                     forced_deleting=True,
+                    trust_project=True,
                 )
 
                 self.assertEqual(loaded.get_config_value("value"), 2)
@@ -555,7 +583,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("result"), 3.0)
@@ -579,7 +607,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             loaded_callable = loaded.get_constant_value("callable_value")
             loaded.run_all()
 
@@ -595,7 +623,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             with self.assertRaises(ResolutionError):
                 loaded.get_constant_value("callable_value")
@@ -618,7 +646,7 @@ class SaveLoadTests(unittest.TestCase):
 
                 save_dir = tmp_path / "bundle"
                 pipeline.save_project(save_dir)
-                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
                 self.assertIs(loaded.get_constant_value("callable_value"), namespace["main_increment"])
         finally:
@@ -652,7 +680,7 @@ class SaveLoadTests(unittest.TestCase):
                     PersistenceError,
                     "main_increment.*pipeline value 'callable_value'.*__main__.*before loading",
                 ):
-                    PipelineHandler.load_project(save_dir, forced_deleting=True)
+                    PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
         finally:
             if hasattr(__main__, "main_increment"):
                 delattr(__main__, "main_increment")
@@ -665,7 +693,7 @@ class SaveLoadTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             restored = loaded.get_constant_value("callable_value")
             self.assertTrue(callable(restored))
@@ -740,7 +768,7 @@ class SaveLoadTests(unittest.TestCase):
             bundle_snapshots = sorted((save_dir / "history_logs").glob("*.log"))
             self.assertTrue(bundle_snapshots)
 
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             loaded_snapshots = sorted((loaded.project_root / "history_logs").glob("*.log"))
             self.assertEqual(
                 [snapshot.name for snapshot in loaded_snapshots],

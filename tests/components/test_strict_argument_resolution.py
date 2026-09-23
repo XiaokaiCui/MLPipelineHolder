@@ -218,7 +218,7 @@ class StrictArgumentResolutionTests(unittest.TestCase):
             bundle = root / "bundle"
             pipeline.save_pipeline(bundle)
 
-            loaded = PipelineHandler.load_pipeline(bundle, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(bundle, forced_deleting=True, trust_project=True)
             result = loaded.get_value("result")
 
             self.assertIsInstance(result, UnpicklableResult)

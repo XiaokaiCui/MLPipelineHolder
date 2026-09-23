@@ -92,7 +92,7 @@ Importable functions restore by import path. Notebook-only runtime functions mus
 
 When restart safety is required, save to a non-overlapping path with `save_pipeline(...)`. Normal saves use `cleanup="auto"` to remove obsolete framework-generated artifact generations and orphaned child trees; use `cleanup="none"` only when the user explicitly wants those old generated files retained.
 
-`load_pipeline(...)` attempts to recover placeholder outputs by rerunning their producers by default. Mention placeholder and dataclass recovery only when the workflow contains non-picklable values or depends on that behaviour.
+Loading requires an explicit trust acknowledgement: use `load_pipeline(..., trust_project=True)` or `load_project(..., trust_project=True)` only for a self-created or fully trusted project. `load_pipeline(...)` attempts to recover placeholder outputs by rerunning their producers by default. Mention placeholder and dataclass recovery only when the workflow contains non-picklable values or depends on that behaviour.
 
 ## 7. Final Verification and Handoff
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import __main__
+import importlib
 import pickle
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -320,7 +322,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             pipeline.forbid_invalidate_objects()
             pipeline.save_pipeline()
 
-            loaded = PipelineHandler.load_pipeline(root)
+            loaded = PipelineHandler.load_pipeline(root, trust_project=True)
             loaded.get_block("b").register_expression("x = 2", forced=True)
 
             self.assertNotIn("x", loaded.para_value_dict)
@@ -969,6 +971,102 @@ class ForcedReRegistrationTests(unittest.TestCase):
 
             self.assertNotIn("x", pipeline.para_value_dict)
 
+    def test_unchanged_reloaded_importable_function_replaces(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            module_name = "mlpipelineholder_unchanged_reload_target"
+            module_path = tmp / f"{module_name}.py"
+            module_path.write_text("def produce() -> int:\n    return 1\n", encoding="utf-8")
+            sys.path.insert(0, str(tmp))
+            try:
+                module = importlib.import_module(module_name)
+                pipeline = PipelineHandler("unchanged-reload", {}, tmp / "pipeline")
+                block = pipeline.add_block("producer", 1)
+                original = block.register_function(module.produce, ["x"])
+                _ = pipeline.run_all()
+
+                reloaded = importlib.reload(module)
+                replacement = block.register_function(
+                    reloaded.produce,
+                    ["x"],
+                    forced=True,
+                )
+
+                self.assertIsNot(replacement, original)
+                self.assertNotIn("x", pipeline.para_value_dict)
+            finally:
+                sys.modules.pop(module_name, None)
+                sys.path.remove(str(tmp))
+
+    def test_reloaded_importable_function_respects_invalidation_mode_and_uses_new_code(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            module_name = "mlpipelineholder_reload_target"
+            module_path = tmp / f"{module_name}.py"
+            module_path.write_text("def produce() -> int:\n    return 1\n", encoding="utf-8")
+            sys.path.insert(0, str(tmp))
+            try:
+                module = importlib.import_module(module_name)
+                pipeline = PipelineHandler("reload", {}, tmp / "pipeline")
+                producer = pipeline.add_block("producer", 1)
+                downstream = pipeline.add_block("downstream", 2)
+                original = producer.register_function(module.produce, ["x"])
+                downstream.register_function(consume, ["z"])
+                _ = pipeline.run_all()
+                self.assertEqual(pipeline.get_value("x"), 1)
+                self.assertEqual(pipeline.get_value("z"), 2)
+
+                protected = PipelineHandler("protected-reload", {}, tmp / "protected")
+                protected_producer = protected.add_block("producer", 1)
+                protected_downstream = protected.add_block("downstream", 2)
+                protected_original = protected_producer.register_function(
+                    module.produce,
+                    ["x"],
+                )
+                protected_downstream.register_function(consume, ["z"])
+                _ = protected.run_all()
+                protected.forbid_invalidate_objects()
+                self.assertEqual(protected.get_value("x"), 1)
+                self.assertEqual(protected.get_value("z"), 2)
+
+                module_path.write_text(
+                    "def produce() -> int:\n    return 100\n",
+                    encoding="utf-8",
+                )
+                importlib.invalidate_caches()
+                cached_path = getattr(module, "__cached__", None)
+                if cached_path is not None:
+                    Path(cached_path).unlink(missing_ok=True)
+                reloaded = importlib.reload(module)
+
+                replacement = producer.register_function(
+                    reloaded.produce,
+                    ["x"],
+                    forced=True,
+                )
+                protected_replacement = protected_producer.register_function(
+                    reloaded.produce,
+                    ["x"],
+                    forced=True,
+                )
+
+                self.assertIsNot(replacement, original)
+                self.assertNotIn("x", pipeline.para_value_dict)
+                self.assertNotIn("z", pipeline.para_value_dict)
+                self.assertIsNot(protected_replacement, protected_original)
+                self.assertNotIn("x", protected.para_value_dict)
+                self.assertEqual(protected.get_value("z"), 2)
+
+                _ = pipeline.run_all()
+                _ = protected.run_all()
+                self.assertEqual(pipeline.get_value("x"), 100)
+                self.assertEqual(pipeline.get_value("z"), 101)
+                self.assertEqual(protected.get_value("x"), 100)
+                self.assertEqual(protected.get_value("z"), 101)
+            finally:
+                sys.modules.pop(module_name, None)
+                sys.path.remove(str(tmp))
+
     def test_import_path_identity_after_load_preserves_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
@@ -978,7 +1076,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             loaded_block = loaded.get_block("b")
             self.assertEqual(loaded.get_value("x"), 1)
 
@@ -1106,7 +1204,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("x"), 6)
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("x"), 6)
 
             loaded.get_block("b").register_function(
@@ -1127,7 +1225,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("x"), 6)
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("x"), 6)
 
             loaded.create_atom_child_pipeline(
@@ -1147,7 +1245,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("x"), 50)
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("x"), 50)
 
     def test_partial_with_nested_placeholder_argument_fails_save(self) -> None:
@@ -1186,7 +1284,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
                 pickle.dump(payload, handle)
 
             with self.assertRaisesRegex(PersistenceError, "missing_partial_callable"):
-                PipelineHandler.load_pipeline(bundle, forced_deleting=True)
+                PipelineHandler.load_pipeline(bundle, forced_deleting=True, trust_project=True)
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve me")
 
@@ -1215,7 +1313,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
                     PersistenceError,
                     "missing_bound_callback",
                 ):
-                    PipelineHandler.load_pipeline(bundle, forced_deleting=True)
+                    PipelineHandler.load_pipeline(bundle, forced_deleting=True, trust_project=True)
 
                 self.assertEqual(
                     marker.read_text(encoding="utf-8"),
@@ -1239,6 +1337,7 @@ class ForcedReRegistrationTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(
                 tmp / "bundle",
                 forced_deleting=True,
+                trust_project=True,
             )
 
             self.assertEqual(loaded.get_constant_value("payload").value, 7)
@@ -1869,7 +1968,7 @@ class AtomLockTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             loaded_atom = loaded.get_child_pipeline("atom")
 
             self.assertTrue(loaded_atom._is_atom)
@@ -1889,7 +1988,7 @@ class AtomLockTests(unittest.TestCase):
             pipeline.run_all()
             pipeline.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("x"), 1)
             self.assertEqual(loaded.get_value("y"), 2)
 

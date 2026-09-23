@@ -462,7 +462,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertEqual(pipeline.project_root, target_root)
             self.assertFalse(original_root.exists())
-            loaded = PipelineHandler.load_pipeline(target_root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(target_root, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("seed"), 3)
 
     def test_disk_artifact_is_saved_and_loaded_for_downstream_use(self) -> None:
@@ -494,7 +494,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "save_bundle"
             pipeline.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.registration_name, "persisted")
             self.assertEqual(loaded.para_value_dict["seed"], 6)
@@ -528,7 +528,7 @@ class PipelineHandlerTests(unittest.TestCase):
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("stale log\n", encoding="utf-8")
 
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             log_text = loaded.logger.log_file_path.read_text(encoding="utf-8")
             self.assertNotIn("stale log", log_text)
@@ -575,7 +575,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             loaded_value = loaded.get_value("model_obj")
 
             self.assertEqual(type(loaded.para_value_dict["model_obj"]).__name__, "ArtifactRecord")
@@ -597,6 +597,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 save_dir,
                 forced_deleting=True,
                 auto_resolve_placeholders=False,
+                trust_project=True,
             )
 
             self.assertTrue(
@@ -615,7 +616,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             loaded_value = loaded.get_value("optimizer_obj")
 
             self.assertIsInstance(loaded.para_value_dict["optimizer_obj"], TorchStateArtifactRecord)
@@ -634,7 +635,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             me_optimizer = loaded.get_value("me_optimizer")
             predictor_optimizer = loaded.get_value("predictor_optimizer")
@@ -697,7 +698,7 @@ class PipelineHandlerTests(unittest.TestCase):
             # load_pipeline warnings are unrelated to save and must still appear.
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertTrue(
                 any("historical function snapshots" in str(item.message) for item in caught)
@@ -1221,7 +1222,7 @@ class PipelineHandlerTests(unittest.TestCase):
             )
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertEqual(
                 loaded.logger.get_traceback_settings(),
@@ -1249,7 +1250,7 @@ class PipelineHandlerTests(unittest.TestCase):
             with payload_path.open("wb") as handle:
                 pickle.dump(payload, handle)
 
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             self.assertEqual(
                 loaded.logger.get_traceback_settings(),
                 {
@@ -1393,7 +1394,7 @@ class PipelineHandlerTests(unittest.TestCase):
             save_dir = tmp / "bundle"
             pipeline.save_pipeline(save_dir)
 
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("result"), 20)
 
             new_block = loaded.add_block("calc", 10.0, forced=True)
@@ -1416,7 +1417,7 @@ class PipelineHandlerTests(unittest.TestCase):
             save_dir = tmp / "bundle"
             pipeline.save_pipeline(save_dir)
 
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             new_calc = loaded.add_block("calc", 10.0, forced=True)
             new_calc.register_function(new_calc_v2, ["result"], forced=True)
@@ -1579,7 +1580,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "success")
@@ -1634,7 +1635,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "skipped")
@@ -1654,7 +1655,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             run = loaded.run_all()
 
             self.assertEqual(run.status, "skipped")
@@ -1757,7 +1758,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 pickle.dump(payload, handle)
 
             with self.assertRaises(PersistenceError):
-                PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+                PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
     def test_pipeline_creation_can_reject_non_empty_root_explicitly(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2275,7 +2276,7 @@ class PipelineHandlerTests(unittest.TestCase):
             shutil.copytree(source, backup)
 
             with patch("builtins.input", side_effect=["yes", ""]):
-                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_constant_value("blob_constant"), "value=3")
             self.assertEqual(loaded.get_value("saved_blob"), "value=3")
 
@@ -2538,7 +2539,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             pipeline.run_all()
             pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(project, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(project, forced_deleting=True, trust_project=True)
             loaded_atom = loaded.get_child_pipeline("atom")
             self.assertIsInstance(loaded_atom, AtomPipeline)
             self.assertTrue(loaded_atom._is_atom)
@@ -2965,7 +2966,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                PipelineHandler.load_project(save_dir, forced_deleting=True)
+                PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertTrue(
                 any("historical function snapshots" in str(item.message) for item in caught)
@@ -2998,7 +2999,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             loaded_child = loaded.get_child_pipeline("child")
 
             self.assertEqual(
@@ -3022,7 +3023,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_project(save_dir)
-            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True, trust_project=True)
             loaded.run_all()
 
             self.assertEqual(loaded.get_value("seed"), 4)
@@ -3274,7 +3275,7 @@ class PipelineHandlerTests(unittest.TestCase):
             )
             save_dir = tmp_path / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             self.assertTrue(loaded.memory_saving_mode)
             self.assertTrue(loaded.memory_profile_logging)
@@ -3386,7 +3387,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_pipeline(save_dir)
-            loaded_parent = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded_parent = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             loaded_child_one = loaded_parent.get_child_pipeline("pipeline_children_1")
             loaded_child_two = loaded_parent.get_child_pipeline("pipeline_children_2")
@@ -3411,7 +3412,7 @@ class PipelineHandlerTests(unittest.TestCase):
             shutil.copytree(source, copied)
 
             with patch("builtins.input", side_effect=["no", "yes"]) as mocked_input:
-                loaded = PipelineHandler.load_pipeline(copied)
+                loaded = PipelineHandler.load_pipeline(copied, trust_project=True)
             artifact = loaded.para_value_dict["saved_blob"]
 
             self.assertEqual(mocked_input.call_count, 2)
@@ -3447,7 +3448,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 "builtins.input",
                 side_effect=["yes", str(new_backup)],
             ) as mocked_input:
-                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True, trust_project=True)
 
             # Then the root and descendant paths move to the copy
             loaded_child = loaded.get_child_pipeline("child")
@@ -3477,7 +3478,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             # When the user adopts the copy and leaves the backup response empty
             with patch("builtins.input", side_effect=["yes", ""]):
-                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(copied, forced_deleting=True, trust_project=True)
 
             # Then the loading path is the root and backup is disabled
             self.assertEqual(loaded.project_root, copied)
@@ -3506,7 +3507,7 @@ class PipelineHandlerTests(unittest.TestCase):
             stale_file.write_text("stale", encoding="utf-8")
 
             with patch("builtins.input", return_value="yes") as mocked_input:
-                loaded = PipelineHandler.load_pipeline(backup)
+                loaded = PipelineHandler.load_pipeline(backup, trust_project=True)
 
             self.assertEqual(mocked_input.call_count, 1)
             self.assertEqual(loaded.project_root, work)
@@ -3535,7 +3536,7 @@ class PipelineHandlerTests(unittest.TestCase):
             (work / "stale.txt").write_text("stale", encoding="utf-8")
 
             with patch("builtins.input", side_effect=AssertionError("input should not be called")):
-                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(backup, forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.project_root, work)
             self.assertEqual(loaded.get_value("seed"), 3)
@@ -3561,7 +3562,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             with patch("builtins.input", return_value="no"):
                 with self.assertRaises(PersistenceError):
-                    PipelineHandler.load_pipeline(backup)
+                    PipelineHandler.load_pipeline(backup, trust_project=True)
 
             self.assertTrue(stale_file.exists())
 
@@ -3591,7 +3592,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 pickle.dump(payload, handle)
 
             with self.assertRaises(PersistenceError):
-                PipelineHandler.load_pipeline(backup, forced_deleting=True)
+                PipelineHandler.load_pipeline(backup, forced_deleting=True, trust_project=True)
 
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me")
 
@@ -3601,7 +3602,7 @@ class PipelineHandlerTests(unittest.TestCase):
             (bundle / "pipeline_state.pkl").write_bytes(b"not a pickle")
 
             with self.assertRaises(PersistenceError):
-                PipelineHandler.load_pipeline(bundle)
+                PipelineHandler.load_pipeline(bundle, trust_project=True)
 
     def test_pipeline_rejects_overlapping_backup_directory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3657,6 +3658,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 loaded = PipelineHandler.load_pipeline(
                     saved_copy,
                     forced_deleting=True,
+                    trust_project=True,
                 )
 
             # Then it behaves as the recorded backup for the original project root
@@ -3930,7 +3932,7 @@ class PipelineHandlerTests(unittest.TestCase):
             parent = PipelineHandler("parent", DemoConfig(base=1), tmp_path / "parent")
             setup = parent.add_block("setup", 1)
             setup.register_function(produce_seed, ["shared"], save_to_disk=["shared"])
-            parent.run_all()
+            self.assertNotIn("shared", parent.artifact_registry)
 
             parent.create_atom_child_pipeline(
                 child_name="child_warn",
@@ -4293,6 +4295,7 @@ class PipelineHandlerTests(unittest.TestCase):
                 loaded = PipelineHandler.load_pipeline(
                     tmp_path / "bundle",
                     forced_deleting=True,
+                    trust_project=True,
                 )
 
             self.assertEqual(loaded.get_value("seed"), 2)
@@ -4423,7 +4426,7 @@ class PipelineHandlerTests(unittest.TestCase):
 
             save_dir = tmp_path / "bundle"
             parent.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             loaded_a = loaded.get_child_pipeline("child_a")
             loaded_b = loaded.get_child_pipeline("child_b")
 
@@ -4661,7 +4664,7 @@ class StrictModeTests(unittest.TestCase):
             )
             save_dir = tmp / "bundle"
             pipeline.save_pipeline(save_dir)
-            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
             self.assertTrue(loaded.strict_mode)
 
     def test_strict_mode_attach_cross_boundary_conflict_raises(self) -> None:
@@ -4967,7 +4970,7 @@ class StrictModeTests(unittest.TestCase):
             pipeline.set_constant_value("bad_const", build_unserializable_object())
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True, verbose=True
+                tmp / "bundle", forced_deleting=True, verbose=True, trust_project=True
             )
             log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
                 encoding="utf-8"
@@ -4981,7 +4984,7 @@ class StrictModeTests(unittest.TestCase):
             pipeline.set_constant_value("bad_const", build_unserializable_object())
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(
-                tmp / "bundle", forced_deleting=True
+                tmp / "bundle", forced_deleting=True, trust_project=True
             )
             log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
                 encoding="utf-8"
@@ -4994,7 +4997,7 @@ class StrictModeTests(unittest.TestCase):
             pipeline = PipelineHandler("ph", {}, tmp / "project")
             pipeline.set_constant_value("bad_const", build_unserializable_object())
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             with self.assertRaises(ResolutionError):
                 loaded.get_constant_value("bad_const")
 
@@ -5006,7 +5009,7 @@ class StrictModeTests(unittest.TestCase):
             block.register_function(use_constant_input, ["out"], param_mapping={"x": "bad_const"})
             pipeline.set_constant_value("bad_const", build_unserializable_object())
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             with self.assertRaises(ResolutionError):
                 loaded.run_block("b")
 
@@ -5211,7 +5214,7 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(inner.x, 5)
 
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertIsInstance(loaded.config.inner, NestedInnerConfig)
             self.assertEqual(loaded.config.inner.x, 5)
@@ -5229,7 +5232,7 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("out"), 10)
 
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.get_value("out"), 10)
 
@@ -5243,7 +5246,7 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("out"), 15)
 
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.get_value("out"), 15)
 
@@ -5260,7 +5263,7 @@ class ReviewRegressionTests(unittest.TestCase):
             self.assertEqual(pipeline.get_value("out"), 6)
 
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.get_value("out"), 6)
 
@@ -5276,7 +5279,7 @@ class ReviewRegressionTests(unittest.TestCase):
             parent.add_child_pipeline(child, 1)
             parent.save_pipeline(tmp / "bundle")
 
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             loaded_child = loaded.get_child_pipeline("child")
             history = loaded_child.get_result_history()
 

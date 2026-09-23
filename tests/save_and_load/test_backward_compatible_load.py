@@ -167,7 +167,7 @@ class BackwardCompatibleLoadTests(unittest.TestCase):
             state_path.write_bytes(pickle.dumps(payload))
 
             # When: the backup is loaded with the current library version.
-            loaded = PipelineHandler.load_pipeline(work)
+            loaded = PipelineHandler.load_pipeline(work, trust_project=True)
 
             # Then: the legacy record is repaired and the value materializes.
             record = loaded.producer_outputs["producer"]["blob"]
@@ -199,7 +199,7 @@ class BackwardCompatibleLoadTests(unittest.TestCase):
             function_payload.pop("ignore_underscore_outputs")
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(work)
+            loaded = PipelineHandler.load_pipeline(work, trust_project=True)
             registration = loaded.get_block("producer").functions[0]
             self.assertFalse(registration.ignore_underscore_outputs)
             self.assertEqual(registration.produced_output_names, ["_"])
@@ -228,9 +228,9 @@ class BackwardCompatibleLoadTests(unittest.TestCase):
             function_payload.pop("ignore_underscore_outputs")
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(work)
+            loaded = PipelineHandler.load_pipeline(work, trust_project=True)
             _ = loaded.save_pipeline()
-            reloaded = PipelineHandler.load_pipeline(work)
+            reloaded = PipelineHandler.load_pipeline(work, trust_project=True)
             registration = reloaded.get_block("producer").functions[0]
 
             self.assertFalse(registration.ignore_underscore_outputs)
@@ -257,7 +257,7 @@ class BackwardCompatibleLoadTests(unittest.TestCase):
             function_payload.pop("ignore_underscore_outputs")
             state_path.write_bytes(pickle.dumps(payload))
 
-            loaded = PipelineHandler.load_pipeline(work)
+            loaded = PipelineHandler.load_pipeline(work, trust_project=True)
             loaded_block = loaded.get_block("producer")
             original = loaded_block.functions[0]
             recreated = loaded_block.register_function(

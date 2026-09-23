@@ -108,7 +108,7 @@ class ColourfulLogsTests(unittest.TestCase):
             bundle = root_path / "bundle"
             pipeline.save_pipeline(bundle)
 
-            loaded = PipelineHandler.load_pipeline(bundle, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(bundle, forced_deleting=True, trust_project=True)
 
             self.assertTrue(loaded.colourful_logs)
             self.assertTrue(loaded.get_child_pipeline("child").colourful_logs)
