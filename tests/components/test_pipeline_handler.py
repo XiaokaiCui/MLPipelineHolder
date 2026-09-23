@@ -148,6 +148,10 @@ def pair(seed: int) -> tuple[int, int]:
     return seed, seed + 1
 
 
+def atom_outputs_with_ignored_slots(base: int) -> tuple[str, int, str, float]:
+    return "unused-first", base, "unused-third", base / 2
+
+
 def needs_missing(missing: int) -> int:
     return missing
 
@@ -3955,6 +3959,86 @@ class PipelineHandlerTests(unittest.TestCase):
                     param_mapping_dct={"prefix": "prefix"},
                     forced=True,
                 )
+
+    def test_create_atom_child_pipeline_ignores_positional_output_slots(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=8), tmp_path / "parent")
+
+            parent.create_atom_child_pipeline(
+                child_name="ignored_outputs",
+                execution_priority=10.0,
+                target_function=atom_outputs_with_ignored_slots,
+                output_variable_names=["_", "o2e_root", "_", "bce"],
+                save_to_disk_lst=["o2e_root"],
+                forced=True,
+            )
+            run = parent.run_all()
+
+            child = parent.get_child_pipeline("ignored_outputs")
+            registration = child.blocks[0].functions[0]
+            self.assertEqual(
+                registration.output_names,
+                ["_", "o2e_root", "_", "bce"],
+            )
+            self.assertEqual(child.list_declared_outputs(), {"o2e_root", "bce"})
+            self.assertEqual(parent.get_value("o2e_root"), 8)
+            self.assertEqual(parent.get_value("bce"), 4.0)
+            self.assertNotIn("_", parent.list_declared_outputs())
+            self.assertNotIn("_", parent.para_value_dict)
+            self.assertNotIn("_", run.produced_outputs)
+
+    def test_create_atom_child_pipeline_rejects_ignored_disk_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=8), tmp_path / "parent")
+
+            with self.assertRaisesRegex(
+                RegistrationError,
+                "Ignored output marker '_' cannot be included in save_to_disk_lst",
+            ):
+                parent.create_atom_child_pipeline(
+                    child_name="ignored_output",
+                    execution_priority=10.0,
+                    target_function=produce_seed,
+                    output_variable_names=["_"],
+                    save_to_disk_lst=["_"],
+                    forced=True,
+                )
+
+            self.assertNotIn("ignored_output", parent.nodes_by_name)
+
+    def test_failed_atom_function_registration_preserves_existing_atom(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=8), tmp_path / "parent")
+            parent.create_atom_child_pipeline(
+                child_name="pair_atom",
+                execution_priority=10.0,
+                target_function=pair,
+                output_variable_names=["left", "right"],
+                param_mapping={"seed": "base"},
+                forced=True,
+            )
+            parent.run_all()
+            original = parent.get_child_pipeline("pair_atom")
+
+            with self.assertRaisesRegex(
+                RegistrationError,
+                "Failed to register target function for atom pipeline 'pair_atom'",
+            ):
+                parent.create_atom_child_pipeline(
+                    child_name="pair_atom",
+                    execution_priority=10.0,
+                    target_function=pair,
+                    output_variable_names=["only_one"],
+                    param_mapping={"seed": "base"},
+                    forced=True,
+                )
+
+            self.assertIs(parent.get_child_pipeline("pair_atom"), original)
+            self.assertEqual(parent.get_value("left"), 8)
+            self.assertEqual(parent.get_value("right"), 9)
 
     def test_child_standalone_run_updates_parent_visible_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:

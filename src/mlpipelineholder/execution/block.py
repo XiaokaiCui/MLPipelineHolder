@@ -209,7 +209,32 @@ class ExecutionBlock:
         try:
             parsed = ast.parse(code, mode="exec")
         except SyntaxError as exc:
-            raise RegistrationError(f"Invalid expression syntax: {exc}") from exc
+            location = ""
+            if exc.lineno is not None:
+                location = f" at line {exc.lineno}"
+                if exc.offset is not None:
+                    location += f", column {exc.offset}"
+            message = f"Invalid expression syntax{location}: {exc.msg}"
+            code_lines = code.splitlines()
+            if exc.lineno is not None and 1 <= exc.lineno <= len(code_lines):
+                error_index = exc.lineno - 1
+                context_start = max(0, error_index - 2)
+                context_end = min(len(code_lines), error_index + 2)
+                number_width = len(str(context_end))
+                context: list[str] = []
+                for index in range(context_start, context_end):
+                    source_line = code_lines[index]
+                    prefix = ">" if index == error_index else " "
+                    gutter = f"{prefix} {index + 1:>{number_width}} | "
+                    context.append(f"{gutter}{source_line.expandtabs()}")
+                    if index == error_index and exc.offset is not None:
+                        prefix_width = len(source_line[: exc.offset - 1].expandtabs())
+                        end_offset = exc.end_offset or exc.offset + 1
+                        marker_width = max(1, end_offset - exc.offset)
+                        marker = " " * prefix_width + "^" * marker_width
+                        context.append(f"{' ' * len(gutter)}{marker}")
+                message += "\n" + "\n".join(context)
+            raise RegistrationError(message) from exc
         if len(parsed.body) != 1:
             raise RegistrationError("Expressions must contain exactly one statement")
         for node in ast.walk(parsed):
@@ -340,7 +365,7 @@ class ExecutionBlock:
         output_names = [
             output_name
             for registration in consumers
-            for output_name in registration.output_names
+            for output_name in registration.produced_output_names
         ]
         if not output_names:
             return
@@ -374,6 +399,10 @@ class ExecutionBlock:
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> Any:
         self.parent._assert_mutable("accept new functions")
+        if "_" in set(save_to_disk or []):
+            raise RegistrationError(
+                "Ignored output marker '_' cannot be included in save_to_disk"
+            )
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         existing_registration = next(
             (
@@ -426,8 +455,8 @@ class ExecutionBlock:
                 self.registration_name,
                 self.execution_priority,
                 self.execution_priority,
-                list(existing_registration.output_names),
-                list(registration.output_names),
+                list(existing_registration.produced_output_names),
+                list(registration.produced_output_names),
             )
             index = self.functions.index(existing_registration)
             self.functions[index] = registration
@@ -459,18 +488,24 @@ class ExecutionBlock:
             new_output_names = [output_variable_names]
         else:
             new_output_names = list(output_variable_names)
+        new_produced_output_names = [
+            output_name for output_name in new_output_names if output_name != "_"
+        ]
         args_state, kwargs_state = self._variadic_registration_state(
             var_pos_name,
             var_kw_name,
         )
         normalized_overrides = self.parent._normalize_overridden_outputs(
-            new_output_names,
+            new_produced_output_names,
             overridden_outputs,
             current_node_name=self.registration_name,
             current_priority=self.execution_priority,
         )
         return (
             existing.output_names == new_output_names
+            # Public registrations use discard semantics. A legacy registration
+            # that treated "_" as a real output must be replaced, not reused.
+            and existing.ignore_underscore_outputs
             and existing.save_to_disk == set(save_to_disk or [])
             and existing.param_mapping == dict(param_mapping or {})
             and existing.var_pos_name == var_pos_name
@@ -516,6 +551,7 @@ class ExecutionBlock:
         replacing: FunctionRegistration | None = None,
         commit: bool = True,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
+        ignore_underscore_outputs: bool = True,
     ) -> FunctionRegistration:
         del forced
         if any(
@@ -532,29 +568,39 @@ class ExecutionBlock:
             output_names = [output_variable_names]
         else:
             output_names = list(output_variable_names)
-        if len(set(output_names)) != len(output_names):
+        produced_output_names = (
+            [output_name for output_name in output_names if output_name != "_"]
+            if ignore_underscore_outputs
+            else list(output_names)
+        )
+        if len(set(produced_output_names)) != len(produced_output_names):
             raise RegistrationError("Duplicate output variable names are not allowed")
 
         existing_local_outputs = {
             output_name
             for registration in self.functions
             if registration is not replacing
-            for output_name in registration.output_names
+            and isinstance(registration, FunctionRegistration)
+            for output_name in registration.produced_output_names
         }
-        overlap = existing_local_outputs.intersection(output_names)
+        overlap = existing_local_outputs.intersection(produced_output_names)
         if overlap:
             raise RegistrationError(
                 f"Duplicate output names inside block '{self.registration_name}': {sorted(overlap)}"
             )
 
         disk_names = set(save_to_disk or [])
-        if not disk_names.issubset(set(output_names)):
+        if ignore_underscore_outputs and "_" in disk_names:
+            raise RegistrationError(
+                "Ignored output marker '_' cannot be included in save_to_disk"
+            )
+        if not disk_names.issubset(set(produced_output_names)):
             raise RegistrationError(
                 "Disk-saved output names must be a subset of output variable names"
             )
-        self.parent._validate_output_names_against_config(output_names)
+        self.parent._validate_output_names_against_config(produced_output_names)
         normalized_overrides = self.parent._normalize_overridden_outputs(
-            output_names,
+            produced_output_names,
             overridden_outputs,
             current_node_name=self.registration_name,
             current_priority=self.execution_priority,
@@ -586,6 +632,7 @@ class ExecutionBlock:
             input_names=[],
             output_names=output_names,
             save_to_disk=disk_names,
+            ignore_underscore_outputs=ignore_underscore_outputs,
             param_mapping=dict(param_mapping or {}),
             var_pos_name=var_pos_name,
             var_kw_name=var_kw_name,
@@ -687,7 +734,7 @@ class ExecutionBlock:
                 name
                 for name in mapped_inputs
                 if name in self.parent._registration_disk_backed_names()
-                and name not in registration.output_names
+                and name not in registration.produced_output_names
             )
             if risky:
                 if not getattr(self.parent, "suppress_registration_advisories", False):
@@ -762,7 +809,7 @@ class ExecutionBlock:
         # mapping and 'logger' are always resolvable.
         if visible_names is None:
             visible_names = self._registration_visible_names()
-        resolvable_names = visible_names | set(registration.output_names)
+        resolvable_names = visible_names | set(registration.produced_output_names)
         for key, value in registration.param_mapping.items():
             if value is None or value == "logger":
                 continue
@@ -831,7 +878,11 @@ class ExecutionBlock:
         return {
             output_name
             for registration in self.functions
-            for output_name in registration.output_names
+            for output_name in (
+                registration.output_names
+                if isinstance(registration, ExpressionRegistration)
+                else registration.produced_output_names
+            )
         }
 
     def execute(
@@ -851,8 +902,13 @@ class ExecutionBlock:
                 if isinstance(registration, ExpressionRegistration)
                 else registration.input_names
             )
-            same_block_dependencies = block_output_names.difference(
+            registration_output_names = (
                 registration.output_names
+                if isinstance(registration, ExpressionRegistration)
+                else registration.produced_output_names
+            )
+            same_block_dependencies = block_output_names.difference(
+                registration_output_names
             ).intersection(input_names)
             if same_block_dependencies:
                 raise ExecutionError(
@@ -1046,20 +1102,33 @@ class ExecutionBlock:
         if len(registration.output_names) == 0:
             return {}
         if len(registration.output_names) == 1:
-            return {registration.output_names[0]: result}
+            output_name = registration.output_names[0]
+            return (
+                {}
+                if registration.ignore_underscore_outputs and output_name == "_"
+                else {output_name: result}
+            )
 
         callable_label = registration.import_path or registration.function_name
         if not isinstance(result, (tuple, list)):
             raise ExecutionError(
-                f"Function '{registration.function_name}' ({callable_label}) declared multiple outputs {registration.output_names} "
+                f"Function '{registration.function_name}' ({callable_label}) declared multiple output slots {registration.output_names} "
                 f"but returned {type(result).__name__}: {ExecutionBlock._preview_value(result)}"
             )
         if len(result) != len(registration.output_names):
             raise ExecutionError(
                 f"Function '{registration.function_name}' ({callable_label}) returned {len(result)} values but "
-                f"{len(registration.output_names)} outputs were declared: {registration.output_names}"
+                f"{len(registration.output_names)} output slots were declared: {registration.output_names}"
             )
-        return dict(zip(registration.output_names, result, strict=True))
+        return {
+            output_name: output_value
+            for output_name, output_value in zip(
+                registration.output_names,
+                result,
+                strict=True,
+            )
+            if not registration.ignore_underscore_outputs or output_name != "_"
+        }
 
     @staticmethod
     def _preview_value(value: Any, max_length: int = 200) -> str:

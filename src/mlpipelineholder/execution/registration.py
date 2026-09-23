@@ -197,6 +197,8 @@ class AtomRegistrationMixin:
             return False
         return (
             old_reg.output_names == new_reg.output_names
+            and old_reg.ignore_underscore_outputs
+            == new_reg.ignore_underscore_outputs
             and old_reg.save_to_disk == new_reg.save_to_disk
             and old_reg.param_mapping == new_reg.param_mapping
             and old_reg.var_pos_name == new_reg.var_pos_name

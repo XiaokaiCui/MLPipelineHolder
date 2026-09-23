@@ -43,6 +43,10 @@ def importable(value: int) -> int:
     return value + 1
 
 
+def importable_outputs_with_ignored_slots(value: int) -> tuple[str, int, str, float]:
+    return "unused-first", value, "unused-third", value / 2
+
+
 def mapped_variadic(obj: int, *more_values: int, scale: int = 1, **extra_values: int) -> int:
     return (obj + sum(more_values) + sum(extra_values.values())) * scale
 
@@ -89,6 +93,67 @@ class SaveLoadTests(unittest.TestCase):
             loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
 
             self.assertEqual(loaded.para_value_dict["result"], 3)
+
+    def test_ignored_output_slots_round_trip(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("persist-ignored", SaveConfig(value=8), tmp_path / "project")
+            block = pipeline.add_block("block", 1)
+            block.register_function(
+                importable_outputs_with_ignored_slots,
+                ["_", "o2e_root", "_", "bce"],
+                save_to_disk=["o2e_root"],
+            )
+            pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            pipeline.save_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+
+            loaded_registration = loaded.get_block("block").functions[0]
+            self.assertEqual(
+                loaded_registration.output_names,
+                ["_", "o2e_root", "_", "bce"],
+            )
+            self.assertEqual(loaded_registration.produced_output_names, ["o2e_root", "bce"])
+            self.assertEqual(loaded.list_declared_outputs(), {"o2e_root", "bce"})
+            self.assertEqual(loaded.get_value("o2e_root"), 8)
+            self.assertEqual(loaded.get_value("bce"), 4.0)
+            self.assertNotIn("_", loaded.para_value_dict)
+
+    def test_atom_ignored_output_slots_round_trip(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "persist-atom-ignored",
+                SaveConfig(value=8),
+                tmp_path / "project",
+            )
+            pipeline.create_atom_child_pipeline(
+                child_name="metrics",
+                execution_priority=1,
+                target_function=importable_outputs_with_ignored_slots,
+                output_variable_names=["_", "o2e_root", "_", "bce"],
+                save_to_disk_lst=["o2e_root"],
+                forced=True,
+            )
+            _ = pipeline.run_all()
+
+            save_dir = tmp_path / "bundle"
+            _ = pipeline.save_project(save_dir)
+            loaded = PipelineHandler.load_project(save_dir, forced_deleting=True)
+            child = loaded.get_child_pipeline("metrics")
+            registration = child.blocks[0].functions[0]
+
+            self.assertEqual(
+                registration.output_names,
+                ["_", "o2e_root", "_", "bce"],
+            )
+            self.assertEqual(registration.produced_output_names, ["o2e_root", "bce"])
+            self.assertEqual(loaded.list_declared_outputs(), {"o2e_root", "bce"})
+            self.assertEqual(loaded.get_value("o2e_root"), 8)
+            self.assertEqual(loaded.get_value("bce"), 4.0)
+            self.assertNotIn("_", loaded.para_value_dict)
 
     def test_explicit_save_path_preserves_disk_backed_output_without_original_tree(self) -> None:
         with TemporaryDirectory() as temp_dir:
