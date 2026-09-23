@@ -85,7 +85,7 @@ class ReconstructionMixin:
             pipeline_class = atom_pipeline_class()
         else:
             pipeline_class = cls
-        pipeline = pipeline_class(
+        pipeline = pipeline_class._construct_for_reconstruction(
             registration_name=payload["registration_name"],
             configuration=config,
             local_folder_path=project_root,
@@ -103,9 +103,6 @@ class ReconstructionMixin:
                 else payload.get("colourful_logs", False)
             ),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
-            _allow_existing_root=True,
-            _allow_legacy_config_object=True,
-            _preserve_existing_log=parent is not None,
         )
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)

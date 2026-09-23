@@ -24,8 +24,11 @@ class ConvenientDefaultsTests(unittest.TestCase):
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
             parameters = signature(PipelineHandler).parameters
-            self.assertIs(parameters["forced"].default, True)
-            self.assertIs(parameters["_allow_existing_root"].default, True)
+            self.assertIs(parameters["clean_directory"].default, False)
+            self.assertNotIn("forced", parameters)
+            self.assertNotIn("_allow_existing_root", parameters)
+            self.assertNotIn("_allow_legacy_config_object", parameters)
+            self.assertNotIn("_preserve_existing_log", parameters)
             self.assertEqual(pipeline.project_root, project_root)
 
     def test_add_block_replaces_same_named_block_by_default(self) -> None:
@@ -66,7 +69,8 @@ class ConvenientDefaultsTests(unittest.TestCase):
     def test_atom_factory_convenience_defaults(self) -> None:
         parameters = signature(PipelineHandler.create_atom_child_pipeline).parameters
 
-        self.assertIs(parameters["allow_existing_root"].default, True)
+        self.assertNotIn("allow_existing_root", parameters)
+        self.assertNotIn("clean_directory", parameters)
         self.assertIs(parameters["forced"].default, True)
         self.assertEqual(parameters["block_priority"].default, 10.0)
 

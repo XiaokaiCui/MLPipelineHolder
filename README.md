@@ -119,6 +119,6 @@ The full public API is documented in a standalone reference page:
 It covers:
 
 - main classes: `PipelineHolder` (the legacy `PipelineHandler` name is an alias for the same class), `ExecutionBlock`, `GateBlock`, `PipelineLogger`
-- functions and decorators: `rename_args`
+- functions and decorators: `pipeline_resolving`, `rename_args`
 - exceptions: `PipelineError`, `RegistrationError`, `ResolutionError`, `ExecutionError`, `PersistenceError`
 - data models in `mlpipelineholder.core.models` (e.g. `ArtifactRecord`, `RunRecord`, function/expression/block registrations, runtime value and callable references)

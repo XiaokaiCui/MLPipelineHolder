@@ -500,7 +500,7 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(loaded.para_value_dict["seed"], 6)
             self.assertEqual(list(loaded.blocks_by_name), ["setup"])
 
-    def test_pipeline_logger_starts_with_blank_file_on_create(self) -> None:
+    def test_pipeline_logger_preserves_existing_file_on_create(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             metadata_root = tmp_path / "metadata"
@@ -508,12 +508,14 @@ class PipelineHandlerTests(unittest.TestCase):
             log_path = metadata_root / "pipeline.log"
             log_path.write_text("old log\n", encoding="utf-8")
 
-            with patch("builtins.input", return_value="yes"):
-                pipeline = PipelineHandler("blank-log", DemoConfig(base=1), tmp_path, forced=True)
+            pipeline = PipelineHandler("preserved-log", DemoConfig(base=1), tmp_path)
 
-            self.assertEqual(pipeline.logger.log_file_path.read_text(encoding="utf-8"), "")
+            self.assertEqual(
+                pipeline.logger.log_file_path.read_text(encoding="utf-8"),
+                "old log\n",
+            )
 
-    def test_load_pipeline_replaces_stale_log_with_current_load_messages(self) -> None:
+    def test_load_pipeline_preserves_existing_log_with_current_load_messages(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             project_dir = tmp_path / "project"
@@ -531,7 +533,7 @@ class PipelineHandlerTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
 
             log_text = loaded.logger.log_file_path.read_text(encoding="utf-8")
-            self.assertNotIn("stale log", log_text)
+            self.assertIn("stale log", log_text)
             self.assertIn("Pipeline project directory has been copied from backup path", log_text)
             self.assertIn("Pipeline has been loaded from the project root", log_text)
 
@@ -1760,21 +1762,28 @@ class PipelineHandlerTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
-    def test_pipeline_creation_can_reject_non_empty_root_explicitly(self) -> None:
+    def test_pipeline_creation_warns_and_reuses_non_empty_root_when_cleanup_cancelled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
-            (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
+            marker = tmp_path / "marker.txt"
+            marker.write_text("occupied", encoding="utf-8")
 
-            with self.assertRaises(RegistrationError):
-                PipelineHandler(
-                    "root-check",
-                    DemoConfig(base=1),
-                    tmp_path,
-                    forced=False,
-                    _allow_existing_root=False,
-                )
+            with patch("builtins.input", return_value="no"):
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    "clean_directory=True.*deletion was cancelled",
+                ):
+                    pipeline = PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        tmp_path,
+                        clean_directory=True,
+                    )
 
-    def test_forced_pipeline_creation_clears_non_empty_root_after_yes(self) -> None:
+            self.assertEqual(marker.read_text(encoding="utf-8"), "occupied")
+            self.assertEqual(pipeline.project_root, tmp_path)
+
+    def test_pipeline_creation_cleans_non_empty_root_after_yes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
@@ -1784,12 +1793,86 @@ class PipelineHandlerTests(unittest.TestCase):
                     "root-check",
                     DemoConfig(base=1),
                     tmp_path,
-                    forced=True,
-                    _allow_existing_root=False,
+                    clean_directory=True,
                 )
 
             self.assertTrue(pipeline.project_root.exists())
             self.assertFalse((tmp_path / "marker.txt").exists())
+
+    def test_pipeline_creation_does_not_prompt_for_empty_root_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+
+            with patch("builtins.input") as prompt:
+                pipeline = PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    tmp_path,
+                    clean_directory=True,
+                )
+
+            prompt.assert_not_called()
+            self.assertEqual(pipeline.project_root, tmp_path)
+
+    def test_pipeline_creation_repeats_cleanup_confirmation_each_time(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
+
+            with patch("builtins.input", return_value="no") as prompt:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        tmp_path,
+                        clean_directory=True,
+                    )
+                    PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        tmp_path,
+                        clean_directory=True,
+                    )
+
+            self.assertEqual(prompt.call_count, 2)
+
+    def test_pipeline_creation_validates_before_directory_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            from types import SimpleNamespace
+
+            tmp_path = Path(temp_dir)
+            marker = tmp_path / "marker.txt"
+            marker.write_text("occupied", encoding="utf-8")
+
+            with patch("builtins.input") as prompt:
+                with self.assertRaises(RegistrationError):
+                    PipelineHandler(
+                        "root-check",
+                        SimpleNamespace(value=1),
+                        tmp_path,
+                        clean_directory=True,
+                    )
+
+            prompt.assert_not_called()
+            self.assertEqual(marker.read_text(encoding="utf-8"), "occupied")
+
+    def test_pipeline_creation_refuses_to_clean_filesystem_root(self) -> None:
+        filesystem_root = Path(Path.cwd().anchor)
+
+        with patch("builtins.input") as prompt:
+            with self.assertRaisesRegex(
+                RegistrationError,
+                "Refusing to clean filesystem root",
+            ):
+                PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    filesystem_root,
+                    clean_directory=True,
+                )
+
+        prompt.assert_not_called()
 
     def test_get_full_config_includes_nested_parent_chain(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2943,8 +3026,7 @@ class PipelineHandlerTests(unittest.TestCase):
             child_root = tmp_path / "child"
             child_root.mkdir(parents=True, exist_ok=True)
             (child_root / "marker.txt").write_text("moved", encoding="utf-8")
-            with patch("builtins.input", return_value="yes"):
-                child = PipelineHandler("child", DemoConfig(base=2), child_root, forced=True)
+            child = PipelineHandler("child", DemoConfig(base=2), child_root)
 
             parent.add_child_pipeline(child, 1)
 
@@ -3917,7 +3999,6 @@ class PipelineHandlerTests(unittest.TestCase):
                 {"base": "base_value", "optional_value": None},
                 None,
                 None,
-                True,
                 True,
                 10.0,
             )

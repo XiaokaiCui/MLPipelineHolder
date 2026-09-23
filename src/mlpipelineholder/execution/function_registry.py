@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from functools import partial, wraps
-from typing import Any, get_type_hints
+from typing import Any, ParamSpec, TypeVar, get_type_hints
 
 from .code_comparison import code_objects_equal
 from ..exceptions import RegistrationError
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 def callable_signature(callable_obj: Any) -> inspect.Signature:
@@ -273,6 +276,60 @@ def inspect_exposed_input_names(
         seen.add(exposed_name)
         input_names.append(exposed_name)
     return input_names
+
+
+def pipeline_resolving(
+    pipeline: Any,
+    *,
+    compute: bool = False,
+    mapping: Mapping[str, str] | None = None,
+) -> Callable[[Callable[_P, _R]], Callable[..., _R]]:
+    """Resolve required investigation-function inputs from a pipeline on each call.
+
+    Explicitly supplied arguments and callable defaults take precedence. Resolved
+    values are not registered as pipeline nodes or retained by this decorator.
+    When requested, Dask DataFrame and Series values are computed only when they
+    were resolved from the pipeline rather than supplied by the caller.
+    """
+    aliases = dict(mapping or {})
+
+    def decorator(func: Callable[_P, _R]) -> Callable[..., _R]:
+        signature = callable_signature(func)
+
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> _R:
+            bound = signature.bind_partial(*args, **kwargs)
+            missing = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.name not in bound.arguments
+                and parameter.default is inspect.Parameter.empty
+                and parameter.kind
+                not in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                )
+            ]
+            for parameter in missing:
+                input_name = aliases.get(parameter.name, parameter.name)
+                value = pipeline._resolve_investigation_input(
+                    input_name,
+                    getattr(func, "__name__", type(func).__name__),
+                )
+                if compute:
+                    try:
+                        import dask.dataframe as dd
+                    except ImportError:
+                        pass
+                    else:
+                        if isinstance(value, (dd.DataFrame, dd.Series)):
+                            value = value.compute()
+                bound.arguments[parameter.name] = value
+            return func(*bound.args, **bound.kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 def rename_args(
