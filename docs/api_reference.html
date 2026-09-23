@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.15) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.16) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -389,7 +389,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>target_function</code>: callable or import path executed by the atom.</li>
   <li><code>gate_config</code>: optional configuration field used as the atom's gate.</li>
   <li><code>expected_value</code>: value the gate must produce for the atom to run.</li>
-  <li><code>output_variable_names</code>: zero, one, or multiple declared output names for the target function.</li>
+  <li><code>output_variable_names</code>: zero, one, or multiple positional output slots for the target function. Use <code>"_"</code> for a returned value that should be ignored.</li>
   <li><code>save_to_disk_lst</code>: declared outputs that should be stored as artifacts.</li>
   <li><code>param_mapping_dct</code>: legacy parameter-to-pipeline-name mapping; cannot be combined with <code>param_mapping</code>.</li>
   <li><code>kwargs_dct</code>: keyword name to pipeline value mapping used to supply the target's <code>**kwargs</code>.</li>
@@ -404,6 +404,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
 <p>In strict mode, atom function arguments resolve only from <code>param_mapping</code>/<code>param_mapping_dct</code>, <code>args_lst</code>, <code>kwargs_dct</code>, the callable's own defaults, and the automatic pipeline <code>logger</code> injection. A same-named visible config, output, constant, or runtime override is not consumed unless it was explicitly mapped.</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
+<p>The reserved output marker <code>"_"</code> discards the returned value at that position. It still counts when validating the callable's return annotation and returned tuple/list length, but it is never declared, made visible, persisted, or included in run results. Repeated markers are allowed, for example <code>["_", "o2e_root", "_", "bce"]</code>, and <code>["_"]</code> discards a single return value. Including <code>"_"</code> in <code>save_to_disk_lst</code> raises <code>RegistrationError</code>.</p>
+<p>If the target function cannot be registered, atom creation raises <code>RegistrationError</code> instead of attaching an atom without an executable function. An existing atom with the same name and its outputs remain unchanged.</p>
 <p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
@@ -927,7 +929,7 @@ print(pipeline.describe_pipeline())</pre>
 <div class="field-label">Parameters</div>
 <ul>
   <li><code>function_or_path</code>: callable or import path to register.</li>
-  <li><code>output_variable_names</code>: zero, one, or multiple names matched to the callable's return value.</li>
+  <li><code>output_variable_names</code>: zero, one, or multiple positional slots matched to the callable's return value. Use <code>"_"</code> to ignore a slot.</li>
   <li><code>save_to_disk</code>: declared outputs serialized into the managed artifact tree.</li>
   <li><code>param_mapping</code>: callable parameter name to pipeline-facing value name, or literal <code>None</code>.</li>
   <li><code>var_pos_name</code>: block args-helper name supplying the callable's <code>*args</code>.</li>
@@ -938,6 +940,7 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>param_mapping</code> exposes safer pipeline-facing parameter names without changing the callable.</li>
   <li><code>var_pos_name</code> / <code>var_kw_name</code> map variadic <code>*args</code> / <code>**kwargs</code> to named pipeline inputs.</li>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
+  <li>The reserved marker <code>"_"</code> still counts toward return annotation and runtime arity but is discarded instead of becoming a declared or produced output. Repeated markers are allowed. Including <code>"_"</code> in <code>save_to_disk</code> raises <code>RegistrationError</code>.</li>
   <li>When global Arrow schema inference fails for a disk-backed Dask DataFrame, persistence warns and retries with <code>schema=None</code>. Each partition then infers its own Parquet schema, so partition schemas must remain compatible.</li>
   <li>Artifact loading inspects Parquet metadata before reading. If pandas cannot parse a nested or third-party Arrow extension declaration such as <code>list&lt;item: double&gt;[pyarrow]</code>, the unreadable declaration is neutralized in the in-memory Arrow schema before conversion. PyArrow then performs its normal metadata-driven pandas reconstruction globally, covering current and future supported column and index dtypes without type-specific conversion code; unreadable Arrow-backed fields retain their physical Arrow dtype. Directory artifacts remain lazy Dask DataFrames and projected reads use the same safe partition loader.</li>
   <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
@@ -957,6 +960,11 @@ block.register_function(
     param_mapping={"obj": "payload", "scale": "scale_value"},
     var_pos_name="extra_args",
     var_kw_name="extra_kwargs",
+)
+block.register_function(
+    build_metrics,
+    ["_", "o2e_root", "_", "bce"],
+    save_to_disk=["o2e_root"],
 )</pre>
 </div>
 
@@ -1310,7 +1318,7 @@ block.register_function(
 
 <h3 class="class-name" id="functionregistration">FunctionRegistration</h3>
 <p class="class-desc">Captured registration metadata used for execution, charting, and persistence.</p>
-<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.FunctionRegistration(function_name: str, import_path: str | None, callable_obj: Any, input_names: list[str], output_names: list[str], save_to_disk: set[str], param_mapping: dict[str, str | None] = &lt;factory&gt;, var_pos_name: str | None = None, var_kw_name: str | None = None, args_registration_state: list[str] | None = None, kwargs_registration_state: dict[str, str] | None = None, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;)</div>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.core.models.FunctionRegistration(function_name: str, import_path: str | None, callable_obj: Any, input_names: list[str], output_names: list[str], save_to_disk: set[str], param_mapping: dict[str, str | None] = &lt;factory&gt;, var_pos_name: str | None = None, var_kw_name: str | None = None, args_registration_state: list[str] | None = None, kwargs_registration_state: dict[str, str] | None = None, overridden_outputs: dict[str, OutputAddress] = &lt;factory&gt;, ignore_underscore_outputs: bool = True)</div>
 <table>
   <tr><th>Field</th><th>Type</th><th>Description</th></tr>
   <tr><td><code>function_name</code></td><td>str</td><td>Registered name of the function.</td></tr>

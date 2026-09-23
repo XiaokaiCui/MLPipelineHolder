@@ -251,6 +251,14 @@ def validate_function_payload_structure(
         raise PersistenceError(
             f"Saved function in {owner_label} has an unknown kind: {function_kind!r}"
         )
+    ignore_underscore_outputs = function_payload.get("ignore_underscore_outputs")
+    if ignore_underscore_outputs is not None and not isinstance(
+        ignore_underscore_outputs,
+        bool,
+    ):
+        raise PersistenceError(
+            f"Saved function in {owner_label} has an invalid ignore_underscore_outputs flag"
+        )
     import_path = function_payload.get("import_path")
     partial_payload = function_payload.get("partial")
     runtime_reference = function_payload.get("runtime_callable_reference")

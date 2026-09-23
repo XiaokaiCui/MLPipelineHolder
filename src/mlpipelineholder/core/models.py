@@ -80,6 +80,35 @@ class FunctionRegistration:
     args_registration_state: list[str] | None = None
     kwargs_registration_state: dict[str, str] | None = None
     overridden_outputs: dict[str, OutputAddress] = field(default_factory=dict)
+    ignore_underscore_outputs: bool = True
+
+    def __setstate__(self, state: Any) -> None:
+        """Restore registrations pickled before discard markers were supported."""
+        if isinstance(state, dict):
+            is_legacy = "ignore_underscore_outputs" not in state
+        elif (
+            isinstance(state, tuple)
+            and len(state) == 2
+            and isinstance(state[0], (type(None), dict))
+            and isinstance(state[1], dict)
+        ):
+            is_legacy = "ignore_underscore_outputs" not in state[1]
+        else:
+            is_legacy = isinstance(state, tuple) and len(state) < len(fields(self))
+        _restore_dataclass_state(self, state)
+        if is_legacy:
+            object.__setattr__(
+                self,
+                "ignore_underscore_outputs",
+                "_" not in self.output_names,
+            )
+
+    @property
+    def produced_output_names(self) -> list[str]:
+        """Return registered outputs, excluding positional discard markers."""
+        if not self.ignore_underscore_outputs:
+            return list(self.output_names)
+        return [output_name for output_name in self.output_names if output_name != "_"]
 
 
 @dataclass(slots=True)

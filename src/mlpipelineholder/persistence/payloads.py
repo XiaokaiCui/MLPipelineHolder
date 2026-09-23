@@ -461,6 +461,7 @@ class PayloadMixin:
                                     registration.callable_obj
                                 ),
                                 "output_names": registration.output_names,
+                                "ignore_underscore_outputs": registration.ignore_underscore_outputs,
                                 "save_to_disk": sorted(registration.save_to_disk),
                                 "param_mapping": registration.param_mapping,
                                 "var_pos_name": registration.var_pos_name,
@@ -489,6 +490,7 @@ class PayloadMixin:
                                 )
                             ),
                             "output_names": registration.output_names,
+                            "ignore_underscore_outputs": registration.ignore_underscore_outputs,
                             "save_to_disk": sorted(registration.save_to_disk),
                             "param_mapping": registration.param_mapping,
                             "var_pos_name": registration.var_pos_name,

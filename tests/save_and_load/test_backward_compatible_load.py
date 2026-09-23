@@ -8,7 +8,11 @@ from typing import Any
 
 from mlpipelineholder import PipelineHandler
 from mlpipelineholder.execution.function_registry import _values_equal
-from mlpipelineholder.core.models import ArtifactRecord, TorchStateArtifactRecord
+from mlpipelineholder.core.models import (
+    ArtifactRecord,
+    FunctionRegistration,
+    TorchStateArtifactRecord,
+)
 
 
 def produce_blob() -> dict[str, int]:
@@ -17,6 +21,10 @@ def produce_blob() -> dict[str, int]:
 
 def produce_leaf() -> int:
     return 3
+
+
+def produce_mixed() -> tuple[str, int]:
+    return "legacy", 3
 
 
 def legacy_artifact_record(record: ArtifactRecord) -> ArtifactRecord:
@@ -44,6 +52,44 @@ def strip_new_fields(value: Any) -> Any:
 
 
 class BackwardCompatibleLoadTests(unittest.TestCase):
+    def test_legacy_function_registration_pickle_restores_discard_semantics(self) -> None:
+        legacy = object.__new__(FunctionRegistration)
+        values = {
+            "function_name": "produce_leaf",
+            "import_path": None,
+            "callable_obj": produce_leaf,
+            "input_names": [],
+            "output_names": ["_"],
+            "save_to_disk": {"_"},
+            "param_mapping": {},
+            "var_pos_name": None,
+            "var_kw_name": None,
+            "args_registration_state": None,
+            "kwargs_registration_state": None,
+            "overridden_outputs": {},
+        }
+        for name, value in values.items():
+            object.__setattr__(legacy, name, value)
+
+        restored = pickle.loads(pickle.dumps(legacy))
+
+        self.assertFalse(restored.ignore_underscore_outputs)
+        self.assertEqual(restored.produced_output_names, ["_"])
+
+    def test_function_registration_positional_arguments_remain_compatible(self) -> None:
+        registration = FunctionRegistration(
+            "produce_leaf",
+            None,
+            produce_leaf,
+            [],
+            ["leaf"],
+            set(),
+            {"value": "source"},
+        )
+
+        self.assertEqual(registration.param_mapping, {"value": "source"})
+        self.assertTrue(registration.ignore_underscore_outputs)
+
     def test_legacy_artifact_record_pickle_restores_new_fields_with_defaults(self) -> None:
         # Given: an instance shaped like a pickle from a version without the
         # created_at, torch_load_weights_only, or metadata fields.
@@ -129,6 +175,100 @@ class BackwardCompatibleLoadTests(unittest.TestCase):
                 self.fail("blob should remain a disk-backed artifact record")
             self.assertEqual(record.metadata, {})
             self.assertEqual(loaded.get_value("blob"), {"saved": 7})
+
+    def test_legacy_underscore_output_remains_a_real_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            work = tmp / "work"
+            pipeline = PipelineHandler("legacy-underscore", {}, work)
+            block = pipeline.add_block("producer", 1)
+            if block is None:
+                self.fail("add_block should return the producer block")
+            block._register_function_strict(
+                produce_leaf,
+                ["_"],
+                save_to_disk=["_"],
+                ignore_underscore_outputs=False,
+            )
+            _ = pipeline.run_all()
+            _ = pipeline.save_pipeline()
+
+            state_path = work / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            function_payload = payload["nodes"][0]["functions"][0]
+            function_payload.pop("ignore_underscore_outputs")
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(work)
+            registration = loaded.get_block("producer").functions[0]
+            self.assertFalse(registration.ignore_underscore_outputs)
+            self.assertEqual(registration.produced_output_names, ["_"])
+            self.assertIn("_", loaded.list_declared_outputs())
+            self.assertEqual(loaded.get_value("_"), 3)
+
+    def test_legacy_mixed_outputs_remain_real_after_resave(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            work = tmp / "work"
+            pipeline = PipelineHandler("legacy-mixed", {}, work)
+            block = pipeline.add_block("producer", 1)
+            if block is None:
+                self.fail("add_block should return the producer block")
+            block._register_function_strict(
+                produce_mixed,
+                ["_", "leaf"],
+                ignore_underscore_outputs=False,
+            )
+            _ = pipeline.run_all()
+            _ = pipeline.save_pipeline()
+
+            state_path = work / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            function_payload = payload["nodes"][0]["functions"][0]
+            function_payload.pop("ignore_underscore_outputs")
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(work)
+            _ = loaded.save_pipeline()
+            reloaded = PipelineHandler.load_pipeline(work)
+            registration = reloaded.get_block("producer").functions[0]
+
+            self.assertFalse(registration.ignore_underscore_outputs)
+            self.assertEqual(registration.produced_output_names, ["_", "leaf"])
+            self.assertEqual(reloaded.list_declared_outputs(), {"_", "leaf"})
+            self.assertEqual(reloaded.get_value("_"), "legacy")
+            self.assertEqual(reloaded.get_value("leaf"), 3)
+
+    def test_legacy_regular_output_keeps_identical_registration_semantics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            work = tmp / "work"
+            pipeline = PipelineHandler("legacy-output", {}, work)
+            block = pipeline.add_block("producer", 1)
+            if block is None:
+                self.fail("add_block should return the producer block")
+            block.register_function(produce_leaf, ["leaf"])
+            _ = pipeline.run_all()
+            _ = pipeline.save_pipeline()
+
+            state_path = work / "pipeline_state.pkl"
+            payload = pickle.loads(state_path.read_bytes())
+            function_payload = payload["nodes"][0]["functions"][0]
+            function_payload.pop("ignore_underscore_outputs")
+            state_path.write_bytes(pickle.dumps(payload))
+
+            loaded = PipelineHandler.load_pipeline(work)
+            loaded_block = loaded.get_block("producer")
+            original = loaded_block.functions[0]
+            recreated = loaded_block.register_function(
+                produce_leaf,
+                ["leaf"],
+                forced=True,
+            )
+
+            self.assertTrue(original.ignore_underscore_outputs)
+            self.assertIs(recreated, original)
+            self.assertEqual(loaded.get_value("leaf"), 3)
 
 
 if __name__ == "__main__":

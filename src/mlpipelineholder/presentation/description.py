@@ -175,7 +175,11 @@ class DescriptionMixin:
                         if output_name in registration.save_to_disk
                         else self._chart_color(output_name, "green", node_muted)
                     )
-                    for output_name in registration.output_names
+                    for output_name in (
+                        registration.output_names
+                        if isinstance(registration, ExpressionRegistration)
+                        else registration.produced_output_names
+                    )
                 ]
                 args = self._chart_color(
                     ", ".join(

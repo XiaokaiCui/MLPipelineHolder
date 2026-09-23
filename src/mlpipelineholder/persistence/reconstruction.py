@@ -204,6 +204,10 @@ class ReconstructionMixin:
                             overridden_outputs=function_payload.get(
                                 "overridden_outputs"
                             ),
+                            ignore_underscore_outputs=function_payload.get(
+                                "ignore_underscore_outputs",
+                                "_" not in function_payload["output_names"],
+                            ),
                         )
                     if registration is None:
                         raise PersistenceError(

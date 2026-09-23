@@ -123,8 +123,15 @@ class AtomPipeline(PipelineHolder):
             if isinstance(output_variable_names, str)
             else list(output_variable_names)
         )
+        produced_output_names = [
+            output_name for output_name in output_names if output_name != "_"
+        ]
         save_names = set(save_to_disk_lst or [])
-        if not save_names.issubset(set(output_names)):
+        if "_" in save_names:
+            raise RegistrationError(
+                "Ignored output marker '_' cannot be included in save_to_disk_lst"
+            )
+        if not save_names.issubset(set(produced_output_names)):
             raise RegistrationError(
                 "save_to_disk_lst must be a subset of output_variable_names in create_atom_child_pipeline"
             )
@@ -136,7 +143,7 @@ class AtomPipeline(PipelineHolder):
             param_mapping if param_mapping is not None else param_mapping_dct
         )
         normalized_overrides = parent._normalize_overridden_outputs(
-            output_names,
+            produced_output_names,
             overridden_outputs,
             current_node_name=child_name,
             current_priority=execution_priority,
@@ -192,7 +199,7 @@ class AtomPipeline(PipelineHolder):
                 kwargs_dct,
                 forced=forced,
             )
-        temp_block.register_function(
+        registration = temp_block.register_function(
             target_function,
             output_variable_names=output_variable_names,
             save_to_disk=save_to_disk_lst,
@@ -201,6 +208,10 @@ class AtomPipeline(PipelineHolder):
             param_mapping=effective_param_mapping,
             forced=forced,
         )
+        if registration is None:
+            raise RegistrationError(
+                f"Failed to register target function for atom pipeline '{child_name}'"
+            )
         child_priority = temp_pipeline.execution_priority
         if child_priority is None:
             raise RegistrationError(f"Child pipeline '{child_name}' has no priority")

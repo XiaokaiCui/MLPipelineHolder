@@ -71,6 +71,10 @@ def annotated_two_outputs(value: int) -> tuple[int, int]:
     return value, value + 1
 
 
+def outputs_with_ignored_slots(value: int) -> tuple[str, int, str, float]:
+    return "unused-first", value, "unused-third", value / 2
+
+
 def implicit_input(value: int) -> int:
     return value + 1
 
@@ -215,6 +219,93 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertIsNotNone(registration)
             log_text = (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertIn("declares 1 output(s)", log_text)
+
+    def test_function_output_slots_can_be_ignored(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ignored-outputs", BlockConfig(value=8), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(
+                outputs_with_ignored_slots,
+                ["_", "o2e_root", "_", "bce"],
+                save_to_disk=["o2e_root"],
+            )
+            run = pipeline.run_all()
+
+            self.assertEqual(
+                registration.output_names,
+                ["_", "o2e_root", "_", "bce"],
+            )
+            self.assertEqual(registration.produced_output_names, ["o2e_root", "bce"])
+            self.assertEqual(block.declared_outputs(), {"o2e_root", "bce"})
+            self.assertEqual(pipeline.get_value("o2e_root"), 8)
+            self.assertEqual(pipeline.get_value("bce"), 4.0)
+            self.assertNotIn("_", pipeline.list_declared_outputs())
+            self.assertNotIn("_", pipeline.para_value_dict)
+            self.assertNotIn("_", pipeline.producer_outputs["block"])
+            self.assertNotIn("_", run.produced_outputs)
+            self.assertIn("o2e_root", pipeline.artifact_registry)
+
+    def test_moving_ignored_output_slot_replaces_positional_mapping(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("move-ignored-output", BlockConfig(value=8), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            original = block.register_function(
+                annotated_two_outputs,
+                ["_", "kept"],
+            )
+            _ = pipeline.run_all()
+            self.assertEqual(pipeline.get_value("kept"), 9)
+
+            replacement = block.register_function(
+                annotated_two_outputs,
+                ["kept", "_"],
+                forced=True,
+            )
+            _ = pipeline.run_all()
+
+            self.assertIsNot(replacement, original)
+            self.assertEqual(replacement.output_names, ["kept", "_"])
+            self.assertEqual(replacement.produced_output_names, ["kept"])
+            self.assertEqual(pipeline.get_value("kept"), 8)
+            self.assertEqual(block.declared_outputs(), {"kept"})
+            self.assertEqual(set(pipeline.producer_outputs["block"]), {"kept"})
+
+    def test_single_ignored_output_discards_returned_value(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ignored-output", BlockConfig(value=8), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            registration = block.register_function(annotated_single_output, "_")
+            run = pipeline.run_all()
+
+            self.assertEqual(registration.output_names, ["_"])
+            self.assertEqual(registration.produced_output_names, [])
+            self.assertEqual(block.declared_outputs(), set())
+            self.assertEqual(pipeline.para_value_dict, {})
+            self.assertEqual(run.produced_outputs, [])
+
+    def test_ignored_output_cannot_be_saved_to_disk(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("ignored-disk-output", BlockConfig(value=8), tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            with self.assertRaisesRegex(
+                RegistrationError,
+                "Ignored output marker '_' cannot be included in save_to_disk",
+            ):
+                block.register_function(
+                    annotated_single_output,
+                    ["_"],
+                    save_to_disk=["_"],
+                )
+
+            self.assertEqual(block.functions, [])
 
     def test_registration_fails_when_declared_output_count_mismatches(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -494,6 +585,29 @@ class ExecutionBlockTests(unittest.TestCase):
                 block.register_expression("result = value + 1; print(result)")
 
             self.assertIn("semicolons", str(exc_info.exception))
+            self.assertEqual(block.functions, [])
+
+    def test_expression_syntax_error_includes_source_location(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler("expr-syntax", {}, tmp_path)
+            block = pipeline.add_block("block", 1)
+
+            with self.assertRaises(RegistrationError) as exc_info:
+                block.register_expression(
+                    """
+                    output_df = output_df.merge(
+                        other_df.rename(columns={d
+                        'old_name': 'new_name',
+                    )
+                    """
+                )
+
+            message = str(exc_info.exception)
+            self.assertIn("Invalid expression syntax at line 4, column", message)
+            self.assertIn("2 |     other_df.rename(columns={d", message)
+            self.assertIn("> 4 | )", message)
+            self.assertIn("^", message)
             self.assertEqual(block.functions, [])
 
     def test_expression_allows_safe_builtin_names_without_resolving_pipeline_inputs(self) -> None:
