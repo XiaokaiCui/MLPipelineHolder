@@ -119,7 +119,7 @@ class VisibilityMixin:
         return output_names
 
     def _declared_disk_backed_output_names(self) -> set[str]:
-        names = set(self._incoming_parent_disk_backed_output_names())
+        names: set[str] = set()
         for node in self._sorted_nodes():
             names.update(self._node_declared_disk_backed_outputs(node))
         return names

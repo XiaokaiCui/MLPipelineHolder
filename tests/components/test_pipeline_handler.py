@@ -3943,6 +3943,8 @@ class PipelineHandlerTests(unittest.TestCase):
                 forced=True,
             )
 
+            child = parent.get_child_pipeline("child_warn")
+            self.assertEqual(child._declared_disk_backed_output_names(), set())
             log_text = (tmp_path / "parent" / "metadata" / "pipeline.log").read_text(encoding="utf-8")
             self.assertIn("in-function mutations will not persist", log_text)
 
