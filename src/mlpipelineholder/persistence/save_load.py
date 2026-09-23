@@ -33,6 +33,12 @@ _SAVE_WARNING_PATTERNS = (
 )
 
 _CLEANUP_MODES = ("none", "confirm", "auto")
+_UNTRUSTED_PROJECT_MESSAGE = (
+    "MLPipelineHolder currently supports loading only self-created or fully trusted "
+    "pipeline projects. If you created this project yourself or fully trust its "
+    "source, pass trust_project=True. Otherwise, do not load it because loading a "
+    "pipeline project may execute harmful code."
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -354,10 +360,13 @@ class SaveLoadMixin:
         cls,
         path: str | Path,
         *,
+        trust_project: bool,
         forced_deleting: bool = False,
         verbose: bool = False,
         auto_resolve_placeholders: bool = True,
     ) -> Any:
+        if trust_project is not True:
+            raise PersistenceError(_UNTRUSTED_PROJECT_MESSAGE)
         warnings.warn(
             "Loaded pipelines restore current callable references, not historical function snapshots; changed source code may alter behavior.",
             stacklevel=2,
@@ -412,12 +421,14 @@ class SaveLoadMixin:
         cls,
         path: str | Path,
         *,
+        trust_project: bool,
         forced_deleting: bool = False,
         verbose: bool = False,
         auto_resolve_placeholders: bool = True,
     ) -> Any:
         return cls.load_pipeline(
             path,
+            trust_project=trust_project,
             forced_deleting=forced_deleting,
             verbose=verbose,
             auto_resolve_placeholders=auto_resolve_placeholders,

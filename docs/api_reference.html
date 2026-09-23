@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.16) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.17) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -628,11 +628,13 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 </ul>
 
 <h4 class="method-name" id="PipelineHolder.load_pipeline">load_pipeline()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
+<div class="sig"><span class="kw">@classmethod</span> load_pipeline(path: <span class="arg">str | Path</span>, *, trust_project: <span class="arg">bool</span>, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
 <p>Loads a saved pipeline project. The state payload, placeholders, and callable references are fully reconstructed in a temporary preflight first. Only after that succeeds may a non-canonical saved tree replace the canonical working directory; a preflight failure raises <code>PersistenceError</code> and leaves the existing working tree untouched.</p>
+<p><strong>Trusted projects only:</strong> sharing or downloading pipeline bundles is not currently supported. Pipeline projects use Python pickle for state, metadata, and some artifacts, so loading can execute harmful code before structural validation. Load only a project you created yourself or fully trust. Passing the required literal <code>trust_project=True</code> is an explicit acknowledgement of that trust; it does not inspect, verify, sanitize, or sandbox the project.</p>
 <div class="field-label">Parameters</div>
 <ul>
   <li><code>path</code>: saved project root containing the pipeline payload and metadata.</li>
+  <li><code>trust_project</code>: required trust acknowledgement. Only the literal value <code>True</code> permits loading; every other explicit value raises <code>PersistenceError</code> before any project file is opened.</li>
   <li><code>forced_deleting=False</code> asks for keyboard confirmation before deleting a non-empty canonical working directory.</li>
   <li><code>forced_deleting=True</code> deletes the canonical working directory directly.</li>
   <li><code>verbose=True</code> logs a warning when a pipeline constant was saved as a placeholder (e.g. an unserialisable value) and could not be restored; silent by default.</li>
@@ -643,11 +645,12 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Missing runtime callables raise during loading instead of being passed to stages as inert placeholders. Values saved as <code>RuntimeValueReference</code> placeholders raise <code>ResolutionError</code> when read via <code>get_value</code>, <code>get_constant_value</code>, or <code>get_config_value</code>, and when resolved as a function argument.</p>
 
 <h4 class="method-name" id="PipelineHolder.load_project">load_project()</h4>
-<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
-<p>Compatibility alias for <a class="anchor" href="#PipelineHolder.load_pipeline"><code>load_pipeline()</code></a>.</p>
+<div class="sig"><span class="kw">@classmethod</span> load_project(path: <span class="arg">str | Path</span>, *, trust_project: <span class="arg">bool</span>, forced_deleting: <span class="arg">bool</span> = False, verbose: <span class="arg">bool</span> = False, auto_resolve_placeholders: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder</span></div>
+<p>Compatibility alias for <a class="anchor" href="#PipelineHolder.load_pipeline"><code>load_pipeline()</code></a>. It has the same trusted-project-only restriction and required acknowledgement.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path</code>: saved project root.</li>
+  <li><code>trust_project</code>: required literal <code>True</code> acknowledgement that the project is self-created or fully trusted.</li>
   <li><code>forced_deleting</code>: skip replacement confirmation when <code>True</code>.</li>
   <li><code>verbose</code>: show placeholder and reconstruction warnings.</li>
   <li><code>auto_resolve_placeholders</code>: rerun eligible placeholder producers during loading.</li>
@@ -944,7 +947,7 @@ print(pipeline.describe_pipeline())</pre>
   <li>When global Arrow schema inference fails for a disk-backed Dask DataFrame, persistence warns and retries with <code>schema=None</code>. Each partition then infers its own Parquet schema, so partition schemas must remain compatible.</li>
   <li>Artifact loading inspects Parquet metadata before reading. If pandas cannot parse a nested or third-party Arrow extension declaration such as <code>list&lt;item: double&gt;[pyarrow]</code>, the unreadable declaration is neutralized in the in-memory Arrow schema before conversion. PyArrow then performs its normal metadata-driven pandas reconstruction globally, covering current and future supported column and index dtypes without type-specific conversion code; unreadable Arrow-backed fields retain their physical Arrow dtype. Directory artifacts remain lazy Dask DataFrames and projected reads use the same safe partition loader.</li>
   <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
-  <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity — import path or runtime object — and same outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Any real difference erases the function's own outputs, then invalidates from the earliest downstream block that consumes any affected output name — the same unified rule used by <code>register_expression</code> and <code>create_atom_child_pipeline</code>; unrelated downstream blocks are preserved. A redefined notebook-local function is a different object and is therefore treated as a real change.</li>
+  <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity, outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Imported functions require both the same import path and the same callable object, so <code>importlib.reload()</code> always causes replacement even when the path or source appears unchanged. An unchanged re-executed <code>__main__</code> notebook definition may remain a no-op when its executable definition and defaults match. Any real difference always erases the function's own outputs and normally invalidates from the earliest downstream consumer; after <code>forbid_invalidate_objects()</code>, downstream cached outputs are retained and may be stale. Unrelated downstream blocks are preserved.</li>
   <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
 </ul>
 <div class="example">
@@ -980,6 +983,7 @@ block.register_function(
 ) -&gt; <span class="ret">ExpressionRegistration | None</span>
 </div>
 <p>Registers a single-statement expression. Must be an assignment (<code>NAME = EXPR</code>) or a print/logger call. No semicolons, imports, <code>eval</code>/<code>exec</code>/<code>__import__</code>, comprehensions, walrus operators, or nested definitions.</p>
+<p><strong>Not a sandbox:</strong> these checks restrict supported syntax only. Registered expressions execute as trusted Python with normal runtime capabilities and builtins. Never register expression source you do not fully trust.</p>
 <div class="field-label">Parameters</div>
 <ul>
   <li><code>code</code>: one supported assignment or print/logger expression.</li>

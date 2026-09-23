@@ -32,6 +32,7 @@ class ForcedExpressionReRegistrationTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(
                 root / "bundle",
                 forced_deleting=True,
+                trust_project=True,
             )
 
             rebuilt = loaded.add_block("build_value", 25.0, forced=True)
@@ -61,6 +62,7 @@ class ForcedExpressionReRegistrationTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(
                 root / "bundle",
                 forced_deleting=True,
+                trust_project=True,
             )
 
             rebuilt = loaded.add_block("build_value", 25.0, forced=True)

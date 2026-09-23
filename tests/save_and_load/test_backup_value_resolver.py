@@ -158,7 +158,7 @@ class BackupValueResolverBaselineTests(unittest.TestCase):
 
                 save_dir = tmp_path / "bundle"
                 _ = pipeline.save_pipeline(save_dir)
-                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True)
+                loaded = PipelineHandler.load_pipeline(save_dir, forced_deleting=True, trust_project=True)
                 _ = loaded.run_all()
 
                 restored_callable = loaded.get_constant_value("target_callable")

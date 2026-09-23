@@ -606,7 +606,7 @@ class CrossCuttingVisibilityTests(unittest.TestCase):
 
             # When: the project is saved and loaded.
             pipeline.save_pipeline(tmp / "bundle")
-            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
             # Then: the six APIs return identical names from the loaded state,
             # including the not-yet-materialized placeholder output.

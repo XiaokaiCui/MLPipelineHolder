@@ -88,7 +88,7 @@ class SaveCleanupTests(unittest.TestCase):
 
             self.assertFalse(stale.exists())
             self.assertEqual(len(_generation_entries(root)), 1)
-            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_value("data"), {"v": 1})
 
     def test_none_cleanup_keeps_everything(self) -> None:
@@ -215,7 +215,7 @@ class SaveCleanupTests(unittest.TestCase):
 
             self.assertTrue(ghost.exists())
             self.assertTrue(live_artifact.exists())
-            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_constant_value("live_manual"), {"keep": True})
 
     def test_cleanup_discovery_error_does_not_fail_committed_save(self) -> None:
@@ -239,7 +239,7 @@ class SaveCleanupTests(unittest.TestCase):
 
             self.assertEqual(saved_path, root)
             self.assertTrue((backup / "refresh_marker.txt").exists())
-            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True, trust_project=True)
             self.assertEqual(loaded.get_constant_value("saved_after_error"), 2)
 
     def test_cleanup_ignores_non_framework_generation_names(self) -> None:

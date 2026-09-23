@@ -110,7 +110,7 @@ class OptunaArtifactTests(unittest.TestCase):
             self.assertTrue(Path(record.file_path).is_file())
 
             saved = pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(saved, forced_deleting=True, trust_project=True)
             restored = loaded.get_value("study")
 
             self.assertIsInstance(restored, optuna.study.Study)
@@ -139,7 +139,7 @@ class OptunaArtifactTests(unittest.TestCase):
             )
 
             pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True, trust_project=True)
 
             study_record = loaded.para_value_dict["study"]
             sampler_record = loaded.para_value_dict["sampler"]
@@ -214,7 +214,7 @@ class OptunaArtifactTests(unittest.TestCase):
 
             messages = [str(item.message) for item in caught]
             self.assertFalse(any("falling back to pickle" in item for item in messages))
-            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root, forced_deleting=True, trust_project=True)
             restored = loaded.get_from_storage(hash_id=hash_id)
             self.assertIsInstance(restored, optuna.study.Study)
             self.assertEqual(len(restored.trials), 3)

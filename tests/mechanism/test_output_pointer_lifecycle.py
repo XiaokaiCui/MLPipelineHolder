@@ -219,7 +219,7 @@ class OutputPointerPersistenceTests(unittest.TestCase):
             pipeline.save_pipeline(root / "saved")
 
             # When
-            loaded = PipelineHandler.load_pipeline(root / "saved", forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(root / "saved", forced_deleting=True, trust_project=True)
 
             # Then
             self.assertEqual(loaded.get_node_output("first", "value"), [1, 2])

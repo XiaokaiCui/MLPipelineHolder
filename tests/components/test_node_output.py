@@ -121,7 +121,7 @@ class GetNodeOutputTests(unittest.TestCase):
             root.run_all()
             root.save_pipeline()
 
-            loaded = PipelineHandler.load_pipeline(path, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(path, forced_deleting=True, trust_project=True)
 
             self.assertEqual(loaded.get_node_output("block", "value"), 1)
 

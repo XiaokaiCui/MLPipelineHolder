@@ -55,6 +55,7 @@ class DynamicDataclassRecoveryTests(unittest.TestCase):
             loaded = PipelineHandler.load_pipeline(
                 root / "bundle",
                 forced_deleting=True,
+                trust_project=True,
             )
 
             loaded_class = loaded.get_value("config_cls")

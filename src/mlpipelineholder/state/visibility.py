@@ -42,6 +42,15 @@ class VisibilityMixin:
             return node.list_declared_outputs()
         return node.declared_outputs()
 
+    def _node_declared_disk_backed_outputs(self, node: Any) -> set[str]:
+        if _is_child_pipeline(node):
+            return node._declared_disk_backed_output_names()
+        return {
+            output_name
+            for registration in node.functions
+            for output_name in registration.save_to_disk
+        }
+
     def _rebuild_visible_state(self, upstream_outputs: dict[str, Any] | None = None) -> None:
         """Rebuild this pipeline's visible value mirrors in memory only.
 
@@ -108,6 +117,32 @@ class VisibilityMixin:
                 break
             output_names.update(self._node_declared_outputs(node))
         return output_names
+
+    def _declared_disk_backed_output_names(self) -> set[str]:
+        names = set(self._incoming_parent_disk_backed_output_names())
+        for node in self._sorted_nodes():
+            names.update(self._node_declared_disk_backed_outputs(node))
+        return names
+
+    def _declared_disk_backed_output_names_before_priority(
+        self,
+        priority: float | None,
+    ) -> set[str]:
+        names = set(self._incoming_parent_disk_backed_output_names())
+        if priority is None:
+            return names
+        for node in self._sorted_nodes():
+            if node.execution_priority >= priority:
+                break
+            names.update(self._node_declared_disk_backed_outputs(node))
+        return names
+
+    def _incoming_parent_disk_backed_output_names(self) -> set[str]:
+        if self.parent_pipeline is None or self.execution_priority is None:
+            return set()
+        return self.parent_pipeline._declared_disk_backed_output_names_before_priority(
+            self.execution_priority
+        )
 
     def _incoming_parent_outputs(self) -> dict[str, Any]:
         if self.parent_pipeline is None or self.execution_priority is None:
@@ -210,8 +245,12 @@ class VisibilityMixin:
         names.update(self._tree_constant_names())
         return names
 
-    def _registration_disk_backed_names(self) -> set[str]:
+    def _registration_disk_backed_names(
+        self,
+        priority: float | None,
+    ) -> set[str]:
         names = self._known_disk_backed_output_names()
+        names.update(self._declared_disk_backed_output_names_before_priority(priority))
         try:
             for key, value in self._incoming_parent_outputs().items():
                 if isinstance(value, ArtifactRecord):

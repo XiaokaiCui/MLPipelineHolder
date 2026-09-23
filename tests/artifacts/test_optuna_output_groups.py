@@ -165,7 +165,7 @@ class OptunaOutputGroupTests(unittest.TestCase):
             pipeline = self._pipeline(project_root)
             pipeline.run_all()
             pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(project_root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(project_root, forced_deleting=True, trust_project=True)
 
             # When an earlier producer runs after loading
             loaded.run_block("first")
@@ -221,7 +221,7 @@ class OptunaOutputGroupTests(unittest.TestCase):
 
             # When it is saved elsewhere and restored into its recorded working root
             saved_root = pipeline.save_pipeline(temporary_root / "saved")
-            loaded = PipelineHandler.load_pipeline(saved_root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(saved_root, forced_deleting=True, trust_project=True)
 
             # Then the sole terminal and literal name survive with a rebased database
             self.assert_study_terminal(loaded, "third")

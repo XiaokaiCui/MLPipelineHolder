@@ -733,7 +733,10 @@ class ExecutionBlock:
             risky = sorted(
                 name
                 for name in mapped_inputs
-                if name in self.parent._registration_disk_backed_names()
+                if name
+                in self.parent._registration_disk_backed_names(
+                    self.execution_priority
+                )
                 and name not in registration.produced_output_names
             )
             if risky:

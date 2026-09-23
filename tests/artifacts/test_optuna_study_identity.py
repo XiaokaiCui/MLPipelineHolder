@@ -316,7 +316,7 @@ class OptunaStudyIdentityTests(unittest.TestCase):
             # When the pipeline is saved twice and loaded
             pipeline.save_pipeline()
             pipeline.save_pipeline()
-            loaded = PipelineHandler.load_pipeline(project_root, forced_deleting=True)
+            loaded = PipelineHandler.load_pipeline(project_root, forced_deleting=True, trust_project=True)
 
             # Then both fresh handles retain their independent identities and data
             constant = loaded.get_constant_value("constant")
