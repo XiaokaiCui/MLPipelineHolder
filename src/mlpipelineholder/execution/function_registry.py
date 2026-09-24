@@ -30,6 +30,26 @@ def callable_signature(callable_obj: Any) -> inspect.Signature:
         )
 
 
+def effective_variadic_names(
+    callable_obj: Any,
+    *,
+    var_pos_name: str | None,
+    var_kw_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Return the helper names runtime resolution uses for variadic parameters."""
+    positional_parameter: str | None = None
+    keyword_parameter: str | None = None
+    for parameter in callable_signature(callable_obj).parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            positional_parameter = parameter.name
+        elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            keyword_parameter = parameter.name
+    return (
+        var_pos_name or positional_parameter,
+        var_kw_name or keyword_parameter,
+    )
+
+
 def resolve_callable(function_or_path: Any) -> tuple[Any, str | None, str]:
     """Resolve a callable object or import path into a callable plus persistence metadata."""
 
@@ -367,7 +387,59 @@ def rename_args(
     setattr(wrapper, "__mlpipeline_param_mapping__", dict(param_mapping))
     setattr(wrapper, "__mlpipeline_var_pos_name__", var_pos_name)
     setattr(wrapper, "__mlpipeline_var_kw_name__", var_kw_name)
+    # ``wraps`` copies attributes to outer decorators. Keep an identity marker
+    # so registration only normalizes the wrapper created here.
+    setattr(wrapper, "__mlpipeline_rename_wrapper__", wrapper)
     return wrapper
+
+
+def normalize_renamed_registration(
+    function_or_path: Any,
+    param_mapping: dict[str, str | None] | None,
+    var_pos_name: str | None,
+    var_kw_name: str | None,
+) -> tuple[Any, dict[str, str | None] | None, str | None, str | None]:
+    """Represent a ``rename_args`` wrapper as persistable registration metadata."""
+    if (
+        getattr(function_or_path, "__mlpipeline_rename_wrapper__", None)
+        is not function_or_path
+    ):
+        return function_or_path, param_mapping, var_pos_name, var_kw_name
+    original = getattr(function_or_path, "__mlpipeline_original__", None)
+    renamed = getattr(function_or_path, "__mlpipeline_param_mapping__", None)
+    if original is None or not isinstance(renamed, dict):
+        return function_or_path, param_mapping, var_pos_name, var_kw_name
+
+    explicit = dict(param_mapping or {})
+    wrapper_pos_name = getattr(function_or_path, "__mlpipeline_var_pos_name__", None)
+    wrapper_kw_name = getattr(function_or_path, "__mlpipeline_var_kw_name__", None)
+    composed: dict[str, str | None] = {}
+    exposed_names: set[str] = set()
+    for parameter in callable_signature(original).parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+            exposed_names.add(wrapper_pos_name or parameter.name)
+            continue
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            exposed_names.add(wrapper_kw_name or parameter.name)
+            continue
+        exposed_name = renamed.get(parameter.name, parameter.name)
+        exposed_names.add(exposed_name)
+        target_name = explicit.get(exposed_name, exposed_name)
+        if exposed_name in explicit or target_name != parameter.name:
+            composed[parameter.name] = target_name
+
+    unknown = set(explicit).difference(exposed_names)
+    if unknown:
+        raise RegistrationError(
+            "param_mapping contains names not exposed by rename_args: "
+            f"{sorted(unknown)}"
+        )
+    return (
+        original,
+        composed or None,
+        var_pos_name or wrapper_pos_name,
+        var_kw_name or wrapper_kw_name,
+    )
 
 
 def default_map(callable_obj: Any) -> dict[str, Any]:

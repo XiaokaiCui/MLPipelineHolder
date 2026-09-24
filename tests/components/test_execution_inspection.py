@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import unittest
+from collections.abc import Callable
 from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,8 +22,18 @@ from mlpipelineholder import (
     ResolvedInspectionCall,
 )
 from mlpipelineholder.core.models import ArtifactRecord
-from mlpipelineholder.execution.inspection import _InspectionMemoryEstimator
+from mlpipelineholder.execution.inspection import (
+    InspectionCopyCandidate,
+    _InspectionMemoryEstimator,
+    preflight_protected_inspection,
+)
+from mlpipelineholder.integrations.optuna.support import OPTUNA_STUDY_SERIALIZER
 from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+from mlpipelineholder.state.output_pointers import (
+    OutputAddress,
+    OutputPointer,
+    PointerResolutionError,
+)
 
 
 def mutate_items(items: list[object]) -> list[object]:
@@ -142,6 +153,30 @@ class MemoryErrorOnCopy:
 
 def return_object(value: object) -> object:
     return value
+
+
+def sum_variadic_items(*items: int) -> int:
+    return sum(items)
+
+
+def sum_variadic_named(**items: int) -> int:
+    return sum(items.values())
+
+
+def fail_with_memory_error() -> None:
+    raise MemoryError("simulated execution allocation failure")
+
+
+class LargeBoundMethodOwner:
+    def __init__(self, size: int) -> None:
+        self.data: np.ndarray = np.zeros(size, dtype=np.float64)
+
+    def read(self) -> int:
+        return len(self.data)
+
+
+def invoke_without_arguments(callback: Callable[[], object]) -> object:
+    return callback()
 
 
 class ExecutionInspectionTests(unittest.TestCase):
@@ -1131,7 +1166,14 @@ class ExecutionInspectionTests(unittest.TestCase):
                         memory_safety_margin=0.5,
                     )
 
-            for invalid in (-0.1, float("nan"), float("inf"), True):
+            for invalid in (
+                -0.1,
+                float("nan"),
+                float("inf"),
+                True,
+                10**1000,
+                1e308,
+            ):
                 with self.assertRaisesRegex(TypeError, "memory_safety_margin"):
                     block.inspect(
                         resolve_only=True,
@@ -1154,7 +1196,8 @@ class ExecutionInspectionTests(unittest.TestCase):
             self.assertIn("value", caught.exception.inputs)
 
     def test_memory_estimator_accounts_for_pandas_object_cells(self) -> None:
-        nested = ["payload"]
+        array = np.zeros(100_000, dtype=np.float64)
+        nested = [array]
         frame = pd.DataFrame({"data": [nested, nested]})
         estimator = _InspectionMemoryEstimator()
         estimator.add("data", frame)
@@ -1162,8 +1205,10 @@ class ExecutionInspectionTests(unittest.TestCase):
         baseline = int(frame.memory_usage(index=True, deep=False).sum())
         self.assertGreaterEqual(
             estimator.total_bytes,
-            baseline + sys.getsizeof(nested),
+            baseline + sys.getsizeof(nested) + array.nbytes,
         )
+        self.assertLess(estimator.total_bytes, baseline + 2 * array.nbytes)
+        self.assertEqual(estimator.uncertain, ())
 
     @unittest.skipUnless(
         find_spec("dask.dataframe") is not None,
@@ -1250,6 +1295,434 @@ class ExecutionInspectionTests(unittest.TestCase):
                     block.inspect(resolve_only=True, allow_mutable_objects=False)
                 with self.assertRaises(InspectionMemoryError):
                     block.inspect(allow_mutable_objects=False)
+
+    def test_lightweight_estimator_does_not_sample_numeric_dataframe_cells(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "left": np.arange(100_000, dtype=np.float64),
+                "right": np.arange(100_000, dtype=np.int64),
+            }
+        )
+        estimator = _InspectionMemoryEstimator()
+        estimator.add("frame", frame)
+
+        self.assertGreaterEqual(
+            estimator.total_bytes,
+            int(frame.memory_usage(index=True, deep=False).sum()),
+        )
+        self.assertEqual(estimator.uncertain, ())
+
+    def test_truncated_container_is_uncertain_even_when_prefix_is_immutable(self) -> None:
+        value = [*range(32), np.zeros(100_000, dtype=np.float64)]
+        estimator = _InspectionMemoryEstimator()
+
+        estimator.add("value", value)
+
+        self.assertTrue(estimator.uncertain)
+        self.assertIn("container contents were sampled", estimator.uncertain[0][1])
+
+    def test_repeated_artifact_bindings_use_peak_materialization_budget(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            record = pipeline.artifact_store.save(
+                variable_name="data",
+                value=np.zeros(100_000, dtype=np.float64),
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.set_constant_value("left", record, copy=False)
+            pipeline.set_constant_value("right", record, copy=False)
+            block = pipeline.add_block("pair", 1)
+            block.register_function(combine_arrays, ["result"])
+
+            with (
+                mock.patch(
+                    "mlpipelineholder.execution.inspection._available_memory_bytes",
+                    return_value=(4_000_000, "test RAM", ("3.8 MiB via test RAM",)),
+                ),
+                mock.patch.object(
+                    ArtifactStore,
+                    "load",
+                    side_effect=[
+                        np.zeros(100_000, dtype=np.float64),
+                        np.zeros(100_000, dtype=np.float64),
+                    ],
+                ) as load_mock,
+            ):
+                block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+            self.assertEqual(load_mock.call_count, 2)
+
+    def test_generic_artifact_materializations_are_retained_in_budget(self) -> None:
+        with TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "first.json"
+            second_path = Path(tmp) / "second.json"
+            first_path.write_bytes(b"0" * 100)
+            second_path.write_bytes(b"0" * 200)
+            records = [
+                ArtifactRecord(
+                    variable_name=name,
+                    serializer="json",
+                    file_path=str(path),
+                    produced_by_block="producer",
+                    produced_by_function="produce",
+                    run_id="run",
+                )
+                for name, path in (("first", first_path), ("second", second_path))
+            ]
+            estimator = _InspectionMemoryEstimator()
+
+            for record in records:
+                estimator.add(record.variable_name, record, materialize=True)
+
+            self.assertEqual(estimator.materialization_bytes, 600)
+
+    def test_dask_estimation_does_not_swallow_memory_error(self) -> None:
+        class FailingCollection:
+            def __dask_graph__(self) -> object:
+                raise MemoryError("simulated graph allocation failure")
+
+        estimator = _InspectionMemoryEstimator()
+
+        with self.assertRaises(MemoryError):
+            estimator._estimate_dask_collection(FailingCollection())
+
+    def test_artifact_estimate_is_order_independent_when_also_nested(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data.npy"
+            np.save(path, np.zeros(100_000, dtype=np.float64))
+            record = ArtifactRecord(
+                variable_name="data",
+                serializer="numpy",
+                file_path=str(path),
+                produced_by_block="producer",
+                produced_by_function="produce",
+                run_id="run",
+            )
+
+            nested_first = _InspectionMemoryEstimator()
+            nested_first.add("container", [record])
+            nested_first.add("item", record, materialize=True)
+            direct_first = _InspectionMemoryEstimator()
+            direct_first.add("item", record, materialize=True)
+            direct_first.add("container", [record])
+
+            self.assertEqual(nested_first.total_bytes, direct_first.total_bytes)
+            self.assertEqual(nested_first.uncertain, direct_first.uncertain)
+
+    def test_bound_method_owner_storage_is_included_in_preflight(self) -> None:
+        with TemporaryDirectory() as tmp:
+            owner = LargeBoundMethodOwner(100_000)
+            pipeline = PipelineHandler(
+                "root",
+                {"callback": owner.read},
+                Path(tmp) / "root",
+            )
+            block = pipeline.add_block("callback", 1)
+            block.register_function(invoke_without_arguments, ["result"])
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._available_memory_bytes",
+                return_value=(100_000, "test RAM", ("97.7 KiB via test RAM",)),
+            ):
+                with self.assertRaisesRegex(
+                    InspectionMemoryError,
+                    "exceeds available memory",
+                ):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+    def test_unresolvable_pointer_uses_uncertainty_confirmation_path(self) -> None:
+        pointer = OutputPointer(OutputAddress("root", "missing", "value"))
+
+        def fail_pointer(_: OutputPointer) -> object:
+            raise PointerResolutionError("missing destination")
+
+        with mock.patch(
+            "mlpipelineholder.execution.inspection._interactive_stdin_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                InspectionMemoryError,
+                "output pointer is unresolvable",
+            ):
+                preflight_protected_inspection(
+                    [InspectionCopyCandidate("value", pointer)],
+                    node_name="node",
+                    function_name="function",
+                    safety_margin=0.25,
+                    pointer_reader=fail_pointer,
+                )
+
+    def test_uncertain_estimate_requires_explicit_user_decision(self) -> None:
+        with TemporaryDirectory() as tmp:
+            frame = pd.DataFrame({"value": [[index] for index in range(64)]})
+            pipeline = PipelineHandler(
+                "root",
+                {"data": frame},
+                Path(tmp) / "root",
+            )
+            block = pipeline.add_block("sample", 1)
+            block.register_function(select_data, ["result"])
+            interactive = mock.patch(
+                "mlpipelineholder.execution.inspection._interactive_stdin_available",
+                return_value=True,
+            )
+
+            with interactive, mock.patch("builtins.input", return_value="yes") as prompt:
+                resolved = block.inspect(
+                    resolve_only=True,
+                    allow_mutable_objects=False,
+                )
+
+            self.assertIsNot(resolved.arguments["data"], frame)
+            self.assertIn("terminate the Python or Jupyter process", prompt.call_args.args[0])
+            self.assertIn("lose unsaved in-memory work", prompt.call_args.args[0])
+
+            with interactive, mock.patch("builtins.input", return_value="no"):
+                with self.assertRaises(InspectionMemoryError):
+                    block.inspect(
+                        resolve_only=True,
+                        allow_mutable_objects=False,
+                    )
+
+    def test_resolution_memory_error_reports_that_copy_has_not_started(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            record = pipeline.artifact_store.save(
+                variable_name="data",
+                value=np.zeros(8, dtype=np.float64),
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.set_constant_value("data", record, copy=False)
+            block = pipeline.add_block("load", 1)
+            block.register_function(select_data, ["result"])
+
+            with mock.patch.object(
+                ArtifactStore,
+                "load",
+                side_effect=MemoryError("simulated load failure"),
+            ):
+                with self.assertRaises(InspectionMemoryError) as caught:
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+            self.assertFalse(caught.exception.copy_started)
+            self.assertIn("materialising", caught.exception.reason or "")
+
+    def test_estimation_memory_error_is_stage_aware(self) -> None:
+        record = ArtifactRecord(
+            variable_name="data",
+            serializer="numpy",
+            file_path="unused.npy",
+            produced_by_block="producer",
+            produced_by_function="produce",
+            run_id="run",
+        )
+
+        with mock.patch.object(
+            _InspectionMemoryEstimator,
+            "_estimate_artifact_record",
+            side_effect=MemoryError("simulated estimation failure"),
+        ):
+            with self.assertRaises(InspectionMemoryError) as caught:
+                preflight_protected_inspection(
+                    [InspectionCopyCandidate("data", record)],
+                    node_name="node",
+                    function_name="function",
+                    safety_margin=0.25,
+                )
+
+        self.assertFalse(caught.exception.copy_started)
+        self.assertIn("estimating protected-copy memory", caught.exception.reason or "")
+
+    def test_resolution_memory_error_reports_an_earlier_started_copy(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            record = pipeline.artifact_store.save(
+                variable_name="right",
+                value=np.zeros(8, dtype=np.float64),
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.manual_values["left"] = np.zeros(8, dtype=np.float64)
+            pipeline.manual_values["right"] = record
+            block = pipeline.add_block("load", 1)
+            block.register_function(combine_arrays, ["result"])
+
+            with mock.patch.object(
+                ArtifactStore,
+                "load",
+                side_effect=MemoryError("simulated load failure"),
+            ):
+                with self.assertRaises(InspectionMemoryError) as caught:
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+            self.assertTrue(caught.exception.copy_started)
+            self.assertIn("materialising", caught.exception.reason or "")
+
+    def test_execution_memory_error_is_classified_separately(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            block = pipeline.add_block("execute", 1)
+            block.register_function(fail_with_memory_error, [])
+
+            with self.assertRaises(InspectionMemoryError) as caught:
+                block.inspect(allow_mutable_objects=False)
+
+            self.assertFalse(caught.exception.copy_started)
+            self.assertIn(
+                "executing the inspected function",
+                caught.exception.reason or "",
+            )
+
+    def test_disk_backed_variadic_aggregates_work_in_protected_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            positional = PipelineHandler("positional", {}, root / "positional")
+            positional_record = positional.artifact_store.save(
+                variable_name="items",
+                value=[2, 3],
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            positional.set_constant_value("items", positional_record, copy=False)
+            positional_block = positional.add_block("sum", 1)
+            positional_block.register_function(sum_variadic_items, ["result"])
+
+            resolved_positional = positional_block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            self.assertEqual(resolved_positional.args, (2, 3))
+            self.assertEqual(positional_block.inspect(allow_mutable_objects=False), 5)
+
+            keyword = PipelineHandler("keyword", {}, root / "keyword")
+            keyword_record = keyword.artifact_store.save(
+                variable_name="items",
+                value={"left": 2, "right": 3},
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            keyword.set_constant_value("items", keyword_record, copy=False)
+            keyword_block = keyword.add_block("sum", 1)
+            keyword_block.register_function(sum_variadic_named, ["result"])
+
+            resolved_keyword = keyword_block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            self.assertEqual(resolved_keyword.kwargs, {"left": 2, "right": 3})
+            self.assertEqual(keyword_block.inspect(allow_mutable_objects=False), 5)
+
+    def test_known_optuna_artifact_is_rejected_without_loading(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            record = ArtifactRecord(
+                variable_name="study",
+                serializer=OPTUNA_STUDY_SERIALIZER,
+                file_path=str(Path(tmp) / "sampler.pkl"),
+                produced_by_block="producer",
+                produced_by_function="produce",
+                run_id="run",
+            )
+            pipeline.manual_values["data"] = record
+            block = pipeline.add_block("study", 1)
+            block.register_function(select_data, ["result"])
+
+            with mock.patch.object(ArtifactStore, "load") as load_mock:
+                with self.assertRaisesRegex(InspectionCopyError, "Optuna state"):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+            load_mock.assert_not_called()
+
+    @unittest.skipUnless(find_spec("optuna") is not None, "optuna is not installed")
+    def test_disk_backed_optuna_sampler_is_rejected_without_loading(self) -> None:
+        import optuna
+
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            record = pipeline.artifact_store.save(
+                variable_name="sampler",
+                value=optuna.samplers.RandomSampler(),
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.set_constant_value("data", record, copy=False)
+            block = pipeline.add_block("sampler", 1)
+            block.register_function(select_data, ["result"])
+
+            with mock.patch.object(ArtifactStore, "load") as load_mock:
+                with self.assertRaisesRegex(InspectionCopyError, "Optuna state"):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+            load_mock.assert_not_called()
+
+    def test_protected_numpy_view_never_mutates_original_storage(self) -> None:
+        with TemporaryDirectory() as tmp:
+            original = np.arange(8, dtype=np.int64)
+            view = original[2:6]
+            pipeline = PipelineHandler(
+                "root",
+                {"data": view},
+                Path(tmp) / "root",
+            )
+
+            def mutate_view(data: np.ndarray) -> np.ndarray:
+                data[:] = -1
+                return data
+
+            block = pipeline.add_block("view", 1)
+            block.register_function(mutate_view, ["result"])
+            inspected = block.inspect(allow_mutable_objects=False)
+
+            self.assertTrue(np.all(inspected == -1))
+            np.testing.assert_array_equal(original, np.arange(8, dtype=np.int64))
+
+    @unittest.skipUnless(find_spec("torch") is not None, "torch is not installed")
+    def test_protected_torch_view_never_mutates_original_storage(self) -> None:
+        import torch
+
+        with TemporaryDirectory() as tmp:
+            original = torch.arange(8)
+            view = original[2:6]
+            pipeline = PipelineHandler(
+                "root",
+                {"data": view},
+                Path(tmp) / "root",
+            )
+
+            def mutate_view(data: torch.Tensor) -> torch.Tensor:
+                data.fill_(-1)
+                return data
+
+            block = pipeline.add_block("view", 1)
+            block.register_function(mutate_view, ["result"])
+            inspected = block.inspect(allow_mutable_objects=False)
+
+            self.assertTrue(torch.all(inspected == -1))
+            self.assertTrue(torch.equal(original, torch.arange(8)))
+
+    def test_pipeline_inspect_requires_boolean_compute(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler(
+                "root",
+                {"value": 1},
+                Path(tmp) / "root",
+            )
+
+            for invalid in (1, "yes", object()):
+                with self.subTest(value=invalid):
+                    with self.assertRaisesRegex(TypeError, "compute"):
+                        pipeline.inspect(
+                            "value",
+                            compute=invalid,  # pyright: ignore[reportArgumentType]
+                        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Final, Self
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN: Final[float] = 0.25
 
 _MATERIAL_MEMORY_BYTES: Final[int] = 1 << 20
+_SHALLOW_SAMPLE_LIMIT: Final[int] = 32
+_SHALLOW_DEPTH_LIMIT: Final[int] = 2
+_PATH_ENTRY_LIMIT: Final[int] = 4096
+_TEMPORARY_ALLOCATION_FRACTION: Final[float] = 0.1
 
 _ARTIFACT_MEMORY_FACTORS: Final[dict[str, float]] = {
     "numpy": 1.1,
@@ -42,6 +47,9 @@ _ARTIFACT_MEMORY_FACTORS: Final[dict[str, float]] = {
     "feather": 4.0,
     "parquet": 4.0,
 }
+_RETAINED_ARTIFACT_SERIALIZERS: Final[frozenset[str]] = frozenset(
+    {"json", "pickle"}
+)
 
 
 class InspectionCopier:
@@ -51,6 +59,11 @@ class InspectionCopier:
         self._logger = logger
         self._allow_mutable_objects = allow_mutable_objects
         self._memo: dict[int, Any] = {}
+        self._copy_started = False
+
+    @property
+    def copy_started(self) -> bool:
+        return self._copy_started
 
     def prepare(
         self,
@@ -81,6 +94,7 @@ class InspectionCopier:
             copied = self._memo[id(value)]
             return copied, replace(source, copied=copied is not value)
         try:
+            self._copy_started = True
             copied = self._copy_value(value, parameter_name, source)
         except (InspectionCopyError, MemoryError):
             raise
@@ -121,7 +135,10 @@ class InspectionCopier:
             return False
         if (
             isinstance(value, ArtifactRecord)
-            and value.serializer == OPTUNA_STUDY_SERIALIZER
+            and (
+                value.serializer == OPTUNA_STUDY_SERIALIZER
+                or value.metadata.get("optuna_type") == "sampler"
+            )
         ):
             return False
         return True
@@ -246,6 +263,7 @@ class InspectionCopyCandidate:
 
     parameter_name: str
     value: Any
+    expected_container_kind: str | None = None
 
 
 def _format_bytes(size: float) -> str:
@@ -259,31 +277,59 @@ def _format_bytes(size: float) -> str:
     return f"{value:.1f} GiB"
 
 
-def _path_logical_bytes(path: Path) -> int:
+def _path_logical_bytes(path: Path) -> tuple[int, bool]:
     try:
-        if path.is_dir():
-            total = 0
-            for child in path.rglob("*"):
-                if child.is_file():
+        if not path.is_dir():
+            return path.stat().st_size, False
+    except OSError:
+        return 0, False
+
+    total = 0
+    visited = 0
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > _PATH_ENTRY_LIMIT:
+                        return total, True
                     try:
-                        total += child.stat().st_size
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
                     except OSError:
                         continue
-            return total
-        return path.stat().st_size
-    except OSError:
-        return 0
+        except OSError:
+            continue
+    return total, False
 
 
-def _parquet_directory_files(path: Path) -> list[Path]:
-    try:
-        return [
-            child
-            for child in path.rglob("*")
-            if child.is_file() and child.suffix == ".parquet"
-        ]
-    except OSError:
-        return []
+def _parquet_directory_file_count(path: Path) -> tuple[int, bool]:
+    count = 0
+    visited = 0
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > _PATH_ENTRY_LIMIT:
+                        return count, True
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            if Path(entry.name).suffix == ".parquet":
+                                count += 1
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return count, False
 
 
 def _slot_names(value_type: type) -> tuple[str, ...]:
@@ -303,13 +349,11 @@ def _slot_names(value_type: type) -> tuple[str, ...]:
 
 
 class _InspectionMemoryEstimator:
-    """Best-effort recursive estimator for protected-copy allocations.
+    """Best-effort bounded estimator for protected-copy allocations.
 
-    Estimates are conservative rather than exact: actual peak memory depends on
-    allocator behaviour, temporary objects, and the implementation of each copy
-    operation. Values whose memory cannot be bounded conservatively are recorded
-    as uncertain so the caller can reject the operation instead of trusting a
-    fabricated number.
+    The estimator intentionally avoids walking complete Python object graphs or
+    object-dtype tabular values. It uses cheap storage metadata and bounded
+    samples, recording material uncertainty for the confirmation path.
     """
 
     def __init__(
@@ -317,14 +361,36 @@ class _InspectionMemoryEstimator:
         pointer_reader: Callable[[OutputPointer], Any] | None = None,
     ) -> None:
         self._pointer_reader = pointer_reader
-        self._seen: set[int] = set()
-        self._bytes = 0
+        self._copy_seen: set[int] = set()
+        self._retained_materialization_bytes = 0
+        self._peak_transient_materialization_bytes = 0
+        self._copy_bytes = 0
+        self._temporary_bytes = 0
         self._cuda_bytes: dict[int, int] = {}
         self._uncertain: list[tuple[str, str]] = []
 
     @property
     def total_bytes(self) -> int:
-        return self._bytes
+        return (
+            self.materialization_bytes
+            + self._copy_bytes
+            + self._temporary_bytes
+        )
+
+    @property
+    def materialization_bytes(self) -> int:
+        return (
+            self._retained_materialization_bytes
+            + self._peak_transient_materialization_bytes
+        )
+
+    @property
+    def copy_bytes(self) -> int:
+        return self._copy_bytes
+
+    @property
+    def temporary_bytes(self) -> int:
+        return self._temporary_bytes
 
     @property
     def cuda_bytes(self) -> dict[int, int]:
@@ -334,37 +400,140 @@ class _InspectionMemoryEstimator:
     def uncertain(self) -> tuple[tuple[str, str], ...]:
         return tuple(self._uncertain)
 
-    def add(self, label: str, value: Any, *, materialize: bool = False) -> None:
-        size = self._estimate(value, label)
+    def add(
+        self,
+        label: str,
+        value: Any,
+        *,
+        materialize: bool = False,
+        expected_container_kind: str | None = None,
+    ) -> None:
         if materialize:
-            size *= 2
-        self._bytes += size
+            self._add_materialized(
+                label,
+                value,
+                expected_container_kind=expected_container_kind,
+            )
+            return
+        self._copy_bytes += self._estimate_copy(value, label)
 
-    def _estimate(self, value: Any, label: str) -> int:
+    def _mark_uncertain(self, label: str, reason: str) -> None:
+        entry = (label, reason)
+        if entry not in self._uncertain:
+            self._uncertain.append(entry)
+
+    def _add_materialized(
+        self,
+        label: str,
+        value: Any,
+        *,
+        expected_container_kind: str | None,
+    ) -> None:
+        terminal = value
+        if isinstance(value, OutputPointer):
+            if self._pointer_reader is None:
+                self._mark_uncertain(
+                    label,
+                    "output pointer cannot be resolved for estimation",
+                )
+                return
+            try:
+                terminal = self._pointer_reader(value)
+            except PointerResolutionError as exc:
+                self._mark_uncertain(
+                    label,
+                    f"output pointer is unresolvable: {exc}",
+                )
+                return
+            except MemoryError:
+                raise
+            except Exception as exc:
+                self._mark_uncertain(
+                    label,
+                    f"output pointer could not be assessed: {type(exc).__name__}: {exc}",
+                )
+                return
+
+        if isinstance(terminal, ArtifactRecord):
+            self._assess_artifact_container_type(
+                terminal,
+                label,
+                expected_container_kind,
+            )
+            size = self._estimate_artifact_record(terminal, label)
+            if terminal.serializer in _RETAINED_ARTIFACT_SERIALIZERS:
+                self._retained_materialization_bytes += size
+            else:
+                self._peak_transient_materialization_bytes = max(
+                    self._peak_transient_materialization_bytes,
+                    size,
+                )
+            self._copy_bytes += size
+            self._temporary_bytes = max(
+                self._temporary_bytes,
+                math.ceil(size * _TEMPORARY_ALLOCATION_FRACTION),
+            )
+            return
+
+        self._copy_bytes += self._estimate_copy(terminal, label)
+
+    def _assess_artifact_container_type(
+        self,
+        record: ArtifactRecord,
+        label: str,
+        expected_container_kind: str | None,
+    ) -> None:
+        if expected_container_kind is None:
+            return
+        python_type = record.metadata.get("python_type")
+        expected_types = {
+            "sequence": {"builtins.list", "builtins.tuple"},
+            "mapping": {"builtins.dict"},
+        }[expected_container_kind]
+        if python_type not in expected_types:
+            detail = (
+                "the artifact has no saved Python container type"
+                if python_type is None
+                else f"the artifact records Python type '{python_type}'"
+            )
+            self._mark_uncertain(
+                label,
+                f"{detail}; protected variadic planning expected a {expected_container_kind}",
+            )
+
+    def _estimate_copy(self, value: Any, label: str, *, depth: int = 0) -> int:
         identity = id(value)
-        if identity in self._seen:
+        if identity in self._copy_seen:
             return 0
-        self._seen.add(identity)
+        self._copy_seen.add(identity)
         try:
-            return self._estimate_value(value, label)
+            return self._estimate_value(value, label, depth=depth)
         except InspectionMemoryError:
             raise
+        except MemoryError:
+            raise
         except Exception as exc:
-            self._uncertain.append((label, f"{type(exc).__name__}: {exc}"))
+            self._mark_uncertain(label, f"{type(exc).__name__}: {exc}")
             return 0
 
-    def _estimate_value(self, value: Any, label: str) -> int:
+    def _estimate_value(self, value: Any, label: str, *, depth: int) -> int:
         if isinstance(value, ArtifactRecord):
-            return self._estimate_artifact_record(value, label)
+            return self._estimate_nested_artifact_record(value, label, depth)
         if isinstance(value, OutputPointer):
-            return self._estimate_output_pointer(value, label)
-        if isinstance(value, _IMMUTABLE_TYPES):
+            self._mark_uncertain(
+                label,
+                "nested output pointer cannot be assessed without materialising its container",
+            )
             return sys.getsizeof(value)
+        if isinstance(value, _IMMUTABLE_TYPES):
+            return 0
         if isinstance(
             value,
-            (FunctionType, BuiltinFunctionType, type, types.ModuleType, types.MethodType),
+            (FunctionType, BuiltinFunctionType, type, types.ModuleType),
         ):
-            return sys.getsizeof(value)
+            return 0
+        if isinstance(value, types.MethodType):
+            return self._estimate_bound_method(value, label, depth)
 
         try:
             import pandas as pd  # type: ignore
@@ -402,72 +571,138 @@ class _InspectionMemoryEstimator:
         except ImportError:
             pass
 
-        return self._estimate_generic(value, label)
+        return self._estimate_generic(value, label, depth)
 
     def _estimate_artifact_record(self, record: ArtifactRecord, label: str) -> int:
         serializer = record.serializer
-        if serializer == OPTUNA_STUDY_SERIALIZER:
-            return 0
+        if (
+            serializer == OPTUNA_STUDY_SERIALIZER
+            or record.metadata.get("optuna_type") == "sampler"
+        ):
+            raise InspectionCopyError(
+                "This inspection input contains Optuna state (a study or sampler) whose "
+                "shared state cannot be isolated by protected copying. To inspect "
+                "it using its original state, call "
+                "inspect(..., allow_mutable_objects=True)."
+            )
         factor = _ARTIFACT_MEMORY_FACTORS.get(serializer)
         if factor is None:
-            self._uncertain.append(
-                (
-                    label,
-                    f"artifact serializer '{serializer}' has no conservative "
-                    "memory estimator",
-                )
+            self._mark_uncertain(
+                label,
+                f"artifact serializer '{serializer}' has no lightweight memory estimator",
             )
             return 0
         path = Path(record.file_path)
         if serializer == "parquet" and path.is_dir():
-            size = self._estimate_parquet_directory(path)
+            size = self._estimate_parquet_directory(path, label)
+            self._mark_uncertain(
+                label,
+                "a parquet directory is expected to load lazily, but its loader may fall back to eager pandas loading",
+            )
         else:
-            size = _path_logical_bytes(path)
+            size, truncated = _path_logical_bytes(path)
+            if truncated:
+                self._mark_uncertain(
+                    label,
+                    f"artifact directory traversal exceeded {_PATH_ENTRY_LIMIT} entries",
+                )
         return int(size * factor)
 
-    @staticmethod
-    def _estimate_parquet_directory(path: Path) -> int:
+    def _estimate_nested_artifact_record(
+        self,
+        record: ArtifactRecord,
+        label: str,
+        depth: int,
+    ) -> int:
+        size = sys.getsizeof(record)
+        if depth >= _SHALLOW_DEPTH_LIMIT:
+            return size
+        size += self._estimate_copy(record.metadata, label, depth=depth + 1)
+        return size
+
+    def _estimate_parquet_directory(self, path: Path, label: str) -> int:
         try:
             import dask.dataframe  # type: ignore  # noqa: F401
         except ImportError:
-            return _path_logical_bytes(path)
-        files = _parquet_directory_files(path)
-        return 256 * 1024 + len(files) * 16 * 1024
-
-    def _estimate_output_pointer(self, pointer: OutputPointer, label: str) -> int:
-        if self._pointer_reader is None:
-            self._uncertain.append(
-                (label, "output pointer cannot be resolved for estimation")
+            size, truncated = _path_logical_bytes(path)
+            if truncated:
+                self._mark_uncertain(
+                    label,
+                    f"parquet directory traversal exceeded {_PATH_ENTRY_LIMIT} entries",
+                )
+            return size
+        file_count, truncated = _parquet_directory_file_count(path)
+        if truncated:
+            self._mark_uncertain(
+                label,
+                f"parquet directory traversal exceeded {_PATH_ENTRY_LIMIT} entries",
             )
-            return 0
-        try:
-            terminal = self._pointer_reader(pointer)
-        except PointerResolutionError as exc:
-            self._uncertain.append((label, f"output pointer is unresolvable: {exc}"))
-            return 0
-        return self._estimate(terminal, label)
+        return 256 * 1024 + file_count * 16 * 1024
 
     def _estimate_pandas_frame(self, frame: Any, label: str) -> int:
         total = int(frame.memory_usage(index=True, deep=False).sum())
-        for column_index, dtype in enumerate(frame.dtypes):
-            if dtype != object:
-                continue
-            for row_index in range(len(frame.index)):
-                total += self._estimate(frame.iat[row_index, column_index], label)
+        object_columns = [
+            index for index, dtype in enumerate(frame.dtypes) if dtype == object
+        ]
+        if object_columns and len(frame.index):
+            sample_budget = _SHALLOW_SAMPLE_LIMIT
+            sampled_sizes: list[int] = []
+            for column_index in object_columns:
+                remaining_columns = max(1, len(object_columns) - len(sampled_sizes))
+                column_budget = max(1, sample_budget // remaining_columns)
+                for row_index in range(min(len(frame.index), column_budget)):
+                    sampled_sizes.append(
+                        self._estimate_copy(
+                            frame.iat[row_index, column_index],
+                            label,
+                            depth=1,
+                        )
+                    )
+                    sample_budget -= 1
+                    if sample_budget <= 0:
+                        break
+                if sample_budget <= 0:
+                    break
+            if sampled_sizes:
+                total += sum(sampled_sizes)
+            if len(frame.index) * len(object_columns) > len(sampled_sizes):
+                self._mark_uncertain(
+                    label,
+                    "object-dtype DataFrame memory is estimated from a bounded sample rather than every cell",
+                )
         return total
 
     def _estimate_pandas_series(self, series: Any, label: str) -> int:
         total = int(series.memory_usage(index=True, deep=False))
-        if series.dtype == object:
-            for index in range(len(series.index)):
-                total += self._estimate(series.iat[index], label)
+        if series.dtype == object and len(series.index):
+            sample_count = min(len(series.index), _SHALLOW_SAMPLE_LIMIT)
+            sampled = [
+                self._estimate_copy(series.iat[index], label, depth=1)
+                for index in range(sample_count)
+            ]
+            total += sum(sampled)
+            if len(series.index) > sample_count:
+                self._mark_uncertain(
+                    label,
+                    "object-dtype Series memory is estimated from a bounded sample rather than every value",
+                )
         return total
 
     def _estimate_numpy_array(self, array: Any, label: str) -> int:
         total = int(array.nbytes)
-        if array.dtype.hasobject:
-            for item in array.flat:
-                total += self._estimate(item, label)
+        if array.dtype.hasobject and array.size:
+            sample_count = min(int(array.size), _SHALLOW_SAMPLE_LIMIT)
+            iterator = iter(array.flat)
+            sampled = [
+                self._estimate_copy(next(iterator), label, depth=1)
+                for _ in range(sample_count)
+            ]
+            total += sum(sampled)
+            if int(array.size) > sample_count:
+                self._mark_uncertain(
+                    label,
+                    "object-dtype NumPy memory is estimated from a bounded sample rather than every element",
+                )
         return total
 
     def _estimate_torch_tensor(self, tensor: Any) -> int:
@@ -485,69 +720,118 @@ class _InspectionMemoryEstimator:
     def _estimate_torch_module(self, module: Any, label: str) -> int:
         total = sys.getsizeof(module)
         for parameter in module.parameters():
-            total += self._estimate(parameter, label)
+            total += self._estimate_copy(parameter, label, depth=1)
         for buffer in module.buffers():
-            total += self._estimate(buffer, label)
+            total += self._estimate_copy(buffer, label, depth=1)
         return total
 
     def _estimate_dask_collection(self, collection: Any) -> int:
         try:
             task_count = int(len(collection.__dask_graph__()))
+        except MemoryError:
+            raise
         except Exception:
             try:
                 task_count = int(collection.npartitions) * 8
+            except MemoryError:
+                raise
             except Exception:
                 task_count = 4096
         return 256 * 1024 + task_count * 512
 
-    def _estimate_generic(self, value: Any, label: str) -> int:
+    def _estimate_bound_method(
+        self,
+        method: types.MethodType,
+        label: str,
+        depth: int,
+    ) -> int:
+        size = sys.getsizeof(method)
+        instance = method.__self__
+        if instance is None or isinstance(instance, type):
+            return size
+        if depth >= _SHALLOW_DEPTH_LIMIT:
+            self._mark_uncertain(
+                label,
+                "bound method owner could not be assessed within the bounded inspection depth",
+            )
+            return size
+        return size + self._estimate_copy(instance, label, depth=depth + 1)
+
+    def _estimate_generic(self, value: Any, label: str, depth: int) -> int:
         size = sys.getsizeof(value)
         if isinstance(value, Enum):
-            return size
+            return 0
         if isinstance(value, bytearray):
             return size
+        if depth >= _SHALLOW_DEPTH_LIMIT:
+            self._mark_uncertain(
+                label,
+                f"the object graph for type '{type(value).__name__}' exceeds the bounded inspection depth",
+            )
+            return size
         if isinstance(value, dict):
-            for key, item in value.items():
-                size += self._estimate(key, label)
-                size += self._estimate(item, label)
+            sampled = list(islice(value.items(), _SHALLOW_SAMPLE_LIMIT))
+            for key, item in sampled:
+                size += self._estimate_copy(key, label, depth=depth + 1)
+                size += self._estimate_copy(item, label, depth=depth + 1)
+            if len(value) > len(sampled):
+                self._mark_uncertain(
+                    label,
+                    f"dictionary contents were sampled ({len(sampled)} of {len(value)} entries)",
+                )
             return size
         if isinstance(value, (list, tuple, set, frozenset)):
-            for item in value:
-                size += self._estimate(item, label)
+            sampled = list(islice(value, _SHALLOW_SAMPLE_LIMIT))
+            for item in sampled:
+                size += self._estimate_copy(item, label, depth=depth + 1)
+            if len(value) > len(sampled):
+                self._mark_uncertain(
+                    label,
+                    f"container contents were sampled ({len(sampled)} of {len(value)} items)",
+                )
             return size
-        traversed = False
+
+        attributes: list[Any] = []
+        attribute_count = 0
         if is_dataclass(value) and not isinstance(value, type):
-            for field_info in fields(value):
+            field_infos = fields(value)
+            attribute_count += len(field_infos)
+            for field_info in islice(field_infos, _SHALLOW_SAMPLE_LIMIT):
                 if hasattr(value, field_info.name):
-                    size += self._estimate(
-                        getattr(value, field_info.name),
-                        label,
-                    )
-            traversed = True
+                    attributes.append(getattr(value, field_info.name))
         elif hasattr(value, "__dict__"):
             try:
-                for item in vars(value).values():
-                    size += self._estimate(item, label)
-                traversed = True
+                value_attributes = vars(value)
+                attribute_count += len(value_attributes)
+                attributes.extend(
+                    islice(value_attributes.values(), _SHALLOW_SAMPLE_LIMIT)
+                )
             except TypeError:
                 pass
         for slot_name in _slot_names(type(value)):
+            attribute_count += 1
+            if len(attributes) >= _SHALLOW_SAMPLE_LIMIT:
+                continue
             try:
                 item = getattr(value, slot_name)
             except AttributeError:
                 continue
-            size += self._estimate(item, label)
-            traversed = True
-        if not traversed and size >= _MATERIAL_MEMORY_BYTES:
-            self._uncertain.append(
-                (
-                    label,
-                    f"opaque object of type '{type(value).__name__}' cannot be "
-                    "bounded conservatively",
-                )
+            attributes.append(item)
+        sampled_attributes = attributes[:_SHALLOW_SAMPLE_LIMIT]
+        for item in sampled_attributes:
+            size += self._estimate_copy(item, label, depth=depth + 1)
+        if attribute_count > len(sampled_attributes):
+            self._mark_uncertain(
+                label,
+                f"attributes of type '{type(value).__name__}' were sampled "
+                f"({len(sampled_attributes)} of {attribute_count})",
+            )
+        elif not attributes and size >= _MATERIAL_MEMORY_BYTES:
+            self._mark_uncertain(
+                label,
+                f"opaque object of type '{type(value).__name__}' cannot be estimated cheaply",
             )
         return size
-
 
 def _read_integer_metric(path: str) -> int | None:
     try:
@@ -627,12 +911,14 @@ def _rlimit_memory_headroom() -> tuple[int | None, str]:
         return None, ""
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    except (ValueError, OSError):
+    except (AttributeError, ValueError, OSError):
         return None, ""
     infinity = getattr(resource, "RLIM_INFINITY", -1)
     limit = soft if soft != infinity else hard
-    if limit == infinity or limit <= 0:
+    if limit == infinity or limit < 0:
         return None, ""
+    if limit == 0:
+        return 0, "process address-space limit (RLIMIT_AS)"
     usage = _process_address_space_bytes()
     if usage is None:
         return None, ""
@@ -699,6 +985,11 @@ def _inspection_memory_error(
         "allow_mutable_objects=True to inspect the original objects without "
         "copying them."
     )
+    lines.append(
+        "This lightweight estimate and the available-memory measurements are "
+        "approximate. Continuing can exhaust memory, terminate the Python or "
+        "Jupyter process, and lose unsaved in-memory work."
+    )
     return InspectionMemoryError(
         "\n".join(lines),
         node_name=node_name,
@@ -713,28 +1004,39 @@ def inspection_memory_failure(
     *,
     node_name: str,
     function_name: str,
-    parameter_name: str,
+    parameter_name: str | None,
     value: Any = None,
+    stage: str = "copying",
+    copy_started: bool = True,
 ) -> InspectionMemoryError:
-    """Build the error used when copying raises ``MemoryError`` after preflight."""
+    """Build a stage-aware error for a ``MemoryError`` during inspection."""
     estimate_line = ""
     if value is not None:
         try:
             estimator = _InspectionMemoryEstimator()
-            estimator.add(parameter_name, value)
+            estimator.add(parameter_name or "input", value)
             estimate_line = (
                 f"Estimated size of the affected input: "
                 f"{_format_bytes(estimator.total_bytes)}"
             )
         except Exception:
             estimate_line = ""
+    input_text = "" if parameter_name is None else f" input '{parameter_name}'"
     lines = [
-        f"Protected inspection of '{node_name}' failed while copying input "
-        f"'{parameter_name}' for function '{function_name}': the process ran out "
-        "of memory.",
-        "A protected copy had already started; inspection does not modify "
-        "pipeline state, but memory pressure may still affect the process.",
+        f"Inspection of '{node_name}' failed while {stage}{input_text} for "
+        f"function '{function_name}': the process ran out of memory.",
     ]
+    if copy_started:
+        lines.append(
+            "A protected copy had already started; inspection does not commit "
+            "pipeline outputs, but memory pressure may still affect the process."
+        )
+    else:
+        lines.append(
+            "No protected copy had started when the allocation failed and no "
+            "inspection result was committed. Shared mutable inputs may still "
+            "have been changed if protected copying was disabled."
+        )
     if estimate_line:
         lines.append(estimate_line)
     lines.append(
@@ -747,8 +1049,8 @@ def inspection_memory_failure(
         node_name=node_name,
         function_name=function_name,
         inputs=parameter_name,
-        reason="MemoryError raised during protected copying",
-        copy_started=True,
+        reason=f"MemoryError raised while {stage}",
+        copy_started=copy_started,
     )
 
 
@@ -789,6 +1091,16 @@ def _confirm_unsafe_copy(error: InspectionMemoryError) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
+def _apply_memory_safety_margin(size: int, safety_margin: float) -> int:
+    try:
+        adjusted = size * (1.0 + safety_margin)
+    except OverflowError as exc:
+        raise TypeError("memory_safety_margin is too large") from exc
+    if not math.isfinite(adjusted):
+        raise TypeError("memory_safety_margin is too large")
+    return math.ceil(adjusted)
+
+
 def preflight_protected_inspection(
     candidates: Sequence[InspectionCopyCandidate],
     *,
@@ -808,19 +1120,25 @@ def preflight_protected_inspection(
     if not candidates:
         return
     estimator = _InspectionMemoryEstimator(pointer_reader)
-    seen: set[int] = set()
     labels: list[str] = []
     for candidate in candidates:
-        identity = id(candidate.value)
-        if identity in seen:
-            continue
-        seen.add(identity)
         labels.append(candidate.parameter_name)
-        estimator.add(
-            candidate.parameter_name,
-            candidate.value,
-            materialize=_requires_materialization(candidate.value),
-        )
+        try:
+            estimator.add(
+                candidate.parameter_name,
+                candidate.value,
+                materialize=_requires_materialization(candidate.value),
+                expected_container_kind=candidate.expected_container_kind,
+            )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=candidate.parameter_name,
+                value=candidate.value,
+                stage="estimating protected-copy memory",
+                copy_started=False,
+            ) from exc
     inputs = ", ".join(dict.fromkeys(labels))
     if estimator.uncertain:
         reasons = "; ".join(
@@ -844,9 +1162,12 @@ def preflight_protected_inspection(
         raise error
     required_bytes = estimator.total_bytes
     if required_bytes > 0:
-        required_bytes = math.ceil(required_bytes * (1.0 + safety_margin))
+        required_bytes = _apply_memory_safety_margin(
+            required_bytes,
+            safety_margin,
+        )
     cuda_required = {
-        device: math.ceil(size * (1.0 + safety_margin))
+        device: _apply_memory_safety_margin(size, safety_margin)
         for device, size in estimator.cuda_bytes.items()
         if size > 0
     }
@@ -1047,6 +1368,8 @@ class InspectionMixin:
             raise ValueError("inspect() variable names must be non-empty strings")
         if len(set(names)) != len(names):
             raise ValueError("inspect() variable names must be unique")
+        if not isinstance(compute, bool):
+            raise TypeError("compute must be a boolean")
         if priority is not None:
             self._validate_integer_priority(priority)
         return PipelineInspection(self, names, compute=compute, priority=priority)

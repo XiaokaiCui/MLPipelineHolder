@@ -4,8 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import unittest
+from unittest import mock
 
-from mlpipelineholder import PipelineHandler, ResolutionError
+from mlpipelineholder import PipelineHandler, RegistrationError, ResolutionError
 
 
 def use_default(value: str = "function-default") -> str:
@@ -186,6 +187,137 @@ class StrictArgumentResolutionTests(unittest.TestCase):
 
             self.assertEqual(registration.input_names, [])
             self.assertEqual(pipeline.get_value("result"), "function-default")
+
+    def test_switching_strict_mode_warns_only_when_mode_changes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "strict-warning",
+                {},
+                Path(temp_dir),
+            )
+
+            with mock.patch.object(pipeline.logger, "warning") as warning:
+                pipeline.set_strict_mode(False)
+                warning.assert_not_called()
+
+                pipeline.set_strict_mode(True)
+
+            warning.assert_called_once()
+            self.assertIn("run_all()", warning.call_args.args[0])
+
+    def test_parameter_named_variadic_helpers_are_consistent_and_persisted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "implicit-helper",
+                {"first": 1, "second": 2, "bonus": 3},
+                root / "project",
+                strict_mode=True,
+            )
+            block = pipeline.add_block("build", 1)
+            block.register_args("values", ["first"])
+            block.register_kwargs("named", {"bonus": "bonus"})
+            registration = block.register_function(
+                collect_implicit_variadics,
+                ["positional_count", "keyword_count"],
+            )
+
+            resolved = block.inspect(resolve_only=True)
+            pipeline.run_all()
+
+            self.assertEqual(resolved.args, (1,))
+            self.assertEqual(resolved.kwargs, {"bonus": 3})
+            self.assertEqual(registration.input_names, ["first", "bonus"])
+            self.assertEqual(pipeline.get_value("positional_count"), 1)
+            self.assertEqual(pipeline.get_value("keyword_count"), 1)
+
+            block.register_args("values", ["second"], forced=True)
+            self.assertFalse(pipeline.has_visible_output("positional_count"))
+            self.assertEqual(registration.input_names, ["second", "bonus"])
+            pipeline.run_all()
+
+            bundle = root / "bundle"
+            pipeline.save_pipeline(bundle)
+            loaded = PipelineHandler.load_pipeline(
+                bundle,
+                forced_deleting=True,
+                trust_project=True,
+            )
+            loaded_block = loaded.get_block("build")
+            loaded_registration = loaded_block.functions[0]
+            loaded_resolved = loaded_block.inspect(resolve_only=True)
+
+            self.assertEqual(loaded_registration.input_names, ["second", "bonus"])
+            self.assertEqual(loaded_resolved.args, (2,))
+            self.assertEqual(loaded_resolved.kwargs, {"bonus": 3})
+
+    def test_parameter_named_kwargs_helper_is_strictly_validated(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "implicit-helper-conflict",
+                {"first": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            block = pipeline.add_block("build", 1)
+            block.register_kwargs("named", {"prefix": "first"})
+
+            with self.assertRaisesRegex(RegistrationError, "conflicts"):
+                block.register_function(
+                    collect_explicit_variadics,
+                    ["prefix_result", "total"],
+                )
+
+    def test_invalid_kwargs_helper_replacement_preserves_previous_helper(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "implicit-helper-replacement",
+                {"first": 1},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            block = pipeline.add_block("build", 1)
+            block.register_kwargs("named", {"bonus": "first"})
+            block.register_function(
+                collect_explicit_variadics,
+                ["prefix_result", "total"],
+            )
+
+            rejected = block.register_kwargs(
+                "named",
+                {"prefix": "first"},
+                forced=True,
+            )
+
+            self.assertIsNone(rejected)
+            self.assertEqual(
+                block.registered_kwargs["named"].mapping_dct,
+                {"bonus": "first"},
+            )
+
+    def test_explicit_variadic_helper_replacement_refreshes_dependencies(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "explicit-helper",
+                {"first": 1, "second": 2},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            block = pipeline.add_block("build", 1)
+            block.register_args("selected", ["first"])
+            registration = block.register_function(
+                collect_explicit_variadics,
+                ["prefix", "total"],
+                var_pos_name="selected",
+            )
+            pipeline.run_all()
+
+            block.register_args("selected", ["second"], forced=True)
+
+            self.assertFalse(pipeline.has_visible_output("total"))
+            self.assertEqual(registration.input_names, ["second"])
+            resolved = block.inspect(resolve_only=True)
+            self.assertEqual(resolved.args, ("function-default", 2))
 
     def test_callable_gate_keeps_existing_implicit_resolution(self) -> None:
         with TemporaryDirectory() as temp_dir:

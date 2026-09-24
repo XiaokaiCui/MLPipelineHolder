@@ -12,6 +12,7 @@ from ...integrations.optuna.api import StudyArtifactOptions
 from ...integrations.optuna.support import (
     OPTUNA_STUDIES_DB_NAME,
     OPTUNA_STUDY_SERIALIZER,
+    is_optuna_sampler,
     is_optuna_study,
     load_study_artifact,
     save_study_artifact,
@@ -59,6 +60,11 @@ class ArtifactStore:
             / f"{safe_function}__{safe_variable}__{run_id}__{uuid4().hex}{suffix}"
         )
         dump_value(value, serializer, artifact_path)
+        metadata = {
+            "python_type": f"{type(value).__module__}.{type(value).__qualname__}"
+        }
+        if is_optuna_sampler(value):
+            metadata["optuna_type"] = "sampler"
         return ArtifactRecord(
             variable_name=variable_name,
             serializer=serializer,
@@ -67,6 +73,7 @@ class ArtifactStore:
             produced_by_function=function_name,
             run_id=run_id,
             torch_load_weights_only=torch_load_weights_only,
+            metadata=metadata,
         )
 
     def _save_optuna_study(

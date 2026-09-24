@@ -37,10 +37,20 @@ class RuntimeControlsMixin:
 
     def set_strict_mode(self, enabled: bool) -> None:
         """Enable or disable strict-mode registration validation for this pipeline and all attached descendants."""
-        for pipeline in self._iter_attached_pipelines():
-            pipeline.strict_mode = bool(enabled)
+        normalized = bool(enabled)
+        pipelines = self._iter_attached_pipelines()
+        changed = any(pipeline.strict_mode != normalized for pipeline in pipelines)
+        for pipeline in pipelines:
+            pipeline.strict_mode = normalized
             for block in pipeline.blocks:
                 block._refresh_function_input_names()
+        if changed:
+            self.logger.warning(
+                "Strict mode has changed. Existing pipeline results may have been "
+                "calculated using the previous argument-resolution rules and may "
+                "no longer reflect the current configuration. Run run_all() to "
+                "recompute pipeline results before relying on them."
+            )
 
     def _sync_invalidation_flag(self) -> None:
         """Copy this pipeline's invalidation flag to its whole attached subtree."""

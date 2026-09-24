@@ -9,7 +9,18 @@ from dataclasses import replace
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
-from ..exceptions import ExecutionError, RegistrationError, ResolutionError
+from ..exceptions import (
+    ExecutionError,
+    InspectionCopyError,
+    PersistenceError,
+    RegistrationError,
+    ResolutionError,
+)
+from ..integrations.optuna.support import (
+    OPTUNA_STUDY_SERIALIZER,
+    is_optuna_sampler,
+    is_optuna_study,
+)
 from .inspection import (
     DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     InspectionCopier,
@@ -21,13 +32,16 @@ from .function_registry import (
     callable_identity_matches,
     callable_signature,
     default_map,
+    effective_variadic_names,
     infer_declared_output_count,
     inspect_exposed_input_names,
     inspect_input_names,
+    normalize_renamed_registration,
     rename_args,
     resolve_callable,
 )
 from ..core.models import (
+    ArtifactRecord,
     BlockArgsRegistration,
     BlockKwargsRegistration,
     ExpressionRegistration,
@@ -39,7 +53,6 @@ from ..core.models import (
 from ..core.naming import validate_registration_name
 from ..state.output_pointers import (
     OutputPointer,
-    PointerResolutionError,
     resolve_pointer_chain,
 )
 
@@ -359,7 +372,25 @@ class ExecutionBlock:
                 if dict(existing.mapping_dct) == dict(mapping_dct):
                     return existing
             registration = BlockKwargsRegistration(name=name, mapping_dct=dict(mapping_dct))
+            previous = self.registered_kwargs.get(name)
             self.registered_kwargs[name] = registration
+            try:
+                for consumer in self.functions:
+                    if not isinstance(consumer, FunctionRegistration):
+                        continue
+                    _, effective_kw_name = effective_variadic_names(
+                        consumer.callable_obj,
+                        var_pos_name=consumer.var_pos_name,
+                        var_kw_name=consumer.var_kw_name,
+                    )
+                    if effective_kw_name == name:
+                        self._strict_validate_registration(consumer)
+            except RegistrationError:
+                if previous is None:
+                    del self.registered_kwargs[name]
+                else:
+                    self.registered_kwargs[name] = previous
+                raise
             self._invalidate_helper_consumers(name, is_args=False)
             return registration
         except RegistrationError as exc:
@@ -369,23 +400,23 @@ class ExecutionBlock:
             return None
 
     def _invalidate_helper_consumers(self, name: str, *, is_args: bool) -> None:
-        consumers = [
-            registration
-            for registration in self.functions
-            if isinstance(registration, FunctionRegistration)
-            and (
-                registration.var_pos_name == name
-                if is_args
-                else registration.var_kw_name == name
+        consumers: list[FunctionRegistration] = []
+        for registration in self.functions:
+            if not isinstance(registration, FunctionRegistration):
+                continue
+            effective_pos_name, effective_kw_name = effective_variadic_names(
+                registration.callable_obj,
+                var_pos_name=registration.var_pos_name,
+                var_kw_name=registration.var_kw_name,
             )
-        ]
+            effective_name = effective_pos_name if is_args else effective_kw_name
+            if effective_name == name:
+                consumers.append(registration)
         output_names = [
             output_name
             for registration in consumers
             for output_name in registration.produced_output_names
         ]
-        if not output_names:
-            return
         for registration in consumers:
             if is_args:
                 registration.args_registration_state = list(
@@ -395,6 +426,9 @@ class ExecutionBlock:
                 registration.kwargs_registration_state = dict(
                     self.registered_kwargs[name].mapping_dct
                 )
+            registration.input_names = self._function_input_names(registration)
+        if not output_names:
+            return
         self.parent._erase_overridden_node_outputs(
             self.registration_name,
             self.execution_priority,
@@ -420,6 +454,14 @@ class ExecutionBlock:
             raise RegistrationError(
                 "Ignored output marker '_' cannot be included in save_to_disk"
             )
+        function_or_path, param_mapping, var_pos_name, var_kw_name = (
+            normalize_renamed_registration(
+                function_or_path,
+                param_mapping,
+                var_pos_name,
+                var_kw_name,
+            )
+        )
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         existing_registration = next(
             (
@@ -508,9 +550,14 @@ class ExecutionBlock:
         new_produced_output_names = [
             output_name for output_name in new_output_names if output_name != "_"
         ]
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            callable_obj,
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
+        )
         args_state, kwargs_state = self._variadic_registration_state(
-            var_pos_name,
-            var_kw_name,
+            effective_pos_name,
+            effective_kw_name,
         )
         normalized_overrides = self.parent._normalize_overridden_outputs(
             new_produced_output_names,
@@ -625,9 +672,14 @@ class ExecutionBlock:
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         declared_output_count = infer_declared_output_count(callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            callable_obj,
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
+        )
         args_state, kwargs_state = self._variadic_registration_state(
-            var_pos_name,
-            var_kw_name,
+            effective_pos_name,
+            effective_kw_name,
         )
         if not output_names and declared_output_count is not None and declared_output_count > 0:
             if not getattr(self.parent, "suppress_registration_advisories", False):
@@ -803,9 +855,16 @@ class ExecutionBlock:
             )
 
         # Check 8: a kwargs_dct key conflicts with an explicit function argument.
-        kwargs_registration = None
-        if registration.var_kw_name is not None:
-            kwargs_registration = self.registered_kwargs.get(registration.var_kw_name)
+        _, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
+        kwargs_registration = (
+            None
+            if effective_kw_name is None
+            else self.registered_kwargs.get(effective_kw_name)
+        )
         if kwargs_registration is not None:
             for key in kwargs_registration.mapping_dct:
                 if key in explicit_params:
@@ -949,15 +1008,20 @@ class ExecutionBlock:
             raise TypeError("resolve_only must be a boolean")
         if not isinstance(allow_mutable_objects, bool):
             raise TypeError("allow_mutable_objects must be a boolean")
+        try:
+            normalized_memory_safety_margin = float(memory_safety_margin)
+        except (TypeError, ValueError, OverflowError):
+            normalized_memory_safety_margin = float("nan")
         if (
             isinstance(memory_safety_margin, bool)
             or not isinstance(memory_safety_margin, (int, float))
-            or not math.isfinite(float(memory_safety_margin))
-            or memory_safety_margin < 0
+            or not math.isfinite(normalized_memory_safety_margin)
+            or normalized_memory_safety_margin < 0
         ):
             raise TypeError(
                 "memory_safety_margin must be a finite non-negative number"
             )
+        memory_safety_margin = normalized_memory_safety_margin
         inspection_overrides = dict(overrides or {})
         registration = self._select_inspection_registration(
             function_name,
@@ -1005,6 +1069,14 @@ class ExecutionBlock:
                     *resolved.args,
                     **resolved.kwargs,
                 )
+            except MemoryError as exc:
+                raise inspection_memory_failure(
+                    node_name=node_name,
+                    function_name=registration.function_name,
+                    parameter_name=None,
+                    stage="executing the inspected function",
+                    copy_started=copier.copy_started,
+                ) from exc
             except ResolutionError:
                 raise
             except Exception as exc:
@@ -1036,6 +1108,14 @@ class ExecutionBlock:
                 registration.code,
                 namespace,
             )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=registration.function_name,
+                parameter_name=None,
+                stage="executing the inspected expression",
+                copy_started=copier.copy_started,
+            ) from exc
         except ResolutionError:
             raise
         except Exception as exc:
@@ -1116,7 +1196,11 @@ class ExecutionBlock:
         copier: InspectionCopier,
         node_name: str,
     ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
+        runtime_namespace: dict[str, Any] | None = None
         if not allow_mutable_objects:
+            runtime_namespace = self.parent._build_expression_runtime_namespace(
+                cache=False
+            )
             candidates: list[InspectionCopyCandidate] = []
             self._resolve_inspection_expression(
                 registration,
@@ -1132,6 +1216,7 @@ class ExecutionBlock:
                 materialize=False,
                 planning=True,
                 candidates=candidates,
+                runtime_namespace=runtime_namespace,
             )
             self._preflight_inspection_memory(
                 candidates,
@@ -1150,6 +1235,7 @@ class ExecutionBlock:
             parent_config=parent_config,
             copier=copier,
             node_name=node_name,
+            runtime_namespace=runtime_namespace,
         )
 
     def _preflight_inspection_memory(
@@ -1169,13 +1255,10 @@ class ExecutionBlock:
         )
 
     def _inspection_pointer_terminal(self, pointer: OutputPointer) -> Any:
-        try:
-            _, terminal = resolve_pointer_chain(
-                pointer.destination,
-                self.parent._root_pipeline()._read_output_address,
-            )
-        except PointerResolutionError:
-            return None
+        _, terminal = resolve_pointer_chain(
+            pointer.destination,
+            self.parent._root_pipeline()._read_output_address,
+        )
         return terminal
 
     def _select_inspection_registration(
@@ -1429,6 +1512,11 @@ class ExecutionBlock:
     ) -> ResolvedInspectionCall:
         signature = callable_signature(registration.callable_obj)
         parameters = list(signature.parameters.values())
+        effective_var_pos_name, effective_var_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
         resolver_defaults = (
             {} if strict_mode else default_map(registration.callable_obj)
         )
@@ -1485,8 +1573,8 @@ class ExecutionBlock:
                 sources[parameter.name] = source
             elif parameter.kind == inspect.Parameter.VAR_POSITIONAL:
                 helper = (
-                    self.registered_args.get(registration.var_pos_name)
-                    if registration.var_pos_name is not None
+                    self.registered_args.get(effective_var_pos_name)
+                    if effective_var_pos_name is not None
                     else None
                 )
                 if helper is not None:
@@ -1519,7 +1607,7 @@ class ExecutionBlock:
                 elif strict_mode:
                     sources[parameter.name] = tuple()
                 else:
-                    input_name = registration.var_pos_name or parameter.name
+                    input_name = effective_var_pos_name or parameter.name
                     value, source = self._resolve_and_copy_inspection_input(
                         input_name,
                         parameter.name,
@@ -1536,9 +1624,13 @@ class ExecutionBlock:
                         materialize=materialize,
                         planning=planning,
                         candidates=candidates,
+                        expected_container_kind="sequence",
                         allow_missing=True,
                         missing_value=[],
                     )
+                    if planning and isinstance(value, (ArtifactRecord, OutputPointer)):
+                        sources[parameter.name] = source
+                        continue
                     if not isinstance(value, (list, tuple)):
                         raise ResolutionError(
                             f"Variadic positional argument '{input_name}' for function "
@@ -1549,8 +1641,8 @@ class ExecutionBlock:
                 continue
             elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
                 helper = (
-                    self.registered_kwargs.get(registration.var_kw_name)
-                    if registration.var_kw_name is not None
+                    self.registered_kwargs.get(effective_var_kw_name)
+                    if effective_var_kw_name is not None
                     else None
                 )
                 if helper is not None:
@@ -1590,7 +1682,7 @@ class ExecutionBlock:
                 elif strict_mode:
                     sources[parameter.name] = {}
                 else:
-                    input_name = registration.var_kw_name or parameter.name
+                    input_name = effective_var_kw_name or parameter.name
                     value, source = self._resolve_and_copy_inspection_input(
                         input_name,
                         parameter.name,
@@ -1607,9 +1699,13 @@ class ExecutionBlock:
                         materialize=materialize,
                         planning=planning,
                         candidates=candidates,
+                        expected_container_kind="mapping",
                         allow_missing=True,
                         missing_value={},
                     )
+                    if planning and isinstance(value, (ArtifactRecord, OutputPointer)):
+                        sources[parameter.name] = source
+                        continue
                     if not isinstance(value, dict):
                         raise ResolutionError(
                             f"Variadic keyword argument '{input_name}' for function "
@@ -1750,8 +1846,26 @@ class ExecutionBlock:
         planning: bool,
         candidates: list[InspectionCopyCandidate] | None,
         caller_owned: bool = False,
+        expected_container_kind: str | None = None,
     ) -> tuple[Any, ResolutionSource]:
         if planning:
+            if (
+                is_optuna_study(value)
+                or is_optuna_sampler(value)
+                or (
+                    isinstance(value, ArtifactRecord)
+                    and (
+                        value.serializer == OPTUNA_STUDY_SERIALIZER
+                        or value.metadata.get("optuna_type") == "sampler"
+                    )
+                )
+                ):
+                raise InspectionCopyError(
+                    "This inspection input contains Optuna state (a study or sampler) "
+                    "whose shared state cannot be isolated by protected copying. "
+                    "To inspect it using its original state, call "
+                    "inspect(..., allow_mutable_objects=True)."
+                )
             if candidates is not None and copier.requires_copy(
                 value,
                 caller_owned=caller_owned,
@@ -1760,6 +1874,7 @@ class ExecutionBlock:
                     InspectionCopyCandidate(
                         parameter_name=parameter_name,
                         value=value,
+                        expected_container_kind=expected_container_kind,
                     )
                 )
             return value, source
@@ -1776,6 +1891,8 @@ class ExecutionBlock:
                 function_name=function_name,
                 parameter_name=parameter_name,
                 value=value,
+                stage="copying",
+                copy_started=copier.copy_started,
             ) from exc
 
     def _resolve_and_copy_inspection_input(
@@ -1796,6 +1913,7 @@ class ExecutionBlock:
         materialize: bool = True,
         planning: bool = False,
         candidates: list[InspectionCopyCandidate] | None = None,
+        expected_container_kind: str | None = None,
         allow_missing: bool = False,
         missing_value: Any = None,
     ) -> tuple[Any, ResolutionSource]:
@@ -1830,11 +1948,23 @@ class ExecutionBlock:
                 same_node_previous_outputs=previous_names,
                 materialize=materialize,
             )
+        except PersistenceError as exc:
+            if not isinstance(exc.__cause__, MemoryError):
+                raise
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+                stage="resolving or materialising",
+                copy_started=copier.copy_started,
+            ) from exc.__cause__
         except MemoryError as exc:
             raise inspection_memory_failure(
                 node_name=node_name,
                 function_name=function_name,
                 parameter_name=parameter_name,
+                stage="resolving or materialising",
+                copy_started=copier.copy_started,
             ) from exc
         source = replace(
             source,
@@ -1850,6 +1980,7 @@ class ExecutionBlock:
             function_name=function_name,
             planning=planning,
             candidates=candidates,
+            expected_container_kind=expected_container_kind,
         )
 
     def _resolve_inspection_expression(
@@ -1868,8 +1999,13 @@ class ExecutionBlock:
         materialize: bool = True,
         planning: bool = False,
         candidates: list[InspectionCopyCandidate] | None = None,
+        runtime_namespace: dict[str, Any] | None = None,
     ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
-        namespace = self.parent._build_expression_runtime_namespace(cache=False)
+        namespace = (
+            self.parent._build_expression_runtime_namespace(cache=False)
+            if runtime_namespace is None
+            else dict(runtime_namespace)
+        )
         arguments: dict[str, Any] = {}
         sources: dict[str, ResolutionSource] = {}
         loaded_artifacts: list[str] = []

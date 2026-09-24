@@ -15,7 +15,7 @@ from ..core.models import (
     RuntimeValueReference,
 )
 from ..exceptions import ResolutionError
-from .function_registry import callable_signature, default_map
+from .function_registry import callable_signature, default_map, effective_variadic_names
 
 
 class ArgumentMixin:
@@ -77,10 +77,15 @@ class ArgumentMixin:
         positional_args: list[Any] = []
         keyword_args: dict[str, Any] = {}
         loaded_artifacts: list[str] = []
+        effective_var_pos_name, effective_var_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
 
         for index, parameter in enumerate(parameters):
             if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
-                input_name = registration.var_pos_name or parameter.name
+                input_name = effective_var_pos_name or parameter.name
                 if block is not None and input_name in block.registered_args:
                     value = [
                         self._resolve_named_input(
@@ -118,7 +123,7 @@ class ArgumentMixin:
                 continue
 
             if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-                input_name = registration.var_kw_name or parameter.name
+                input_name = effective_var_kw_name or parameter.name
                 if block is not None and input_name in block.registered_kwargs:
                     value = {
                         key: self._resolve_named_input(
