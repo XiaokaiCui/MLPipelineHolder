@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..core.models import (
@@ -10,6 +11,7 @@ from ..core.models import (
     CallableValueReference,
     DataclassValueReference,
     FunctionRegistration,
+    ResolutionSource,
     RuntimeValueReference,
 )
 from ..exceptions import ResolutionError
@@ -223,29 +225,82 @@ class ArgumentMixin:
         include_root_storage: bool = False,
         cache_root_storage: bool = True,
     ) -> Any:
+        value, _ = self._resolve_named_input_with_source(
+            input_name,
+            function_name,
+            overrides,
+            visible_outputs,
+            parent_config,
+            defaults,
+            loaded_artifacts,
+            declared_output_names,
+            allow_missing=allow_missing,
+            missing_value=missing_value,
+            include_root_storage=include_root_storage,
+            cache_root_storage=cache_root_storage,
+        )
+        return value
+
+    def _resolve_named_input_with_source(
+        self,
+        input_name: str,
+        function_name: str,
+        overrides: dict[str, Any],
+        visible_outputs: dict[str, Any],
+        parent_config: dict[str, Any] | None,
+        defaults: dict[str, Any],
+        loaded_artifacts: list[str],
+        declared_output_names: set[str],
+        *,
+        allow_missing: bool = False,
+        missing_value: Any = None,
+        include_root_storage: bool = False,
+        cache_root_storage: bool = True,
+        visible_constants: dict[str, Any] | None = None,
+        same_node_previous_outputs: set[str] | None = None,
+    ) -> tuple[Any, ResolutionSource]:
+        del declared_output_names
         if input_name == "logger":
             value = self.logger
+            source = ResolutionSource(kind="logger", name="logger")
         elif input_name in overrides:
             value = overrides[input_name]
+            source = ResolutionSource(kind="runtime_override", name=input_name)
         elif input_name in visible_outputs:
             value = visible_outputs[input_name]
+            source = ResolutionSource(
+                kind="pipeline_output",
+                name=input_name,
+                same_node_previous_output=input_name
+                in (same_node_previous_outputs or set()),
+            )
+        elif visible_constants is not None and input_name in visible_constants:
+            value = visible_constants[input_name]
+            source = ResolutionSource(kind="constant", name=input_name)
         elif input_name in self.manual_values:
             value = self.manual_values[input_name]
+            source = ResolutionSource(kind="constant", name=input_name)
         elif input_name in self._ancestor_manual_values():
             value = self._ancestor_manual_values()[input_name]
+            source = ResolutionSource(kind="constant", name=input_name)
         elif self._config_has_field(self.config, input_name):
             value = self._config_value(self.config, input_name)
+            source = ResolutionSource(kind="config", name=input_name)
         elif parent_config and input_name in parent_config:
             value = parent_config[input_name]
+            source = ResolutionSource(kind="config", name=input_name)
         elif input_name in defaults:
             value = defaults[input_name]
+            source = ResolutionSource(kind="function_default", name=input_name)
         elif include_root_storage and self.parent_pipeline is None:
             value = self._get_stored_object_by_name(
                 input_name,
                 cache=cache_root_storage,
             )
+            source = ResolutionSource(kind="storage", name=input_name, materialized=True)
         elif allow_missing:
             value = missing_value
+            source = ResolutionSource(kind="missing", name=input_name)
         else:
             raise ResolutionError(
                 f"Cannot resolve argument '{input_name}' for function '{function_name}'"
@@ -254,15 +309,17 @@ class ArgumentMixin:
         if isinstance(value, ArtifactRecord):
             value = self.artifact_store.load(value)
             loaded_artifacts.append(input_name)
+            source = replace(source, materialized=True)
         if isinstance(value, CallableValueReference):
             value = self._restore_callable_value(value)
+            source = replace(source, materialized=True)
         if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot resolve argument '{input_name}' for function '{function_name}': "
                 f"the value was saved as a placeholder ({value.reason}) and cannot be restored; "
                 "recreate or reset the value before running"
             )
-        return value
+        return value, source
 
     def _resolve_investigation_input(
         self,

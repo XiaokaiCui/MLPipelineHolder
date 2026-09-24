@@ -873,6 +873,87 @@ class PipelineHolder(
             return -1
         return int(execution_priority)
 
+    def inspect_node(
+        self,
+        *,
+        node_name: str | None = None,
+        priority: int | float | None = None,
+        function_name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        strict_mode: bool | None = None,
+        resolve_only: bool = False,
+        allow_mutable_objects: bool = False,
+    ) -> Any:
+        """Inspect one immediate block or atom selected by name or exact priority."""
+        if node_name is None and priority is None:
+            raise ValueError("node_name or priority must be provided")
+        if node_name is not None and (
+            not isinstance(node_name, str) or not node_name.strip()
+        ):
+            raise ValueError("node_name must be a non-empty string")
+        selected_by_name = (
+            None if node_name is None else self.nodes_by_name.get(node_name)
+        )
+        if node_name is not None and selected_by_name is None:
+            raise ResolutionError(
+                f"Unknown immediate child node '{node_name}' in pipeline "
+                f"'{self.registration_name}'"
+            )
+
+        selected_by_priority: Any = None
+        if priority is not None:
+            if (
+                isinstance(priority, bool)
+                or not isinstance(priority, (int, float))
+                or not math.isfinite(float(priority))
+            ):
+                raise TypeError("priority must be a finite integer or float")
+            matches = [
+                node
+                for node in self.nodes
+                if node.execution_priority == priority
+            ]
+            if not matches:
+                raise ResolutionError(
+                    f"No immediate node has exact priority {priority} in pipeline "
+                    f"'{self.registration_name}'"
+                )
+            if len(matches) > 1:
+                raise ResolutionError(
+                    f"Multiple immediate nodes have exact priority {priority}; "
+                    "select one by node_name"
+                )
+            selected_by_priority = matches[0]
+
+        if (
+            selected_by_name is not None
+            and selected_by_priority is not None
+            and selected_by_name is not selected_by_priority
+        ):
+            raise ResolutionError(
+                f"node_name '{node_name}' and priority {priority} select different nodes"
+            )
+        selected: Any = (
+            selected_by_name
+            if selected_by_name is not None
+            else selected_by_priority
+        )
+        if selected is None:
+            raise ResolutionError("Cannot select an inspection node")
+        if isinstance(selected, PipelineHolder) and not selected._is_atom:
+            raise RegistrationError(
+                f"Node '{selected.registration_name}' is an ordinary child pipeline; "
+                "call inspect_node() on that child pipeline instead"
+            )
+        inspection_target: Any = selected
+        return inspection_target.inspect(
+            function_name=function_name,
+            overrides=overrides,
+            strict_mode=strict_mode,
+            resolve_only=resolve_only,
+            allow_mutable_objects=allow_mutable_objects,
+        )
+
     @staticmethod
     def _validate_integer_priority(priority: Any) -> int:
         if isinstance(priority, bool) or not isinstance(priority, int):

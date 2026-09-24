@@ -84,11 +84,15 @@ class ExpressionRuntimeMixin:
         owner._expression_runtime_defined_names_cache = names
         return set(names)
 
-    def _build_expression_runtime_namespace(self) -> dict[str, Any]:
+    def _build_expression_runtime_namespace(
+        self,
+        *,
+        cache: bool = True,
+    ) -> dict[str, Any]:
         owner = self._effective_expression_runtime_owner()
         if owner is None or owner.expression_runtime_code is None:
             return {}
-        if owner._expression_runtime_namespace_cache is not None:
+        if cache and owner._expression_runtime_namespace_cache is not None:
             return dict(owner._expression_runtime_namespace_cache)
         globals_namespace: dict[str, Any] = {"__builtins__": builtins.__dict__}
         try:
@@ -102,7 +106,8 @@ class ExpressionRuntimeMixin:
             for key, value in globals_namespace.items()
             if key != "__builtins__"
         }
-        owner._expression_runtime_namespace_cache = runtime_namespace
+        if cache:
+            owner._expression_runtime_namespace_cache = runtime_namespace
         return dict(runtime_namespace)
 
     def _gate_level_input_digest(self) -> tuple[tuple[str, Any], ...] | None:

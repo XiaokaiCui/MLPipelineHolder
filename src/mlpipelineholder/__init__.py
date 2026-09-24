@@ -8,11 +8,13 @@ from .execution.atom_pipeline import AtomPipeline
 from .execution.block import ExecutionBlock
 from .exceptions import (
     ExecutionError,
+    InspectionCopyError,
     PersistenceError,
     PipelineError,
     RegistrationError,
     ResolutionError,
 )
+from .core.models import ResolutionSource, ResolvedInspectionCall
 from .execution.function_registry import pipeline_resolving, rename_args
 from .execution.gate_block import GateBlock
 from .presentation.logger import PipelineLogger
@@ -52,6 +54,7 @@ __all__ = [
     "AtomPipeline",
     "ExecutionBlock",
     "ExecutionError",
+    "InspectionCopyError",
     "GateBlock",
     "PipelineLogger",
     "PersistenceError",
@@ -59,6 +62,8 @@ __all__ = [
     "PipelineHandler",
     "PipelineHolder",
     "RegistrationError",
+    "ResolutionSource",
+    "ResolvedInspectionCall",
     "ResolutionError",
     "__version__",
     "pipeline_resolving",

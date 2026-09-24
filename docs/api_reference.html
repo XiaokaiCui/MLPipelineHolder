@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.19) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.4.1) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -188,9 +188,12 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     GateBlock,
     PipelineLogger,
     ExecutionError,
+    InspectionCopyError,
     PersistenceError,
     PipelineError,
     RegistrationError,
+    ResolutionSource,
+    ResolvedInspectionCall,
     ResolutionError,
     pipeline_resolving,
     rename_args,
@@ -227,6 +230,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#registrationerror">RegistrationError</a></li>
     <li><a class="anchor" href="#resolutionerror">ResolutionError</a></li>
     <li><a class="anchor" href="#executionerror">ExecutionError</a></li>
+    <li><a class="anchor" href="#inspectioncopyerror">InspectionCopyError</a></li>
     <li><a class="anchor" href="#persistenceerror">PersistenceError</a></li>
     <li class="toc-group">Data models</li>
     <li><a class="anchor" href="#artifactrecord">ArtifactRecord</a></li>
@@ -234,6 +238,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#runrecord">RunRecord</a></li>
     <li><a class="anchor" href="#functionregistration">FunctionRegistration</a></li>
     <li><a class="anchor" href="#expressionregistration">ExpressionRegistration</a></li>
+    <li><a class="anchor" href="#resolutionsource">ResolutionSource</a></li>
+    <li><a class="anchor" href="#resolvedinspectioncall">ResolvedInspectionCall</a></li>
     <li><a class="anchor" href="#blockargsregistration">BlockArgsRegistration</a></li>
     <li><a class="anchor" href="#blockkwargsregistration">BlockKwargsRegistration</a></li>
     <li><a class="anchor" href="#functionexecutionresult">FunctionExecutionResult</a></li>
@@ -341,14 +347,15 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
 
 <h4 class="method-name" id="PipelineHolder.inspect">inspect()</h4>
-<div class="sig"><span class="kw">inspect</span>(*names: <span class="arg">str</span>, compute: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineInspection</span></div>
+<div class="sig"><span class="kw">inspect</span>(*names: <span class="arg">str</span>, compute: <span class="arg">bool</span> = False, priority: <span class="arg">int | None</span> = None) -&gt; <span class="ret">PipelineInspection</span></div>
 <p>Returns a one-shot context manager that resolves several values for temporary interactive investigation without registering a node or changing pipeline state. Values resolve when the <code>with</code> block starts through the same source-of-truth rules used by <a class="anchor" href="#pipeline_resolving"><code>pipeline_resolving()</code></a>: visible produced outputs, pipeline constants, visible configuration, and finally uncached object storage for a root pipeline. Retrieval failures propagate without falling through to a lower-priority source.</p>
 <ul class="param-desc">
   <li><code>names</code>: one or more unique, non-empty pipeline-facing names.</li>
   <li><code>compute</code>: when <code>True</code>, compute resolved Dask DataFrame and Series values before exposing them.</li>
+  <li><code>priority</code>: optional integer execution group used to select the runtime-compatible node at or below that group before resolving produced outputs.</li>
 </ul>
 <p>Inside the block, valid non-conflicting names support attribute access such as <code>data.selected_df</code>. Dictionary access such as <code>data["selected_df"]</code> works for every requested name and is required for names that are not valid Python attributes or that conflict with context-object attributes. On exit, the context clears its value references and pipeline reference. Access after exit and context reuse raise <code>RuntimeError</code>; values assigned to another variable by user code remain available normally.</p>
-<p>This API is available only on root and ordinary child pipelines. Atom pipelines and execution blocks do not expose <code>inspect()</code>.</p>
+<p>This value-context form is available on root and ordinary child pipelines. <a class="anchor" href="#AtomPipeline.inspect"><code>AtomPipeline.inspect()</code></a> and <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a> intentionally use the same method name for non-committing inspection of a registered function or expression instead.</p>
 <div class="example">
   <div class="example-title">Inspect lazy DataFrame values temporarily</div>
 <pre>with dr_pipeline.inspect(
@@ -362,6 +369,22 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
         .max()
         .compute()
     )</pre>
+</div>
+
+<h4 class="method-name" id="PipelineHolder.inspect_node">inspect_node()</h4>
+<div class="sig"><span class="kw">inspect_node</span>(*, node_name: <span class="arg">str | None</span> = None, priority: <span class="arg">int | float | None</span> = None, function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Inspects one immediate execution block or atom without committing outputs. Select by <code>node_name</code>, exact finite numeric <code>priority</code>, or both when they identify the same node. Unlike runtime priority-group selection, this method never truncates a float priority or falls back to an earlier group. An ordinary child-pipeline container is rejected; call that child's <code>inspect_node()</code> instead.</p>
+<p><code>function_name</code>, <code>overrides</code>, <code>strict_mode</code>, <code>resolve_only</code>, and <code>allow_mutable_objects</code> have the same meanings and safeguards as <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>.</p>
+<div class="example">
+  <div class="example-title">Resolve a node call without invoking it</div>
+  <pre>resolved = pipeline.inspect_node(
+    node_name="prepare_training_inputs",
+    priority=20.1,
+    overrides={"sample_size": 100},
+    resolve_only=True,
+)
+print(resolved.arguments)
+print(resolved.sources)</pre>
 </div>
 
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
@@ -911,6 +934,7 @@ print(pipeline.describe_pipeline())</pre>
       <code>full_path()</code>, <code>qualified_node_name()</code>, and the other read-only helpers.</li>
   <li>Running: the parent's <code>run_all()</code>, <code>run_until()</code>, <code>run_from()</code>, and
       <code>run_block()</code> execute the atom as part of the parent's node list.</li>
+  <li>Execution inspection: <code>atom.inspect()</code> resolves or invokes its target registration without committing outputs and without evaluating the atom gate.</li>
   <li>Configuration through the parent: <code>atom.config</code>, <code>atom.get_config_value()</code>, and
       execution-time argument resolution always use the parent's current configuration.</li>
   <li>Parent value changes: <code>set_constant_value()</code>, <code>set_value()</code>,
@@ -940,6 +964,10 @@ print(pipeline.describe_pipeline())</pre>
   identical definition after a load remains a no-op.
 </p>
 
+<h4 class="method-name" id="AtomPipeline.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Delegates to the atom's internal <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>. It uses parent-visible inputs and the atom's previous committed outputs, but deliberately bypasses the atom gate so a skipped atom can still be investigated. The atom remains sealed and inspection results are not committed.</p>
+
 <h2 class="section" id="executionblock">ExecutionBlock</h2>
 
 <h3 class="class-name" id="ExecutionBlock">ExecutionBlock</h3>
@@ -958,6 +986,34 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>registration_name</code>: unique block name within the parent.</li>
   <li><code>execution_priority</code>: numeric position among the parent's immediate nodes.</li>
 </ul>
+
+<h4 class="method-name" id="ExecutionBlock.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
+<ul class="param-desc">
+  <li><code>function_name</code>: required when the block has multiple registrations. Duplicate legacy registrations are accepted only when they reference the same callable object and their effective input bindings are equivalent after inspection overrides.</li>
+  <li><code>overrides</code>: temporary values keyed by original callable parameter name, including variadic parameter names and <code>logger</code>. Unknown names raise <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>. Overrides have highest precedence and are passed through by identity.</li>
+  <li><code>strict_mode</code>: temporary resolution mode. <code>None</code> follows the root pipeline. Expressions resolve the same way in either mode.</li>
+  <li><code>resolve_only</code>: return a <a class="anchor" href="#resolvedinspectioncall"><code>ResolvedInspectionCall</code></a> containing the exact <code>args</code>, <code>kwargs</code>, signature-bound <code>arguments</code>, and structured <code>sources</code>, without invoking user code.</li>
+  <li><code>allow_mutable_objects</code>: by default, mutable pipeline values and mutable callable defaults are copied with one shared memo so aliases and cycles are preserved. Set this to <code>True</code> to pass originals through.</li>
+</ul>
+<p>Protected copying has specialized handling for pandas, NumPy, Dask, and Torch values. Exact Python functions, builtin functions, and the pipeline's real logger retain identity. Shared-state objects that cannot be isolated, including Optuna studies and samplers, raise <a class="anchor" href="#inspectioncopyerror"><code>InspectionCopyError</code></a>; provide an override or explicitly opt into shared mutable objects.</p>
+<p><strong>Not a sandbox:</strong> non-committing describes framework-managed state only. User code may still perform arbitrary external side effects, mutate an explicitly supplied override, mutate shared inputs when <code>allow_mutable_objects=True</code>, write logs through the real logger, or print into the normal captured pipeline log. Invocation failures are wrapped in <a class="anchor" href="#executionerror"><code>ExecutionError</code></a> with the original exception retained as <code>__cause__</code>.</p>
+<div class="example">
+  <div class="example-title">Inspect a registered function safely</div>
+  <pre>resolved = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+    resolve_only=True,
+)
+print(resolved.arguments)
+
+# Runs the callable, but does not store its declared outputs.
+preview = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+)</pre>
+</div>
 
 <h4 class="method-name" id="ExecutionBlock.register_function">register_function()</h4>
 <div class="sig"><span class="kw">register_function</span>(
@@ -1341,6 +1397,10 @@ investigate(common_df=common_df)</pre>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.ExecutionError(PipelineError)</div>
 <p>Raised when pipeline execution fails (for example an unresolvable function argument or a same-block dependency that cannot run in parallel).</p>
 
+<h3 class="class-name" id="inspectioncopyerror">InspectionCopyError</h3>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.InspectionCopyError(ResolutionError)</div>
+<p>Raised when protected execution inspection cannot isolate a mutable resolved value. Use an inspection override for that parameter or pass <code>allow_mutable_objects=True</code> only when sharing the original object is intentional.</p>
+
 <h3 class="class-name" id="persistenceerror">PersistenceError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.PersistenceError(PipelineError)</div>
 <p>Raised when save, load, or backup recovery fails: missing artifacts, unsafe paths, aborted directory restores, invalid or incomplete backup data, or unresolved callable placeholders.</p>
@@ -1427,6 +1487,16 @@ investigate(common_df=common_df)</pre>
   <tr><td><code>overridden_outputs</code></td><td>dict[str, OutputAddress]</td><td>Validated upstream output addresses superseded by this expression.</td></tr>
 </table>
 <p>The <code>function_name</code> property always returns <code>"expression"</code>.</p>
+
+<h3 class="class-name" id="resolutionsource">ResolutionSource</h3>
+<p class="class-desc">Structured origin metadata for an argument resolved during execution inspection.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.ResolutionSource(kind, name=None, mapped_from=None, materialized=False, copied=False, same_node_previous_output=False, identity_passthrough=False)</div>
+<p><code>kind</code> identifies origins such as <code>inspect_override</code>, <code>pipeline_output</code>, <code>constant</code>, <code>config</code>, <code>function_default</code>, <code>registered_args</code>, <code>registered_kwargs</code>, or <code>logger</code>. The boolean fields report materialization, protected copying, previous same-node output use, and deliberate identity passthrough.</p>
+
+<h3 class="class-name" id="resolvedinspectioncall">ResolvedInspectionCall</h3>
+<p class="class-desc">The complete call shape and diagnostics returned by <code>inspect(resolve_only=True)</code>.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.ResolvedInspectionCall(args, kwargs, arguments, sources, callable, function_name, block_name, node_name, strict_mode, allow_mutable_objects)</div>
+<p><code>args</code> and <code>kwargs</code> are the exact invocation shape. <code>arguments</code> is the signature-bound view with defaults applied, and <code>sources</code> maps original parameter names to <a class="anchor" href="#resolutionsource"><code>ResolutionSource</code></a> records or corresponding variadic collections.</p>
 
 <h3 class="class-name" id="blockargsregistration">BlockArgsRegistration</h3>
 <p class="class-desc">Block-scoped ordered items used to build <code>*args</code> for specific functions.</p>

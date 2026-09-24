@@ -26,10 +26,41 @@ class AtomPipeline(PipelineHolder):
     _is_atom = True
     _sealed = False
 
-    def __getattribute__(self, name: str) -> Any:
-        if name == "inspect":
-            raise AttributeError("AtomPipeline does not expose inspect()")
-        return super().__getattribute__(name)
+    def inspect(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        function_name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        strict_mode: bool | None = None,
+        resolve_only: bool = False,
+        allow_mutable_objects: bool = False,
+    ) -> Any:
+        """Inspect the atom's internal registration without evaluating its gate."""
+        if self.parent_pipeline is None or self.execution_priority is None:
+            raise RegistrationError(
+                f"Atom pipeline '{self.registration_name}' is not attached to a parent"
+            )
+        blocks = [node for node in self._sorted_nodes() if not _is_child_pipeline(node)]
+        if len(blocks) != 1 or len(blocks) != len(self.nodes):
+            raise RegistrationError(
+                f"Atom pipeline '{self.registration_name}' must contain exactly one "
+                "internal block for inspection"
+            )
+        upstream_outputs = self.parent_pipeline._visible_outputs_before_priority(
+            self.execution_priority
+        )
+        previous_outputs = dict(
+            self.parent_pipeline.producer_outputs.get(self.registration_name, {})
+        )
+        return blocks[0]._inspect_registration(
+            function_name=function_name,
+            overrides=overrides,
+            strict_mode=strict_mode,
+            resolve_only=resolve_only,
+            allow_mutable_objects=allow_mutable_objects,
+            node_name=self.registration_name,
+            upstream_outputs=upstream_outputs,
+            previous_outputs=previous_outputs,
+        )
 
     def _seal(self) -> None:
         """Lock the atom; extension methods reject mutation after this call."""

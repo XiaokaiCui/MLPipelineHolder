@@ -10,6 +10,10 @@ class ResolutionError(PipelineError):
     pass
 
 
+class InspectionCopyError(ResolutionError):
+    pass
+
+
 class ExecutionError(PipelineError):
     pass
 

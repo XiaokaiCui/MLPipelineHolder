@@ -362,7 +362,7 @@ class PipelineResolvingTests(unittest.TestCase):
                 with child.inspect("root_only"):
                     self.fail("child inspection unexpectedly resolved root storage")
 
-    def test_atoms_and_blocks_do_not_expose_inspect(self) -> None:
+    def test_atoms_and_blocks_expose_execution_inspect(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pipeline = PipelineHandler(
                 "root",
@@ -377,10 +377,8 @@ class PipelineResolvingTests(unittest.TestCase):
             )
             atom = pipeline.get_child_pipeline("atom")
 
-            self.assertFalse(hasattr(block, "inspect"))
-            self.assertFalse(hasattr(atom, "inspect"))
-            with self.assertRaisesRegex(AttributeError, "does not expose inspect"):
-                _ = atom.inspect
+            self.assertTrue(hasattr(block, "inspect"))
+            self.assertTrue(hasattr(atom, "inspect"))
 
     def test_storage_resolution_does_not_cache_an_unloaded_object(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

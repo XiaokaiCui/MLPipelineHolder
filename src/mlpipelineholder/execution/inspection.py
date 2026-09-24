@@ -1,11 +1,194 @@
-"""Temporary, non-registering access to several pipeline values."""
+"""Temporary value and non-committing execution inspection helpers."""
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
+from datetime import date, datetime, time, timedelta
+from enum import Enum
+from pathlib import Path
+from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Self
+from uuid import UUID
+
+from ..core.constants import _IMMUTABLE_TYPES
+from ..core.models import ResolutionSource
+from ..exceptions import InspectionCopyError
+from ..integrations.optuna.support import is_optuna_sampler, is_optuna_study
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+
+class InspectionCopier:
+    """Copy resolved values while preserving aliases within one inspection."""
+
+    def __init__(self, logger: Any, *, allow_mutable_objects: bool) -> None:
+        self._logger = logger
+        self._allow_mutable_objects = allow_mutable_objects
+        self._memo: dict[int, Any] = {}
+
+    def prepare(
+        self,
+        value: Any,
+        *,
+        parameter_name: str,
+        source: ResolutionSource,
+        caller_owned: bool = False,
+    ) -> tuple[Any, ResolutionSource]:
+        if caller_owned or self._allow_mutable_objects:
+            return value, source
+        if self._is_known_immutable(value):
+            return value, source
+        if value is self._logger or isinstance(
+            value,
+            (FunctionType, BuiltinFunctionType),
+        ):
+            self._memo[id(value)] = value
+            return value, replace(source, identity_passthrough=True)
+        if is_optuna_study(value) or is_optuna_sampler(value):
+            raise self._copy_error(
+                parameter_name,
+                source,
+                value,
+                "the object is backed by shared Optuna state",
+            )
+        if id(value) in self._memo:
+            copied = self._memo[id(value)]
+            return copied, replace(source, copied=copied is not value)
+        try:
+            copied = self._copy_value(value, parameter_name, source)
+        except InspectionCopyError:
+            raise
+        except Exception as exc:
+            raise self._copy_error(
+                parameter_name,
+                source,
+                value,
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
+        if copied is value:
+            raise self._copy_error(
+                parameter_name,
+                source,
+                value,
+                "copying returned the original object",
+            )
+        self._memo[id(value)] = copied
+        return copied, replace(source, copied=True)
+
+    @classmethod
+    def _is_known_immutable(cls, value: Any) -> bool:
+        if isinstance(
+            value,
+            (
+                *_IMMUTABLE_TYPES,
+                Path,
+                date,
+                datetime,
+                time,
+                timedelta,
+                UUID,
+                Enum,
+                range,
+                slice,
+            ),
+        ):
+            return True
+        if isinstance(value, (tuple, frozenset)):
+            return all(cls._is_known_immutable(item) for item in value)
+        return False
+
+    def _copy_value(
+        self,
+        value: Any,
+        parameter_name: str,
+        source: ResolutionSource,
+    ) -> Any:
+        try:
+            import pandas as pd  # type: ignore
+
+            if isinstance(value, pd.DataFrame):
+                copied = value.copy(deep=True)
+                self._memo[id(value)] = copied
+                object_columns = {
+                    column_index
+                    for column_index, dtype in enumerate(value.dtypes)
+                    if dtype == object
+                }
+                for column_index in object_columns:
+                    for row_index in range(len(value.index)):
+                        cell = value.iat[row_index, column_index]
+                        copied.iat[row_index, column_index] = self.prepare(
+                            cell,
+                            parameter_name=parameter_name,
+                            source=source,
+                        )[0]
+                return copied
+            if isinstance(value, pd.Series):
+                copied = value.copy(deep=True)
+                self._memo[id(value)] = copied
+                if value.dtype == object:
+                    for index in range(len(value.index)):
+                        copied.iat[index] = self.prepare(
+                            value.iat[index],
+                            parameter_name=parameter_name,
+                            source=source,
+                        )[0]
+                return copied
+        except ImportError:
+            pass
+
+        try:
+            import numpy as np  # type: ignore
+
+            if isinstance(value, np.ndarray):
+                if value.dtype.hasobject:
+                    return copy.deepcopy(value, self._memo)
+                copied = value.copy()
+                self._memo[id(value)] = copied
+                return copied
+        except ImportError:
+            pass
+
+        try:
+            import dask.dataframe as dd  # type: ignore
+
+            if isinstance(value, (dd.DataFrame, dd.Series)):
+                copied = value.copy()
+                self._memo[id(value)] = copied
+                return copied
+        except ImportError:
+            pass
+
+        try:
+            import torch  # type: ignore
+
+            if isinstance(value, torch.Tensor):
+                copied = value.detach().clone()
+                self._memo[id(value)] = copied
+                return copied
+        except ImportError:
+            pass
+
+        return copy.deepcopy(value, self._memo)
+
+    @staticmethod
+    def _copy_error(
+        parameter_name: str,
+        source: ResolutionSource,
+        value: Any,
+        reason: str,
+    ) -> InspectionCopyError:
+        source_label = source.kind
+        if source.name is not None:
+            source_label += f" '{source.name}'"
+        return InspectionCopyError(
+            f"Cannot isolate parameter '{parameter_name}' resolved from "
+            f"{source_label} (type={type(value).__name__}): {reason}. "
+            "Use allow_mutable_objects=True to permit the original object, or "
+            f"provide a temporary value through overrides={{'{parameter_name}': ...}}."
+        )
 
 
 def _compute_investigation_value(value: Any, *, compute: bool) -> Any:
