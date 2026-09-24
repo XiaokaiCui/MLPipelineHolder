@@ -169,7 +169,6 @@ class PipelineHolder(
         configuration: Any | None = None,
         local_folder_path: str | Path | None = None,
         execution_priority: float | None = None,
-        forced: bool = True,
         memory_saving_mode: bool = False,
         memory_profile_logging: bool = False,
         pipeline_backup_directory: str | Path | None = None,
@@ -179,9 +178,58 @@ class PipelineHolder(
         torch_load_weights_only: bool = False,
         strict_mode: bool = False,
         colourful_logs: bool = False,
-        _allow_existing_root: bool = True,
-        _allow_legacy_config_object: bool = False,
-        _preserve_existing_log: bool = False,
+        *,
+        clean_directory: bool = False,
+    ) -> None:
+        self._initialize(
+            registration_name=registration_name,
+            configuration=configuration,
+            local_folder_path=local_folder_path,
+            execution_priority=execution_priority,
+            memory_saving_mode=memory_saving_mode,
+            memory_profile_logging=memory_profile_logging,
+            pipeline_backup_directory=pipeline_backup_directory,
+            log_traceback_to_file=log_traceback_to_file,
+            show_traceback_locals=show_traceback_locals,
+            use_rich_traceback_console=use_rich_traceback_console,
+            torch_load_weights_only=torch_load_weights_only,
+            strict_mode=strict_mode,
+            colourful_logs=colourful_logs,
+            clean_directory=clean_directory,
+            allow_legacy_config_object=False,
+            preserve_existing_log=True,
+        )
+
+    @classmethod
+    def _construct_for_reconstruction(cls, **kwargs: Any) -> Any:
+        pipeline = cls.__new__(cls)
+        pipeline._initialize(
+            **kwargs,
+            clean_directory=False,
+            allow_legacy_config_object=True,
+            preserve_existing_log=True,
+        )
+        return pipeline
+
+    def _initialize(
+        self,
+        registration_name: str,
+        configuration: Any | None,
+        local_folder_path: str | Path | None,
+        execution_priority: float | None,
+        memory_saving_mode: bool,
+        memory_profile_logging: bool,
+        pipeline_backup_directory: str | Path | None,
+        log_traceback_to_file: bool,
+        show_traceback_locals: bool,
+        use_rich_traceback_console: bool,
+        torch_load_weights_only: bool,
+        strict_mode: bool,
+        colourful_logs: bool,
+        *,
+        clean_directory: bool,
+        allow_legacy_config_object: bool,
+        preserve_existing_log: bool,
     ) -> None:
         self.registration_name = validate_registration_name(
             registration_name,
@@ -202,7 +250,7 @@ class PipelineHolder(
             else Path(pipeline_backup_directory)
         )
         try:
-            if not _allow_legacy_config_object:
+            if not allow_legacy_config_object:
                 self._validate_config_reconstructable(self.config)
             self._validate_config_picklable(self.config)
             self._validate_builtin_name_conflicts_in_mapping(
@@ -210,8 +258,8 @@ class PipelineHolder(
                 owner_label="configuration",
             )
             self._validate_backup_path_safety()
-            if not _allow_existing_root:
-                self._prepare_project_root(forced)
+            if clean_directory and not generated_temp_root:
+                self._prepare_project_root()
             self.project_root.mkdir(parents=True, exist_ok=True)
             self.metadata_root = self.project_root / "metadata"
             self.metadata_root.mkdir(parents=True, exist_ok=True)
@@ -222,7 +270,7 @@ class PipelineHolder(
                 show_traceback_locals=show_traceback_locals,
                 use_rich_traceback_console=use_rich_traceback_console,
                 colourful_logs=self.colourful_logs,
-                truncate=not _preserve_existing_log,
+                truncate=not preserve_existing_log,
             )
             self.logger._pipeline = self
             self.print_capture_mode = "tee"
@@ -1456,27 +1504,36 @@ class PipelineHolder(
             return self.registration_name
         return f"{self.parent_pipeline.full_path()}/{self.registration_name}"
 
-    def _prepare_project_root(self, forced: bool) -> None:
+    def _prepare_project_root(self) -> None:
+        resolved_root = self.project_root.resolve(strict=False)
+        if resolved_root == Path(resolved_root.anchor):
+            raise RegistrationError(
+                f"Refusing to clean filesystem root '{self.project_root}'"
+            )
         if not self.project_root.exists():
             return
-        if not any(self.project_root.iterdir()):
+        if (
+            self.project_root.is_dir()
+            and not self.project_root.is_symlink()
+            and not any(self.project_root.iterdir())
+        ):
             return
-        if not forced:
-            raise RegistrationError(
-                f"Pipeline root folder is not empty: {self.project_root}"
-            )
         user_input = input(
-            f"Pipeline root folder '{self.project_root}' is not empty. Type 'yes' to clear it: "
-        ).strip()
-        if user_input != "yes":
-            raise RegistrationError(
-                f"Pipeline root folder is not empty: {self.project_root}"
+            f"Pipeline root folder '{self.project_root}' is not empty and clean_directory=True. "
+            "Type 'yes' or 'y' to delete and recreate it: "
+        ).strip().lower()
+        if user_input not in {"yes", "y"}:
+            warnings.warn(
+                f"clean_directory=True was requested for pipeline root '{self.project_root}', "
+                "but directory deletion was cancelled; continuing with the existing directory",
+                UserWarning,
+                stacklevel=4,
             )
-        for entry in self.project_root.iterdir():
-            if entry.is_dir():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
+            return
+        if self.project_root.is_dir() and not self.project_root.is_symlink():
+            shutil.rmtree(self.project_root)
+        else:
+            self.project_root.unlink()
 
 
 PipelineHandler = PipelineHolder

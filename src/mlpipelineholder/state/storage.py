@@ -184,6 +184,20 @@ class StorageMixin:
         )
         return self._load_stored_object_value(record)
 
+    def _get_stored_object_by_name(
+        self,
+        object_name: str,
+        *,
+        cache: bool,
+    ) -> Any:
+        self._require_root_storage_owner()
+        record = resolve_record(
+            self._stored_objects,
+            hash_id=None,
+            object_name=object_name,
+        )
+        return self._load_stored_object_value(record, cache=cache)
+
     def remove_from_storage(
         self,
         hash_id: str | None = None,
@@ -206,16 +220,23 @@ class StorageMixin:
                 "Object storage APIs are available only on the root pipeline"
             )
 
-    def _load_stored_object_value(self, record: StoredObjectRecord) -> Any:
+    def _load_stored_object_value(
+        self,
+        record: StoredObjectRecord,
+        *,
+        cache: bool = True,
+    ) -> Any:
         if record.value_is_loaded:
             return record.value
         if record.artifact is None:
             raise PersistenceError(
                 f"Stored object '{record.object_name}' has no persisted artifact"
             )
-        record.value = self._materialize_stored_value(record.artifact, "")
-        record.value_is_loaded = True
-        return record.value
+        value = self._materialize_stored_value(record.artifact, "")
+        if cache:
+            record.value = value
+            record.value_is_loaded = True
+        return value
 
     def _persist_stored_object(
         self,

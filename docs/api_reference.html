@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.18) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.3.19) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -192,6 +192,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     PipelineError,
     RegistrationError,
     ResolutionError,
+    pipeline_resolving,
     rename_args,
 )</pre>
 </div>
@@ -219,6 +220,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li class="toc-group">Logging</li>
     <li><a class="anchor" href="#pipelinelogger">PipelineLogger</a></li>
     <li class="toc-group">Functions</li>
+    <li><a class="anchor" href="#pipeline_resolving">pipeline_resolving()</a></li>
     <li><a class="anchor" href="#rename_args">rename_args()</a></li>
     <li class="toc-group">Exceptions</li>
     <li><a class="anchor" href="#pipelineerror">PipelineError</a></li>
@@ -257,7 +259,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   configuration: <span class="arg">Any | None</span> = None,
   local_folder_path: <span class="arg">str | Path | None</span> = None,
   execution_priority: <span class="arg">float | None</span> = None,
-  forced: <span class="arg">bool</span> = True,
   memory_saving_mode: <span class="arg">bool</span> = False,
   memory_profile_logging: <span class="arg">bool</span> = False,
   pipeline_backup_directory: <span class="arg">str | Path | None</span> = None,
@@ -266,7 +267,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   use_rich_traceback_console: <span class="arg">bool</span> = True,
   torch_load_weights_only: <span class="arg">bool</span> = False,
   strict_mode: <span class="arg">bool</span> = False,
-  colourful_logs: <span class="arg">bool</span> = False
+  colourful_logs: <span class="arg">bool</span> = False,
+  *,
+  clean_directory: <span class="arg">bool</span> = False
 ) -&gt; <span class="ret">None</span>
 </div>
 
@@ -277,7 +280,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>configuration</code></td><td>Any | None</td><td>Optional dict or pure dataclass instance (fields only) used as the pipeline configuration. Every field value must be picklable; use <code>set_constant_value</code> for non-picklable values. Omitted values start with an empty config.</td></tr>
   <tr><td><code>local_folder_path</code></td><td>str | Path | None</td><td>Optional working directory. When omitted, a temporary staging root is used; attaching to a parent relocates the pipeline under the parent tree.</td></tr>
   <tr><td><code>execution_priority</code></td><td>float | None</td><td>Optional priority used when this pipeline is a child node of a parent.</td></tr>
-  <tr><td><code>forced</code></td><td>bool</td><td>Defaults to <code>True</code>. When existing-root reuse is explicitly disabled, allows clearing a non-empty working directory after confirmation.</td></tr>
   <tr><td><code>memory_saving_mode</code></td><td>bool</td><td>Best-effort cleanup of intermediate values after each block finishes.</td></tr>
   <tr><td><code>memory_profile_logging</code></td><td>bool</td><td>Log memory usage after computation and cleanup for each block.</td></tr>
   <tr><td><code>pipeline_backup_directory</code></td><td>str | Path | None</td><td>Optional backup directory used by backup-aware save/load and single-item recovery. Must not overlap the working directory.</td></tr>
@@ -287,12 +289,13 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
   <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation and explicit registered-function input resolution. Pipeline values are resolved only through <code>param_mapping</code>, registered args/kwargs helpers, or the automatic <code>logger</code> injection; other unmapped parameters use their callable defaults, and unmapped required parameters raise <code>ResolutionError</code> at execution. Attached children inherit strict mode from the root pipeline; the setting is persisted.</td></tr>
   <tr><td><code>colourful_logs</code></td><td>bool</td><td>Emit ANSI-coloured logger console messages and Rich tracebacks when <code>True</code>. The default <code>False</code> uses terminal-default text colour. This affects logger output only: pipeline structure/chart rendering remains colourful. Attached children inherit the root value; the setting is persisted.</td></tr>
+  <tr><td><code>clean_directory</code></td><td>bool</td><td>One-time construction option. When <code>True</code> and the explicit working directory is non-empty, asks for confirmation before deleting and recreating it. Cancelling emits <code>UserWarning</code> and continues with the existing directory. Filesystem-root paths are refused. The option is not stored or propagated.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
 <ul>
   <li>Attached child pipelines inherit <code>memory_saving_mode</code>, <code>memory_profile_logging</code>, <code>strict_mode</code>, and <code>colourful_logs</code> from their root pipeline.</li>
-  <li>Direct construction reuses an existing working directory by default (<code>_allow_existing_root=True</code>). Pass <code>_allow_existing_root=False</code> to restore non-empty-root validation; pair it with <code>forced=True</code> only when confirmed clearing is intended.</li>
+  <li>Direct construction reuses an existing working directory and preserves its pipeline log by default. Pass <code>clean_directory=True</code> to request one-time confirmed cleanup of a non-empty explicit directory. Re-running that construction asks again.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
@@ -373,7 +376,6 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   param_mapping_dct: <span class="arg">dict[str, str | None] | None</span> = None,
   kwargs_dct: <span class="arg">dict[str, str] | None</span> = None,
   args_lst: <span class="arg">tuple[str, ...] | list[str] | None</span> = None,
-  allow_existing_root: <span class="arg">bool</span> = True,
   forced: <span class="arg">bool</span> = True,
   block_priority: <span class="arg">float</span> = 10.0,
   *,
@@ -394,13 +396,12 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>param_mapping_dct</code>: legacy parameter-to-pipeline-name mapping; cannot be combined with <code>param_mapping</code>.</li>
   <li><code>kwargs_dct</code>: keyword name to pipeline value mapping used to supply the target's <code>**kwargs</code>.</li>
   <li><code>args_lst</code>: ordered pipeline value names used to supply the target's <code>*args</code>.</li>
-  <li><code>allow_existing_root</code>: allow reuse of an existing atom working directory when <code>True</code>.</li>
   <li><code>forced</code>: replace a conflicting atom definition; identical definitions remain a no-op.</li>
   <li><code>block_priority</code>: priority of the atom's internal implementation block.</li>
   <li><code>param_mapping</code>: preferred keyword-only parameter-to-pipeline-name mapping.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
 </ul>
-<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
+<p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. Atom creation always reuses its framework-managed child directory and never prompts for or controls directory cleanup. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
 <p>In strict mode, atom function arguments resolve only from <code>param_mapping</code>/<code>param_mapping_dct</code>, <code>args_lst</code>, <code>kwargs_dct</code>, the callable's own defaults, and the automatic pipeline <code>logger</code> injection. A same-named visible config, output, constant, or runtime override is not consumed unless it was explicitly mapped.</p>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
@@ -1227,6 +1228,38 @@ block.register_function(
 
 <!-- ================================================================ -->
 <h2 class="section" id="functions">Functions</h2>
+
+<h3 class="class-name" id="pipeline_resolving">pipeline_resolving()</h3>
+<p class="class-desc">Inject temporary investigation-function inputs from visible pipeline state without registering a node or retaining the resolved values.</p>
+<div class="sig"><span class="kw">mlpipelineholder.</span><span class="kw">pipeline_resolving</span>(
+  pipeline: <span class="arg">Any</span>,
+  *,
+  compute: <span class="arg">bool</span> = False,
+  mapping: <span class="arg">Mapping[str, str] | None</span> = None
+) -&gt; <span class="ret">Callable</span>
+</div>
+<p>The wrapper binds each call first, so explicit positional or keyword arguments are never replaced. Parameters with Python defaults also keep those defaults. Only remaining required parameters are resolved with the same rules used for registered pipeline functions: produced outputs, pipeline constants, and visible configuration; a root pipeline additionally falls back to object storage. Resolution failures from a higher-priority source propagate rather than falling through to another source.</p>
+<div class="field-label">Parameters</div>
+<ul class="param-desc">
+  <li><code>pipeline</code>: pipeline whose visible state supplies missing required parameters.</li>
+  <li><code>compute</code>: when <code>True</code>, compute auto-resolved Dask DataFrame and Series values before calling the function. Explicit caller arguments are not computed.</li>
+  <li><code>mapping</code>: optional function-parameter to pipeline-variable aliases.</li>
+</ul>
+<div class="example">
+  <div class="example-title">Inspect several values temporarily</div>
+<pre>from mlpipelineholder import pipeline_resolving
+
+@pipeline_resolving(dr_pipeline, compute=True)
+def investigate(selected_df, common_df, splitting_date, stock_universe):
+    print(selected_df.groupby("ticker").size())
+    print(common_df.head())
+    print(splitting_date)
+    print(stock_universe)
+
+# common_df is supplied explicitly; only the other required inputs are resolved.
+investigate(common_df=common_df)</pre>
+</div>
+<p>The decorator performs resolution on every call, does not add a pipeline node, and does not cache values loaded only for an investigation. Dask computation results remain local to the call and can be released after the function returns.</p>
 
 <h3 class="class-name" id="rename_args">rename_args()</h3>
 <p class="class-desc">Expose safer pipeline-facing parameter names without changing the original callable.</p>

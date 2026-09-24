@@ -103,7 +103,6 @@ class AtomPipeline(PipelineHolder):
         param_mapping_dct: dict[str, str | None] | None = None,
         kwargs_dct: dict[str, str] | None = None,
         args_lst: tuple[str, ...] | list[str] | None = None,
-        allow_existing_root: bool = True,
         forced: bool = True,
         block_priority: float = 10.0,
         *,
@@ -154,10 +153,8 @@ class AtomPipeline(PipelineHolder):
             registration_name=child_name,
             local_folder_path=child_root,
             execution_priority=execution_priority,
-            forced=forced,
             strict_mode=parent._root_pipeline().strict_mode,
             colourful_logs=parent._root_pipeline().colourful_logs,
-            _allow_existing_root=allow_existing_root,
         )
         temp_pipeline.logger = parent.logger
         temp_pipeline.parent_pipeline = parent

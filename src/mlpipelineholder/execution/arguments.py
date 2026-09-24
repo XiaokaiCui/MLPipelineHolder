@@ -25,11 +25,21 @@ class ArgumentMixin:
         config: Any = None
         artifact_store: Any = None
         strict_mode: bool = False
+        parent_pipeline: Any = None
 
         def list_declared_outputs(self) -> set[str]: ...
+        def has_visible_output(self, variable_name: str) -> bool: ...
+        def get_value(self, variable_name: str) -> Any: ...
         def _ancestor_manual_values(self) -> dict[str, Any]: ...
+        def _ancestor_config_values(self) -> dict[str, Any]: ...
         def _config_has_field(self, config_obj: Any, field_name: str) -> bool: ...
         def _config_value(self, config_obj: Any, field_name: str) -> Any: ...
+        def _get_stored_object_by_name(
+            self,
+            object_name: str,
+            *,
+            cache: bool,
+        ) -> Any: ...
         @staticmethod
         def _restore_callable_value(reference: CallableValueReference) -> Any: ...
 
@@ -205,6 +215,8 @@ class ArgumentMixin:
         *,
         allow_missing: bool = False,
         missing_value: Any = None,
+        include_root_storage: bool = False,
+        cache_root_storage: bool = True,
     ) -> Any:
         if input_name == "logger":
             value = self.logger
@@ -222,6 +234,11 @@ class ArgumentMixin:
             value = parent_config[input_name]
         elif input_name in defaults:
             value = defaults[input_name]
+        elif include_root_storage and self.parent_pipeline is None:
+            value = self._get_stored_object_by_name(
+                input_name,
+                cache=cache_root_storage,
+            )
         elif allow_missing:
             value = missing_value
         else:
@@ -241,3 +258,24 @@ class ArgumentMixin:
                 "recreate or reset the value before running"
             )
         return value
+
+    def _resolve_investigation_input(
+        self,
+        input_name: str,
+        function_name: str,
+    ) -> Any:
+        visible_outputs: dict[str, Any] = {}
+        if self.has_visible_output(input_name):
+            visible_outputs[input_name] = self.get_value(input_name)
+        return self._resolve_named_input(
+            input_name,
+            function_name,
+            {},
+            visible_outputs,
+            self._ancestor_config_values(),
+            {},
+            [],
+            self.list_declared_outputs(),
+            include_root_storage=True,
+            cache_root_storage=False,
+        )
