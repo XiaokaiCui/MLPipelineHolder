@@ -452,6 +452,27 @@ class ExecutionInspectionTests(unittest.TestCase):
             with self.assertRaisesRegex(ExecutionError, "same block"):
                 block.inspect(function_name="consume_shared")
 
+    def test_parameter_named_variadic_helpers_detect_same_block_dependencies(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            block = pipeline.add_block("parallel", 1)
+            block.register_function(produce_shared, ["shared"])
+            block.register_args("items", ["shared"])
+            block.register_function(sum_variadic_items, ["positional_result"])
+
+            with self.assertRaisesRegex(ExecutionError, "same block"):
+                block.inspect(function_name="sum_variadic_items")
+
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
+            block = pipeline.add_block("parallel", 1)
+            block.register_function(produce_shared, ["shared"])
+            block.register_kwargs("items", {"value": "shared"})
+            block.register_function(sum_variadic_named, ["keyword_result"])
+
+            with self.assertRaisesRegex(ExecutionError, "same block"):
+                block.inspect(function_name="sum_variadic_named")
+
     def test_expression_inspection_supports_overrides_copying_and_raw_result(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = PipelineHandler(
@@ -1380,13 +1401,27 @@ class ExecutionInspectionTests(unittest.TestCase):
 
     def test_dask_estimation_does_not_swallow_memory_error(self) -> None:
         class FailingCollection:
-            def __dask_graph__(self) -> object:
-                raise MemoryError("simulated graph allocation failure")
+            @property
+            def npartitions(self) -> int:
+                raise MemoryError("simulated metadata allocation failure")
 
         estimator = _InspectionMemoryEstimator()
 
         with self.assertRaises(MemoryError):
             estimator._estimate_dask_collection(FailingCollection())
+
+    def test_dask_estimation_does_not_construct_task_graph(self) -> None:
+        class MetadataOnlyCollection:
+            npartitions = 4
+
+            def __dask_graph__(self) -> object:
+                raise AssertionError("task graph must not be constructed")
+
+        estimator = _InspectionMemoryEstimator()
+
+        size = estimator._estimate_dask_collection(MetadataOnlyCollection())
+
+        self.assertEqual(size, 256 * 1024 + 4 * 8 * 512)
 
     def test_artifact_estimate_is_order_independent_when_also_nested(self) -> None:
         with TemporaryDirectory() as tmp:

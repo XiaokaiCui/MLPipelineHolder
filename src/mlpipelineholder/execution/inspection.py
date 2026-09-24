@@ -727,16 +727,12 @@ class _InspectionMemoryEstimator:
 
     def _estimate_dask_collection(self, collection: Any) -> int:
         try:
-            task_count = int(len(collection.__dask_graph__()))
+            partition_count = int(collection.npartitions)
         except MemoryError:
             raise
         except Exception:
-            try:
-                task_count = int(collection.npartitions) * 8
-            except MemoryError:
-                raise
-            except Exception:
-                task_count = 4096
+            partition_count = 512
+        task_count = max(1, partition_count) * 8
         return 256 * 1024 + task_count * 512
 
     def _estimate_bound_method(

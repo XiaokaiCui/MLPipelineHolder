@@ -33,12 +33,20 @@ def collect_implicit_variadics(*values: int, **named: int) -> tuple[int, int]:
     return len(values), len(named)
 
 
+def sum_implicit_variadics(*values: int, **named: int) -> int:
+    return sum(values) + sum(named.values())
+
+
 def config_gate(flag: bool) -> bool:
     return flag
 
 
 def produce_value() -> int:
     return 1
+
+
+def produce_from_seed(seed: int) -> int:
+    return seed
 
 
 class UnpicklableResult:
@@ -250,6 +258,35 @@ class StrictArgumentResolutionTests(unittest.TestCase):
             self.assertEqual(loaded_registration.input_names, ["second", "bonus"])
             self.assertEqual(loaded_resolved.args, (2,))
             self.assertEqual(loaded_resolved.kwargs, {"bonus": 3})
+
+    def test_non_strict_parameter_named_helpers_track_member_dependencies(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "implicit-helper-non-strict",
+                {"seed": 1, "bonus": 3},
+                Path(temp_dir),
+            )
+            source = pipeline.add_block("source", 1)
+            source.register_function(produce_from_seed, ["first"])
+            block = pipeline.add_block("build", 2)
+            block.register_args("values", ["first"])
+            block.register_kwargs("named", {"bonus": "bonus"})
+            registration = block.register_function(
+                sum_implicit_variadics,
+                ["total"],
+            )
+
+            pipeline.run_all()
+
+            self.assertEqual(registration.input_names, ["first", "bonus"])
+            self.assertEqual(pipeline.get_value("total"), 4)
+
+            pipeline.update_config("seed", 5)
+            pipeline.run_block("source")
+
+            self.assertFalse(pipeline.has_visible_output("total"))
+            pipeline.run_block("build")
+            self.assertEqual(pipeline.get_value("total"), 8)
 
     def test_parameter_named_kwargs_helper_is_strictly_validated(self) -> None:
         with TemporaryDirectory() as temp_dir:

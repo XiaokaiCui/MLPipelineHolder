@@ -10,6 +10,7 @@ from ..core.models import ExpressionRegistration, FunctionRegistration
 from ..exceptions import ResolutionError
 
 from ..core.base import PipelineBase
+from ..execution.function_registry import inspect_exposed_input_names
 
 
 def _is_child_pipeline(node: object) -> bool:
@@ -26,6 +27,7 @@ class DescriptionMixin:
         logger: Any = None
         historical_result_log_path: Any = None
         parent_pipeline: Any = None
+        strict_mode: bool = False
 
         def _sorted_nodes(self) -> list[Any]: ...
         def _node_declared_outputs(self, node: Any) -> set[str]: ...
@@ -257,11 +259,26 @@ class DescriptionMixin:
     ) -> list[str]:
         visible_output_names = self._declared_output_names_before_priority(priority)
         visible_config_names = self._visible_config_names()
-        input_names = (
-            block._effective_expression_input_names(registration)
-            if block is not None and isinstance(registration, ExpressionRegistration)
-            else registration.input_names
-        )
+        if block is not None and isinstance(registration, ExpressionRegistration):
+            input_names = block._effective_expression_input_names(registration)
+        elif block is not None and isinstance(registration, FunctionRegistration):
+            # Display the callable's exposed signature (explicit parameters plus
+            # block-scoped variadic helper names). ``registration.input_names``
+            # tracks concrete variadic member dependencies for invalidation and
+            # is intentionally not what the chart shows.
+            input_names = inspect_exposed_input_names(
+                registration.callable_obj,
+                param_mapping=registration.param_mapping,
+                var_pos_name=None
+                if self.strict_mode
+                else registration.var_pos_name,
+                var_kw_name=None
+                if self.strict_mode
+                else registration.var_kw_name,
+                strict_mode=self.strict_mode,
+            )
+        else:
+            input_names = registration.input_names
         displayed = [
             name
             for name in input_names

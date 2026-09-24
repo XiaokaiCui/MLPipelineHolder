@@ -777,15 +777,28 @@ class ExecutionBlock:
             var_kw_name=None if strict else registration.var_kw_name,
             strict_mode=strict,
         )
-        if not strict:
-            return input_names
-        explicit_variadic_names = list(registration.args_registration_state or [])
-        explicit_variadic_names.extend(
-            (registration.kwargs_registration_state or {}).values()
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
         )
-        for input_name in explicit_variadic_names:
-            if input_name not in input_names:
-                input_names.append(input_name)
+        variadic_dependencies = (
+            (effective_pos_name, registration.args_registration_state),
+            (
+                effective_kw_name,
+                None
+                if registration.kwargs_registration_state is None
+                else list(registration.kwargs_registration_state.values()),
+            ),
+        )
+        for helper_name, dependencies in variadic_dependencies:
+            if dependencies is None:
+                continue
+            if helper_name in input_names:
+                input_names.remove(helper_name)
+            for input_name in dependencies:
+                if input_name not in input_names:
+                    input_names.append(input_name)
         return input_names
 
     def _warn_on_disk_backed_input_persistence_pitfall(
@@ -1359,24 +1372,29 @@ class ExecutionBlock:
     ) -> dict[str, Any]:
         descriptors: dict[str, Any] = {}
         signature = callable_signature(registration.callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
         for parameter in signature.parameters.values():
             if parameter.name in overrides:
                 descriptors[parameter.name] = ("inspection_override",)
             elif parameter.kind == inspect.Parameter.VAR_POSITIONAL:
                 helper = (
-                    self.registered_args.get(registration.var_pos_name)
-                    if registration.var_pos_name is not None
+                    self.registered_args.get(effective_pos_name)
+                    if effective_pos_name is not None
                     else None
                 )
                 descriptors[parameter.name] = (
                     "registered_args",
                     None if helper is None else tuple(helper.ordered_items),
-                    registration.var_pos_name,
+                    effective_pos_name,
                 )
             elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
                 helper = (
-                    self.registered_kwargs.get(registration.var_kw_name)
-                    if registration.var_kw_name is not None
+                    self.registered_kwargs.get(effective_kw_name)
+                    if effective_kw_name is not None
                     else None
                 )
                 descriptors[parameter.name] = (
@@ -1384,7 +1402,7 @@ class ExecutionBlock:
                     None
                     if helper is None
                     else tuple(sorted(helper.mapping_dct.items())),
-                    registration.var_kw_name,
+                    effective_kw_name,
                 )
             elif parameter.name in registration.param_mapping:
                 descriptors[parameter.name] = (
@@ -1432,30 +1450,35 @@ class ExecutionBlock:
     ) -> set[str]:
         names: set[str] = set()
         signature = callable_signature(registration.callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
         for parameter in signature.parameters.values():
             if parameter.name in overrides:
                 continue
             if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
                 helper = (
-                    self.registered_args.get(registration.var_pos_name)
-                    if registration.var_pos_name is not None
+                    self.registered_args.get(effective_pos_name)
+                    if effective_pos_name is not None
                     else None
                 )
                 if helper is not None:
                     names.update(helper.ordered_items)
                 elif not strict_mode:
-                    names.add(registration.var_pos_name or parameter.name)
+                    names.add(effective_pos_name or parameter.name)
                 continue
             if parameter.kind == inspect.Parameter.VAR_KEYWORD:
                 helper = (
-                    self.registered_kwargs.get(registration.var_kw_name)
-                    if registration.var_kw_name is not None
+                    self.registered_kwargs.get(effective_kw_name)
+                    if effective_kw_name is not None
                     else None
                 )
                 if helper is not None:
                     names.update(helper.mapping_dct.values())
                 elif not strict_mode:
-                    names.add(registration.var_kw_name or parameter.name)
+                    names.add(effective_kw_name or parameter.name)
                 continue
             if parameter.name in registration.param_mapping:
                 mapped = registration.param_mapping[parameter.name]
