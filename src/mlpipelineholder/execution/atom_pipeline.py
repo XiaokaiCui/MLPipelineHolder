@@ -26,6 +26,11 @@ class AtomPipeline(PipelineHolder):
     _is_atom = True
     _sealed = False
 
+    def __getattribute__(self, name: str) -> Any:
+        if name == "inspect":
+            raise AttributeError("AtomPipeline does not expose inspect()")
+        return super().__getattribute__(name)
+
     def _seal(self) -> None:
         """Lock the atom; extension methods reject mutation after this call."""
         self._sealed = True

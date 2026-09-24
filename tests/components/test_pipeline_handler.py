@@ -1799,6 +1799,92 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertTrue(pipeline.project_root.exists())
             self.assertFalse((tmp_path / "marker.txt").exists())
 
+    def test_pipeline_creation_cleans_root_and_backup_after_one_confirmation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            (project_root / "project-marker.txt").write_text("project", encoding="utf-8")
+            (backup_root / "backup-marker.txt").write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes") as prompt:
+                pipeline = PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    project_root,
+                    pipeline_backup_directory=backup_root,
+                    clean_directory=True,
+                )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertFalse((project_root / "project-marker.txt").exists())
+            self.assertFalse(backup_root.exists())
+
+    def test_pipeline_creation_preserves_root_and_backup_when_joint_cleanup_cancelled(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            project_marker = project_root / "project-marker.txt"
+            backup_marker = backup_root / "backup-marker.txt"
+            project_marker.write_text("project", encoding="utf-8")
+            backup_marker.write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="no") as prompt:
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    "pipeline root.*pipeline backup directory.*deletion was cancelled",
+                ):
+                    PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        project_root,
+                        pipeline_backup_directory=backup_root,
+                        clean_directory=True,
+                    )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertEqual(project_marker.read_text(encoding="utf-8"), "project")
+            self.assertEqual(backup_marker.read_text(encoding="utf-8"), "backup")
+
+    def test_pipeline_creation_prompts_when_only_backup_requires_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            (backup_root / "backup-marker.txt").write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes") as prompt:
+                PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    project_root,
+                    pipeline_backup_directory=backup_root,
+                    clean_directory=True,
+                )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertTrue(project_root.exists())
+            self.assertFalse(backup_root.exists())
+
     def test_pipeline_creation_does_not_prompt_for_empty_root_cleanup(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)

@@ -8,6 +8,7 @@ from functools import partial, wraps
 from typing import Any, ParamSpec, TypeVar, get_type_hints
 
 from .code_comparison import code_objects_equal
+from .inspection import _compute_investigation_value
 from ..exceptions import RegistrationError
 
 _P = ParamSpec("_P")
@@ -316,14 +317,7 @@ def pipeline_resolving(
                     input_name,
                     getattr(func, "__name__", type(func).__name__),
                 )
-                if compute:
-                    try:
-                        import dask.dataframe as dd
-                    except ImportError:
-                        pass
-                    else:
-                        if isinstance(value, (dd.DataFrame, dd.Series)):
-                            value = value.compute()
+                value = _compute_investigation_value(value, compute=compute)
                 bound.arguments[parameter.name] = value
             return func(*bound.args, **bound.kwargs)
 

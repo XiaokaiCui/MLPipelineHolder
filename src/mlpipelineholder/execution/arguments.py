@@ -30,6 +30,11 @@ class ArgumentMixin:
         def list_declared_outputs(self) -> set[str]: ...
         def has_visible_output(self, variable_name: str) -> bool: ...
         def get_value(self, variable_name: str) -> Any: ...
+        def _materialize_stored_value(
+            self,
+            value: Any,
+            placeholder_error: str,
+        ) -> Any: ...
         def _ancestor_manual_values(self) -> dict[str, Any]: ...
         def _ancestor_config_values(self) -> dict[str, Any]: ...
         def _config_has_field(self, config_obj: Any, field_name: str) -> bool: ...
@@ -263,15 +268,29 @@ class ArgumentMixin:
         self,
         input_name: str,
         function_name: str,
+        *,
+        visible_outputs: dict[str, Any] | None = None,
     ) -> Any:
-        visible_outputs: dict[str, Any] = {}
-        if self.has_visible_output(input_name):
-            visible_outputs[input_name] = self.get_value(input_name)
+        if visible_outputs is None:
+            resolved_outputs: dict[str, Any] = {}
+            if self.has_visible_output(input_name):
+                resolved_outputs[input_name] = self.get_value(input_name)
+        else:
+            resolved_outputs = {}
+            if input_name in visible_outputs:
+                value = visible_outputs[input_name]
+                resolved_outputs[input_name] = self._materialize_stored_value(
+                    value,
+                    f"Cannot inspect value '{input_name}': it was saved as a placeholder "
+                    f"({value.reason}) and cannot be restored"
+                    if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+                    else "",
+                )
         return self._resolve_named_input(
             input_name,
             function_name,
             {},
-            visible_outputs,
+            resolved_outputs,
             self._ancestor_config_values(),
             {},
             [],

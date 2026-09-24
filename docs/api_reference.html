@@ -289,13 +289,13 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
   <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation and explicit registered-function input resolution. Pipeline values are resolved only through <code>param_mapping</code>, registered args/kwargs helpers, or the automatic <code>logger</code> injection; other unmapped parameters use their callable defaults, and unmapped required parameters raise <code>ResolutionError</code> at execution. Attached children inherit strict mode from the root pipeline; the setting is persisted.</td></tr>
   <tr><td><code>colourful_logs</code></td><td>bool</td><td>Emit ANSI-coloured logger console messages and Rich tracebacks when <code>True</code>. The default <code>False</code> uses terminal-default text colour. This affects logger output only: pipeline structure/chart rendering remains colourful. Attached children inherit the root value; the setting is persisted.</td></tr>
-  <tr><td><code>clean_directory</code></td><td>bool</td><td>One-time construction option. When <code>True</code> and the explicit working directory is non-empty, asks for confirmation before deleting and recreating it. Cancelling emits <code>UserWarning</code> and continues with the existing directory. Filesystem-root paths are refused. The option is not stored or propagated.</td></tr>
+  <tr><td><code>clean_directory</code></td><td>bool</td><td>One-time construction option. When <code>True</code> and the explicit working directory or configured backup directory is non-empty, asks once for confirmation before cleaning. If <code>pipeline_backup_directory</code> is set, the prompt displays both paths and confirmation deletes both; construction then recreates the working root while the backup remains absent until a later save. Cancelling emits <code>UserWarning</code> and preserves both directories. Filesystem-root paths are refused. The option is not stored or propagated.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
 <ul>
   <li>Attached child pipelines inherit <code>memory_saving_mode</code>, <code>memory_profile_logging</code>, <code>strict_mode</code>, and <code>colourful_logs</code> from their root pipeline.</li>
-  <li>Direct construction reuses an existing working directory and preserves its pipeline log by default. Pass <code>clean_directory=True</code> to request one-time confirmed cleanup of a non-empty explicit directory. Re-running that construction asks again.</li>
+  <li>Direct construction reuses existing working and backup directories and preserves the pipeline log by default. Pass <code>clean_directory=True</code> to request one-time confirmed cleanup. When a backup directory is configured, the single prompt names and cleans both paths. Re-running that construction asks again whenever either path requires cleanup.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
@@ -324,7 +324,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 
 <h4 class="method-name" id="PipelineHolder.save_to_storage">save_to_storage()</h4>
 <div class="sig"><span class="kw">save_to_storage</span>(object_name: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_description: <span class="arg">str | None</span> = None) -&gt; <span class="ret">str</span></div>
-<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to pipeline argument resolution or execution, even when a stored name matches a configuration field, constant, or output.</p>
+<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to registered pipeline arguments or execution, even when a stored name matches a configuration field, constant, or output. Root-level temporary investigation APIs may use storage as their final fallback.</p>
 
 <h4 class="method-name" id="PipelineHolder.update_storage">update_storage()</h4>
 <div class="sig"><span class="kw">update_storage</span>(hash_id: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_name: <span class="arg">str | None</span> = None, object_description: <span class="arg">str | None</span> = None, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -339,6 +339,30 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <p>Removes one selected record and deletes its managed artifact. Selection follows <code>get_from_storage()</code>: hash ID takes precedence and duplicated names are ambiguous.</p>
 
 <p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
+
+<h4 class="method-name" id="PipelineHolder.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(*names: <span class="arg">str</span>, compute: <span class="arg">bool</span> = False) -&gt; <span class="ret">PipelineInspection</span></div>
+<p>Returns a one-shot context manager that resolves several values for temporary interactive investigation without registering a node or changing pipeline state. Values resolve when the <code>with</code> block starts through the same source-of-truth rules used by <a class="anchor" href="#pipeline_resolving"><code>pipeline_resolving()</code></a>: visible produced outputs, pipeline constants, visible configuration, and finally uncached object storage for a root pipeline. Retrieval failures propagate without falling through to a lower-priority source.</p>
+<ul class="param-desc">
+  <li><code>names</code>: one or more unique, non-empty pipeline-facing names.</li>
+  <li><code>compute</code>: when <code>True</code>, compute resolved Dask DataFrame and Series values before exposing them.</li>
+</ul>
+<p>Inside the block, valid non-conflicting names support attribute access such as <code>data.selected_df</code>. Dictionary access such as <code>data["selected_df"]</code> works for every requested name and is required for names that are not valid Python attributes or that conflict with context-object attributes. On exit, the context clears its value references and pipeline reference. Access after exit and context reuse raise <code>RuntimeError</code>; values assigned to another variable by user code remain available normally.</p>
+<p>This API is available only on root and ordinary child pipelines. Atom pipelines and execution blocks do not expose <code>inspect()</code>.</p>
+<div class="example">
+  <div class="example-title">Inspect lazy DataFrame values temporarily</div>
+<pre>with dr_pipeline.inspect(
+    "selected_df",
+    "common_df",
+    compute=False,
+) as data:
+    print(data.selected_df.head())
+    print(
+        data["common_df"].groupby("ticker")["market"]
+        .max()
+        .compute()
+    )</pre>
+</div>
 
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
 <div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">ExecutionBlock | None</span></div>
@@ -467,6 +491,24 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>output_name</code>: output declared and already produced by that node.</li>
 </ul>
 <p>An atom with one internal producer returns that value directly; if multiple internal priorities produced the same name, the return value is a <code>dict[float, Any]</code> keyed by internal priority. Unknown nodes and missing outputs raise <code>ResolutionError</code>.</p>
+
+<h4 class="method-name" id="PipelineHolder.get_selected_node_output">get_selected_node_output()</h4>
+<div class="sig"><span class="kw">get_selected_node_output</span>(output_names: <span class="arg">str | list[str]</span>, *, priority: <span class="arg">int | None</span> = None, node_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">Any | tuple[Any, ...]</span></div>
+<p>Returns materialized outputs owned by one selected immediate node. Blocks, atom pipelines, and ordinary child pipelines can all be selected. Supply at least one selector: <code>priority</code> applies the same runtime-compatible selection and lower-group fallback as priority-scoped <a class="anchor" href="#PipelineHolder.inspect"><code>inspect()</code></a>, while <code>node_name</code> directly selects an immediate node. If both are supplied, they must resolve to the same node. The pipeline logger records the selected node.</p>
+<ul class="param-desc">
+  <li><code>output_names</code>: one non-empty output name, or a non-empty list of names.</li>
+  <li><code>priority</code>: optional integer priority group. Float priorities sharing that integer are treated as alternatives, and inactive groups fall back to the nearest lower selectable group.</li>
+  <li><code>node_name</code>: optional immediate block, atom-pipeline, or ordinary child-pipeline name.</li>
+</ul>
+<p>A string returns its value directly. A list returns a tuple of values in the same order as the requested names. Output pointers are followed and disk-backed outputs are loaded. Missing selectors, invalid selectors, inconsistent priority/name selections, unknown nodes, and unproduced outputs raise <code>ValueError</code>, <code>TypeError</code>, or <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> as appropriate.</p>
+<div class="example">
+  <div class="example-title">Read outputs from a priority-selected node</div>
+  <pre>feature_size, beta = pipeline.get_selected_node_output(
+    ["feature_size", "beta"],
+    priority=20,
+    node_name="prepare_training_inputs",
+)</pre>
+</div>
 
 <h4 class="method-name" id="PipelineHolder.set_node_output">set_node_output()</h4>
 <div class="sig"><span class="kw">set_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -863,7 +905,7 @@ print(pipeline.describe_pipeline())</pre>
 </p>
 <div class="field-label">What still works after creation</div>
 <ul>
-  <li>Reading state: <code>get_value()</code>, <code>get_node_output()</code>, <code>get_config()</code>,
+  <li>Reading state: <code>get_value()</code>, <code>get_node_output()</code>, <code>get_selected_node_output()</code>, <code>get_config()</code>,
       <code>get_full_config()</code>, <code>config_as_dict()</code>, <code>list_visible_*()</code>,
       <code>has_visible_*()</code>, <code>list_declared_outputs()</code>, <code>describe_pipeline()</code>,
       <code>full_path()</code>, <code>qualified_node_name()</code>, and the other read-only helpers.</li>
@@ -1259,7 +1301,7 @@ def investigate(selected_df, common_df, splitting_date, stock_universe):
 # common_df is supplied explicitly; only the other required inputs are resolved.
 investigate(common_df=common_df)</pre>
 </div>
-<p>The decorator performs resolution on every call, does not add a pipeline node, and does not cache values loaded only for an investigation. Dask computation results remain local to the call and can be released after the function returns.</p>
+<p>The decorator performs resolution on every call, does not add a pipeline node, and does not cache values loaded only for an investigation. Dask computation results remain local to the call and can be released after the function returns. For ad hoc inspection without defining a function, use <a class="anchor" href="#PipelineHolder.inspect"><code>PipelineHolder.inspect()</code></a>.</p>
 
 <h3 class="class-name" id="rename_args">rename_args()</h3>
 <p class="class-desc">Expose safer pipeline-facing parameter names without changing the original callable.</p>
