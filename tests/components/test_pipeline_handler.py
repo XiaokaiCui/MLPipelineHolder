@@ -221,6 +221,10 @@ def local_variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_i
     return (base + sum(extra_values) + sum(extra_items.values())) * factor
 
 
+def parameter_named_variadic_sum(*values: int, **named: int) -> int:
+    return sum(values) + sum(named.values())
+
+
 def strict_target(output_df: str, target_col: str, **extra_kwargs: Any) -> str:
     return output_df
 
@@ -2902,6 +2906,28 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIn("local_variadic_sum(base_value, factor_value, args_a, kwargs_a)", chart)
             self.assertNotIn("unused_args", chart)
+
+    def test_chart_shows_upstream_dependency_for_parameter_named_variadics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "describe-implicit-helpers",
+                {"base": 1, "bonus": 5},
+                tmp_path / "pipeline",
+            )
+            source = pipeline.add_block("source", 1)
+            source.register_function(produce_seed, ["first"])
+            block = pipeline.add_block("build", 2)
+            block.register_args("values", ["first"])
+            block.register_kwargs("named", {"bonus": "bonus"})
+            block.register_function(parameter_named_variadic_sum, ["total"])
+
+            chart = strip_ansi(pipeline.describe_pipeline())
+
+            self.assertIn(
+                "parameter_named_variadic_sum(first, bonus)",
+                chart,
+            )
 
     def test_str_and_repr_show_pipeline_chart(self) -> None:
         with TemporaryDirectory() as temp_dir:
