@@ -3,16 +3,24 @@ from __future__ import annotations
 import ast
 import builtins
 import inspect
+import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
 from ..exceptions import ExecutionError, RegistrationError, ResolutionError
-from .inspection import InspectionCopier
+from .inspection import (
+    DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    InspectionCopier,
+    InspectionCopyCandidate,
+    inspection_memory_failure,
+    preflight_protected_inspection,
+)
 from .function_registry import (
     callable_identity_matches,
     callable_signature,
+    default_map,
     infer_declared_output_count,
     inspect_exposed_input_names,
     inspect_input_names,
@@ -29,7 +37,11 @@ from ..core.models import (
     ResolvedInspectionCall,
 )
 from ..core.naming import validate_registration_name
-from ..state.output_pointers import OutputPointer
+from ..state.output_pointers import (
+    OutputPointer,
+    PointerResolutionError,
+    resolve_pointer_chain,
+)
 
 if TYPE_CHECKING:
     from ..pipeline_holder import PipelineHolder
@@ -899,7 +911,8 @@ class ExecutionBlock:
         overrides: dict[str, Any] | None = None,
         strict_mode: bool | None = None,
         resolve_only: bool = False,
-        allow_mutable_objects: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     ) -> Any:
         """Resolve and optionally invoke one registration without committing outputs."""
         return self._inspect_registration(
@@ -908,6 +921,7 @@ class ExecutionBlock:
             strict_mode=strict_mode,
             resolve_only=resolve_only,
             allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
             node_name=self.registration_name,
         )
 
@@ -919,6 +933,7 @@ class ExecutionBlock:
         strict_mode: bool | None,
         resolve_only: bool,
         allow_mutable_objects: bool,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
         node_name: str,
         upstream_outputs: dict[str, Any] | None = None,
         previous_outputs: dict[str, Any] | None = None,
@@ -934,6 +949,15 @@ class ExecutionBlock:
             raise TypeError("resolve_only must be a boolean")
         if not isinstance(allow_mutable_objects, bool):
             raise TypeError("allow_mutable_objects must be a boolean")
+        if (
+            isinstance(memory_safety_margin, bool)
+            or not isinstance(memory_safety_margin, (int, float))
+            or not math.isfinite(float(memory_safety_margin))
+            or memory_safety_margin < 0
+        ):
+            raise TypeError(
+                "memory_safety_margin must be a finite non-negative number"
+            )
         inspection_overrides = dict(overrides or {})
         registration = self._select_inspection_registration(
             function_name,
@@ -960,11 +984,12 @@ class ExecutionBlock:
             allow_mutable_objects=allow_mutable_objects,
         )
         if isinstance(registration, FunctionRegistration):
-            resolved = self._resolve_inspection_callable(
+            resolved = self._resolve_inspected_registration(
                 registration,
                 inspection_overrides,
                 strict_mode=effective_strict,
                 allow_mutable_objects=allow_mutable_objects,
+                memory_safety_margin=memory_safety_margin,
                 visible_outputs=visible_outputs,
                 visible_constants=visible_constants,
                 previous_names=previous_names,
@@ -990,11 +1015,12 @@ class ExecutionBlock:
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
 
-        resolved, namespace = self._resolve_inspection_expression(
+        resolved, namespace = self._resolve_inspected_expression(
             registration,
             inspection_overrides,
             strict_mode=effective_strict,
             allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
             visible_outputs=visible_outputs,
             visible_constants=visible_constants,
             previous_names=previous_names,
@@ -1023,6 +1049,134 @@ class ExecutionBlock:
         if len(values) == 1:
             return values[0]
         return tuple(values)
+
+    def _resolve_inspected_registration(
+        self,
+        registration: FunctionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        memory_safety_margin: float,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+    ) -> ResolvedInspectionCall:
+        if not allow_mutable_objects:
+            candidates: list[InspectionCopyCandidate] = []
+            self._resolve_inspection_callable(
+                registration,
+                overrides,
+                strict_mode=strict_mode,
+                allow_mutable_objects=allow_mutable_objects,
+                visible_outputs=visible_outputs,
+                visible_constants=visible_constants,
+                previous_names=previous_names,
+                parent_config=parent_config,
+                copier=copier,
+                node_name=node_name,
+                materialize=False,
+                planning=True,
+                candidates=candidates,
+            )
+            self._preflight_inspection_memory(
+                candidates,
+                node_name=node_name,
+                function_name=registration.function_name,
+                safety_margin=memory_safety_margin,
+            )
+        return self._resolve_inspection_callable(
+            registration,
+            overrides,
+            strict_mode=strict_mode,
+            allow_mutable_objects=allow_mutable_objects,
+            visible_outputs=visible_outputs,
+            visible_constants=visible_constants,
+            previous_names=previous_names,
+            parent_config=parent_config,
+            copier=copier,
+            node_name=node_name,
+        )
+
+    def _resolve_inspected_expression(
+        self,
+        registration: ExpressionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        memory_safety_margin: float,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+    ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
+        if not allow_mutable_objects:
+            candidates: list[InspectionCopyCandidate] = []
+            self._resolve_inspection_expression(
+                registration,
+                overrides,
+                strict_mode=strict_mode,
+                allow_mutable_objects=allow_mutable_objects,
+                visible_outputs=visible_outputs,
+                visible_constants=visible_constants,
+                previous_names=previous_names,
+                parent_config=parent_config,
+                copier=copier,
+                node_name=node_name,
+                materialize=False,
+                planning=True,
+                candidates=candidates,
+            )
+            self._preflight_inspection_memory(
+                candidates,
+                node_name=node_name,
+                function_name=registration.function_name,
+                safety_margin=memory_safety_margin,
+            )
+        return self._resolve_inspection_expression(
+            registration,
+            overrides,
+            strict_mode=strict_mode,
+            allow_mutable_objects=allow_mutable_objects,
+            visible_outputs=visible_outputs,
+            visible_constants=visible_constants,
+            previous_names=previous_names,
+            parent_config=parent_config,
+            copier=copier,
+            node_name=node_name,
+        )
+
+    def _preflight_inspection_memory(
+        self,
+        candidates: list[InspectionCopyCandidate],
+        *,
+        node_name: str,
+        function_name: str,
+        safety_margin: float,
+    ) -> None:
+        preflight_protected_inspection(
+            candidates,
+            node_name=node_name,
+            function_name=function_name,
+            safety_margin=safety_margin,
+            pointer_reader=self._inspection_pointer_terminal,
+        )
+
+    def _inspection_pointer_terminal(self, pointer: OutputPointer) -> Any:
+        try:
+            _, terminal = resolve_pointer_chain(
+                pointer.destination,
+                self.parent._root_pipeline()._read_output_address,
+            )
+        except PointerResolutionError:
+            return None
+        return terminal
 
     def _select_inspection_registration(
         self,
@@ -1269,9 +1423,15 @@ class ExecutionBlock:
         parent_config: dict[str, Any],
         copier: InspectionCopier,
         node_name: str,
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
     ) -> ResolvedInspectionCall:
         signature = callable_signature(registration.callable_obj)
         parameters = list(signature.parameters.values())
+        resolver_defaults = (
+            {} if strict_mode else default_map(registration.callable_obj)
+        )
         var_pos_index = next(
             (
                 index
@@ -1341,10 +1501,14 @@ class ExecutionBlock:
                             visible_constants,
                             previous_names,
                             parent_config,
-                            {},
+                            resolver_defaults,
                             loaded_artifacts,
                             declared_output_names,
                             copier,
+                            node_name=node_name,
+                            materialize=materialize,
+                            planning=planning,
+                            candidates=candidates,
                         )
                         positional_values.append(value)
                         positional_sources.append(
@@ -1364,10 +1528,14 @@ class ExecutionBlock:
                         visible_constants,
                         previous_names,
                         parent_config,
-                        {},
+                        resolver_defaults,
                         loaded_artifacts,
                         declared_output_names,
                         copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
                         allow_missing=True,
                         missing_value=[],
                     )
@@ -1397,10 +1565,14 @@ class ExecutionBlock:
                             visible_constants,
                             previous_names,
                             parent_config,
-                            {},
+                            resolver_defaults,
                             loaded_artifacts,
                             declared_output_names,
                             copier,
+                            node_name=node_name,
+                            materialize=materialize,
+                            planning=planning,
+                            candidates=candidates,
                         )
                         keyword_values[key] = value
                         keyword_sources[key] = replace(
@@ -1427,10 +1599,14 @@ class ExecutionBlock:
                         visible_constants,
                         previous_names,
                         parent_config,
-                        {},
+                        resolver_defaults,
                         loaded_artifacts,
                         declared_output_names,
                         copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
                         allow_missing=True,
                         missing_value={},
                     )
@@ -1466,30 +1642,43 @@ class ExecutionBlock:
                         visible_constants,
                         previous_names,
                         parent_config,
-                        {},
+                        resolver_defaults,
                         loaded_artifacts,
                         declared_output_names,
                         copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
                     )
                 sources[parameter.name] = source
             elif strict_mode:
                 if parameter.name == "logger":
-                    value = self.parent.logger
                     source = ResolutionSource(kind="logger", name="logger")
-                    value, source = copier.prepare(
-                        value,
+                    value, source = self._prepare_inspection_value(
+                        self.parent.logger,
                         parameter_name=parameter.name,
                         source=source,
+                        copier=copier,
+                        node_name=node_name,
+                        function_name=registration.function_name,
+                        planning=planning,
+                        candidates=candidates,
                     )
                 elif parameter.default is not inspect.Parameter.empty:
                     source = ResolutionSource(
                         kind="function_default",
                         name=parameter.name,
                     )
-                    value, source = copier.prepare(
+                    value, source = self._prepare_inspection_value(
                         parameter.default,
                         parameter_name=parameter.name,
                         source=source,
+                        copier=copier,
+                        node_name=node_name,
+                        function_name=registration.function_name,
+                        planning=planning,
+                        candidates=candidates,
                     )
                 else:
                     raise ResolutionError(
@@ -1499,11 +1688,6 @@ class ExecutionBlock:
                     )
                 sources[parameter.name] = source
             else:
-                defaults = (
-                    {}
-                    if parameter.default is inspect.Parameter.empty
-                    else {parameter.name: parameter.default}
-                )
                 value, source = self._resolve_and_copy_inspection_input(
                     parameter.name,
                     parameter.name,
@@ -1512,10 +1696,14 @@ class ExecutionBlock:
                     visible_constants,
                     previous_names,
                     parent_config,
-                    defaults,
+                    resolver_defaults,
                     loaded_artifacts,
                     declared_output_names,
                     copier,
+                    node_name=node_name,
+                    materialize=materialize,
+                    planning=planning,
+                    candidates=candidates,
                 )
                 sources[parameter.name] = source
 
@@ -1528,8 +1716,15 @@ class ExecutionBlock:
             else:
                 keyword_args[parameter.name] = value
 
-        bound = signature.bind(*positional_args, **keyword_args)
-        bound.apply_defaults()
+        try:
+            bound = signature.bind(*positional_args, **keyword_args)
+            bound.apply_defaults()
+        except TypeError as exc:
+            raise ResolutionError(
+                f"Cannot bind resolved arguments for function "
+                f"'{registration.function_name}' in block "
+                f"'{self.registration_name}': {exc}"
+            ) from exc
         return ResolvedInspectionCall(
             args=tuple(positional_args),
             kwargs=keyword_args,
@@ -1542,6 +1737,46 @@ class ExecutionBlock:
             strict_mode=strict_mode,
             allow_mutable_objects=allow_mutable_objects,
         )
+
+    def _prepare_inspection_value(
+        self,
+        value: Any,
+        *,
+        parameter_name: str,
+        source: ResolutionSource,
+        copier: InspectionCopier,
+        node_name: str,
+        function_name: str,
+        planning: bool,
+        candidates: list[InspectionCopyCandidate] | None,
+        caller_owned: bool = False,
+    ) -> tuple[Any, ResolutionSource]:
+        if planning:
+            if candidates is not None and copier.requires_copy(
+                value,
+                caller_owned=caller_owned,
+            ):
+                candidates.append(
+                    InspectionCopyCandidate(
+                        parameter_name=parameter_name,
+                        value=value,
+                    )
+                )
+            return value, source
+        try:
+            return copier.prepare(
+                value,
+                parameter_name=parameter_name,
+                source=source,
+                caller_owned=caller_owned,
+            )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+                value=value,
+            ) from exc
 
     def _resolve_and_copy_inspection_input(
         self,
@@ -1557,48 +1792,64 @@ class ExecutionBlock:
         declared_output_names: set[str],
         copier: InspectionCopier,
         *,
+        node_name: str = "",
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
         allow_missing: bool = False,
         missing_value: Any = None,
     ) -> tuple[Any, ResolutionSource]:
-        inspection_outputs = visible_outputs
-        pointer_materialized = False
-        if input_name in previous_names:
-            previous_value = visible_outputs.get(input_name)
-            if isinstance(previous_value, OutputPointer):
-                inspection_outputs = dict(visible_outputs)
-                inspection_outputs[input_name] = self.parent._materialize_stored_value(
-                    previous_value,
-                    "",
-                )
-                pointer_materialized = True
         function_name = (
             registration.function_name
             if isinstance(registration, FunctionRegistration)
             else registration
         )
-        value, source = self.parent._resolve_named_input_with_source(
-            input_name,
-            function_name,
-            {},
-            inspection_outputs,
-            parent_config,
-            defaults,
-            loaded_artifacts,
-            declared_output_names,
-            allow_missing=allow_missing,
-            missing_value=missing_value,
-            visible_constants=visible_constants,
-            same_node_previous_outputs=previous_names,
-        )
+        inspection_outputs = visible_outputs
+        pointer_materialized = False
+        try:
+            if input_name in previous_names:
+                previous_value = visible_outputs.get(input_name)
+                if isinstance(previous_value, OutputPointer) and materialize:
+                    inspection_outputs = dict(visible_outputs)
+                    inspection_outputs[input_name] = (
+                        self.parent._materialize_stored_value(previous_value, "")
+                    )
+                    pointer_materialized = True
+            value, source = self.parent._resolve_named_input_with_source(
+                input_name,
+                function_name,
+                {},
+                inspection_outputs,
+                parent_config,
+                defaults,
+                loaded_artifacts,
+                declared_output_names,
+                allow_missing=allow_missing,
+                missing_value=missing_value,
+                visible_constants=visible_constants,
+                same_node_previous_outputs=previous_names,
+                materialize=materialize,
+            )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+            ) from exc
         source = replace(
             source,
             mapped_from=parameter_name,
             materialized=source.materialized or pointer_materialized,
         )
-        return copier.prepare(
+        return self._prepare_inspection_value(
             value,
             parameter_name=parameter_name,
             source=source,
+            copier=copier,
+            node_name=node_name,
+            function_name=function_name,
+            planning=planning,
+            candidates=candidates,
         )
 
     def _resolve_inspection_expression(
@@ -1614,6 +1865,9 @@ class ExecutionBlock:
         parent_config: dict[str, Any],
         copier: InspectionCopier,
         node_name: str,
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
     ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
         namespace = self.parent._build_expression_runtime_namespace(cache=False)
         arguments: dict[str, Any] = {}
@@ -1644,6 +1898,10 @@ class ExecutionBlock:
                     loaded_artifacts,
                     declared_output_names,
                     copier,
+                    node_name=node_name,
+                    materialize=materialize,
+                    planning=planning,
+                    candidates=candidates,
                 )
             arguments[input_name] = value
             sources[input_name] = source

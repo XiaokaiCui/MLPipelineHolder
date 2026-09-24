@@ -189,6 +189,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     PipelineLogger,
     ExecutionError,
     InspectionCopyError,
+    InspectionMemoryError,
     PersistenceError,
     PipelineError,
     RegistrationError,
@@ -231,6 +232,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#resolutionerror">ResolutionError</a></li>
     <li><a class="anchor" href="#executionerror">ExecutionError</a></li>
     <li><a class="anchor" href="#inspectioncopyerror">InspectionCopyError</a></li>
+    <li><a class="anchor" href="#inspectionmemoryerror">InspectionMemoryError</a></li>
     <li><a class="anchor" href="#persistenceerror">PersistenceError</a></li>
     <li class="toc-group">Data models</li>
     <li><a class="anchor" href="#artifactrecord">ArtifactRecord</a></li>
@@ -372,9 +374,9 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 </div>
 
 <h4 class="method-name" id="PipelineHolder.inspect_node">inspect_node()</h4>
-<div class="sig"><span class="kw">inspect_node</span>(*, node_name: <span class="arg">str | None</span> = None, priority: <span class="arg">int | float | None</span> = None, function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<div class="sig"><span class="kw">inspect_node</span>(*, node_name: <span class="arg">str | None</span> = None, priority: <span class="arg">int | float | None</span> = None, function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
 <p>Inspects one immediate execution block or atom without committing outputs. Select by <code>node_name</code>, exact finite numeric <code>priority</code>, or both when they identify the same node. Unlike runtime priority-group selection, this method never truncates a float priority or falls back to an earlier group. An ordinary child-pipeline container is rejected; call that child's <code>inspect_node()</code> instead.</p>
-<p><code>function_name</code>, <code>overrides</code>, <code>strict_mode</code>, <code>resolve_only</code>, and <code>allow_mutable_objects</code> have the same meanings and safeguards as <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>.</p>
+<p><code>function_name</code>, <code>overrides</code>, <code>strict_mode</code>, <code>resolve_only</code>, <code>allow_mutable_objects</code>, and <code>memory_safety_margin</code> have the same meanings and safeguards as <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>.</p>
 <div class="example">
   <div class="example-title">Resolve a node call without invoking it</div>
   <pre>resolved = pipeline.inspect_node(
@@ -965,8 +967,8 @@ print(pipeline.describe_pipeline())</pre>
 </p>
 
 <h4 class="method-name" id="AtomPipeline.inspect">inspect()</h4>
-<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
-<p>Delegates to the atom's internal <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>. It uses parent-visible inputs and the atom's previous committed outputs, but deliberately bypasses the atom gate so a skipped atom can still be investigated. The atom remains sealed and inspection results are not committed.</p>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Delegates to the atom's internal <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>. It uses parent-visible inputs and the atom's previous committed outputs, but deliberately bypasses the atom gate so a skipped atom can still be investigated. The atom remains sealed and inspection results are not committed. See <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a> for the shared-by-default mutability policy and the protected-mode memory preflight.</p>
 
 <h2 class="section" id="executionblock">ExecutionBlock</h2>
 
@@ -988,19 +990,23 @@ print(pipeline.describe_pipeline())</pre>
 </ul>
 
 <h4 class="method-name" id="ExecutionBlock.inspect">inspect()</h4>
-<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = False) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
 <p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
+<p>Inspection selects one registration, not the whole block. Other functions registered at the same priority are not run, so inspecting one registration is not equivalent to concurrently executing a multi-function block. Same-block dependency validation still applies, except that an original-parameter-name override fully replaces that parameter's dependency and removes it from the check.</p>
 <ul class="param-desc">
   <li><code>function_name</code>: required when the block has multiple registrations. Duplicate legacy registrations are accepted only when they reference the same callable object and their effective input bindings are equivalent after inspection overrides.</li>
-  <li><code>overrides</code>: temporary values keyed by original callable parameter name, including variadic parameter names and <code>logger</code>. Unknown names raise <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>. Overrides have highest precedence and are passed through by identity.</li>
+  <li><code>overrides</code>: temporary values keyed by original callable parameter name, including variadic parameter names and <code>logger</code>. Unknown names raise <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>. Overrides have highest precedence and are passed through by identity in both mutability modes.</li>
   <li><code>strict_mode</code>: temporary resolution mode. <code>None</code> follows the root pipeline. Expressions resolve the same way in either mode.</li>
-  <li><code>resolve_only</code>: return a <a class="anchor" href="#resolvedinspectioncall"><code>ResolvedInspectionCall</code></a> containing the exact <code>args</code>, <code>kwargs</code>, signature-bound <code>arguments</code>, and structured <code>sources</code>, without invoking user code.</li>
-  <li><code>allow_mutable_objects</code>: by default, mutable pipeline values and mutable callable defaults are copied with one shared memo so aliases and cycles are preserved. Set this to <code>True</code> to pass originals through.</li>
+  <li><code>resolve_only</code>: return a <a class="anchor" href="#resolvedinspectioncall"><code>ResolvedInspectionCall</code></a> containing the exact <code>args</code>, <code>kwargs</code>, signature-bound <code>arguments</code>, and structured <code>sources</code>, without invoking user code. When protected mode is selected, the memory preflight runs before constructing protected copies, so <code>resolve_only=True</code> follows the same rules.</li>
+  <li><code>allow_mutable_objects</code>: <strong>defaults to <code>True</code></strong>. Pipeline-owned mutable values and mutable callable defaults are passed to the inspected callable by reference, so inspected code may mutate them. Set this to <code>False</code> for protected mode, which copies mutable pipeline-owned values (and mutable callable defaults) with one shared memo so aliases and cycles are preserved.</li>
+  <li><code>memory_safety_margin</code>: protected mode only. Fraction added to the estimated additional memory before comparing it with measured available memory. The default <code>0.25</code> requires 25% headroom. Must be a finite non-negative number.</li>
 </ul>
-<p>Protected copying has specialized handling for pandas, NumPy, Dask, and Torch values. Exact Python functions, builtin functions, and the pipeline's real logger retain identity. Shared-state objects that cannot be isolated, including Optuna studies and samplers, raise <a class="anchor" href="#inspectioncopyerror"><code>InspectionCopyError</code></a>; provide an override or explicitly opt into shared mutable objects.</p>
-<p><strong>Not a sandbox:</strong> non-committing describes framework-managed state only. User code may still perform arbitrary external side effects, mutate an explicitly supplied override, mutate shared inputs when <code>allow_mutable_objects=True</code>, write logs through the real logger, or print into the normal captured pipeline log. Invocation failures are wrapped in <a class="anchor" href="#executionerror"><code>ExecutionError</code></a> with the original exception retained as <code>__cause__</code>.</p>
+<p><strong>Shared default:</strong> inspection functions and expressions receive original pipeline objects by reference by default. In-place mutations may change the pipeline's existing values even though inspection does not commit returned outputs, invalidate nodes, or persist artifacts. This includes pandas DataFrames, NumPy arrays, nested mutable containers, model objects, and other mutable inputs.</p>
+<p><strong>Protected mode:</strong> <code>allow_mutable_objects=False</code> copies mutable pipeline values and callable defaults, with specialized handling for pandas, NumPy, Dask, and Torch values. Exact Python functions, builtin functions, and the pipeline's real logger retain identity. Shared-state objects that cannot be isolated, including Optuna studies and samplers, raise <a class="anchor" href="#inspectioncopyerror"><code>InspectionCopyError</code></a>; provide an override or explicitly opt into shared mutable objects. Copying large values such as pandas DataFrames can be slow and can temporarily double their memory footprint. Copying a Dask collection copies only the lazy graph object; it does not compute the dataset and does not sandbox graph execution or the external data sources and side effects the graph reads or triggers.</p>
+<p><strong>Memory preflight (best effort):</strong> before protected copying, inspection estimates the combined additional memory of every resolved value that needs a copy, deduplicates shared identities, and accounts for artifact materialization using file metadata instead of loading large artifacts first. It compares the estimate, plus <code>memory_safety_margin</code>, with measured available system RAM, container/process limits, and CUDA device memory where applicable. When a check fails because the estimate is materially unbounded or unreliable, memory is insufficient, or available memory cannot be measured, interactive sessions (a terminal or a Jupyter/IPython kernel) display the diagnostics and ask whether to proceed with protected copying anyway. The default answer is No; the same prompt also points at the <code>allow_mutable_objects=True</code> alternative. Declining, answering non-interactively, or running without usable stdin raises <a class="anchor" href="#inspectionmemoryerror"><code>InspectionMemoryError</code></a> before any protected copy or artifact load starts. Estimates are approximate, availability can change after the check, an OS-level out-of-memory termination remains possible, and unsaved in-memory work can still be lost. The preflight never frees memory, evicts values, deletes artifacts, or invalidates outputs to make room. Shared default mode does not run this estimation pass.</p>
+<p><strong>Not a sandbox:</strong> non-committing describes framework-managed state only. User code may still perform arbitrary external side effects, mutate an explicitly supplied override, mutate pipeline-owned objects in shared default mode, write logs through the real logger, or print into the normal captured pipeline log. Protected copying isolates pipeline-owned mutable values but does not isolate external side effects performed by arbitrary user code. Invocation failures are wrapped in <a class="anchor" href="#executionerror"><code>ExecutionError</code></a> with the original exception retained as <code>__cause__</code>.</p>
 <div class="example">
-  <div class="example-title">Inspect a registered function safely</div>
+  <div class="example-title">Inspect with shared inputs by default</div>
   <pre>resolved = block.inspect(
     function_name="build_features",
     overrides={"limit": 100},
@@ -1008,10 +1014,22 @@ print(pipeline.describe_pipeline())</pre>
 )
 print(resolved.arguments)
 
-# Runs the callable, but does not store its declared outputs.
+# Runs the callable with the original pipeline objects by reference.
+# In-place mutations by build_features persist in the pipeline.
 preview = block.inspect(
     function_name="build_features",
     overrides={"limit": 100},
+)</pre>
+</div>
+<div class="example">
+  <div class="example-title">Opt into protected copying with a memory preflight</div>
+  <pre># Copies mutable pipeline inputs before invoking user code.
+# Raises InspectionCopyError for values that cannot be isolated and
+# InspectionMemoryError when copying is estimated to be unsafe.
+preview = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+    allow_mutable_objects=False,
 )</pre>
 </div>
 
@@ -1400,6 +1418,10 @@ investigate(common_df=common_df)</pre>
 <h3 class="class-name" id="inspectioncopyerror">InspectionCopyError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.InspectionCopyError(ResolutionError)</div>
 <p>Raised when protected execution inspection cannot isolate a mutable resolved value. Use an inspection override for that parameter or pass <code>allow_mutable_objects=True</code> only when sharing the original object is intentional.</p>
+
+<h3 class="class-name" id="inspectionmemoryerror">InspectionMemoryError</h3>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.InspectionMemoryError(ResolutionError)</div>
+<p>Raised when protected execution inspection (<code>allow_mutable_objects=False</code>) is rejected by the best-effort memory preflight or when a protected copy raises <code>MemoryError</code> despite passing the preflight. The message identifies the selected node and function, the affected inputs, the estimated additional memory, the measured available resource, and whether copying had started. In interactive sessions, a failed preflight check asks whether to proceed with protected copying anyway before raising this error; declining, or running non-interactively, raises it directly. Reduce the inspection inputs, free memory, or use the shared default when the objects can be inspected by reference.</p>
 
 <h3 class="class-name" id="persistenceerror">PersistenceError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.PersistenceError(PipelineError)</div>

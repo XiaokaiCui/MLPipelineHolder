@@ -7,6 +7,7 @@ from typing import Any
 from ..exceptions import RegistrationError
 from ..pipeline_holder import PipelineHolder
 from .atom_registry import register_atom_pipeline_class
+from .inspection import DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN
 from .registration import _is_child_pipeline
 
 
@@ -32,7 +33,8 @@ class AtomPipeline(PipelineHolder):
         overrides: dict[str, Any] | None = None,
         strict_mode: bool | None = None,
         resolve_only: bool = False,
-        allow_mutable_objects: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     ) -> Any:
         """Inspect the atom's internal registration without evaluating its gate."""
         if self.parent_pipeline is None or self.execution_priority is None:
@@ -57,6 +59,7 @@ class AtomPipeline(PipelineHolder):
             strict_mode=strict_mode,
             resolve_only=resolve_only,
             allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
             node_name=self.registration_name,
             upstream_outputs=upstream_outputs,
             previous_outputs=previous_outputs,

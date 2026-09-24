@@ -70,7 +70,10 @@ from .exceptions import (
 )
 from .execution.arguments import ArgumentMixin
 from .execution.engine import EngineMixin
-from .execution.inspection import InspectionMixin
+from .execution.inspection import (
+    DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    InspectionMixin,
+)
 from .execution.function_registry import (
     _values_equal,
     callable_signature,
@@ -882,7 +885,8 @@ class PipelineHolder(
         overrides: dict[str, Any] | None = None,
         strict_mode: bool | None = None,
         resolve_only: bool = False,
-        allow_mutable_objects: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     ) -> Any:
         """Inspect one immediate block or atom selected by name or exact priority."""
         if node_name is None and priority is None:
@@ -952,6 +956,7 @@ class PipelineHolder(
             strict_mode=strict_mode,
             resolve_only=resolve_only,
             allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
         )
 
     @staticmethod

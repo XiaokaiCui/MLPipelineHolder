@@ -224,6 +224,7 @@ class ArgumentMixin:
         missing_value: Any = None,
         include_root_storage: bool = False,
         cache_root_storage: bool = True,
+        materialize: bool = True,
     ) -> Any:
         value, _ = self._resolve_named_input_with_source(
             input_name,
@@ -238,6 +239,7 @@ class ArgumentMixin:
             missing_value=missing_value,
             include_root_storage=include_root_storage,
             cache_root_storage=cache_root_storage,
+            materialize=materialize,
         )
         return value
 
@@ -258,6 +260,7 @@ class ArgumentMixin:
         cache_root_storage: bool = True,
         visible_constants: dict[str, Any] | None = None,
         same_node_previous_outputs: set[str] | None = None,
+        materialize: bool = True,
     ) -> tuple[Any, ResolutionSource]:
         del declared_output_names
         if input_name == "logger":
@@ -307,12 +310,14 @@ class ArgumentMixin:
             )
 
         if isinstance(value, ArtifactRecord):
-            value = self.artifact_store.load(value)
-            loaded_artifacts.append(input_name)
-            source = replace(source, materialized=True)
+            if materialize:
+                value = self.artifact_store.load(value)
+                loaded_artifacts.append(input_name)
+                source = replace(source, materialized=True)
         if isinstance(value, CallableValueReference):
-            value = self._restore_callable_value(value)
-            source = replace(source, materialized=True)
+            if materialize:
+                value = self._restore_callable_value(value)
+                source = replace(source, materialized=True)
         if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(
                 f"Cannot resolve argument '{input_name}' for function '{function_name}': "

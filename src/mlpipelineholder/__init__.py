@@ -9,6 +9,7 @@ from .execution.block import ExecutionBlock
 from .exceptions import (
     ExecutionError,
     InspectionCopyError,
+    InspectionMemoryError,
     PersistenceError,
     PipelineError,
     RegistrationError,
@@ -55,6 +56,7 @@ __all__ = [
     "ExecutionBlock",
     "ExecutionError",
     "InspectionCopyError",
+    "InspectionMemoryError",
     "GateBlock",
     "PipelineLogger",
     "PersistenceError",
