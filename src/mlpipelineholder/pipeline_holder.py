@@ -962,7 +962,9 @@ class PipelineHolder(
     @staticmethod
     def _validate_integer_priority(priority: Any) -> int:
         if isinstance(priority, bool) or not isinstance(priority, int):
-            raise TypeError("priority must be an integer")
+            raise TypeError(
+                "priority must be an integer priority group, not an exact node priority"
+            )
         return priority
 
     def _select_node_at_or_below_priority(self, priority: int) -> Any:
@@ -1659,7 +1661,17 @@ class PipelineHolder(
                 f"'{self.pipeline_backup_root}'"
             )
 
-        user_input = input(prompt).strip().lower()
+        try:
+            user_input = input(prompt).strip().lower()
+        except (EOFError, OSError, RuntimeError, ValueError):
+            warnings.warn(
+                f"clean_directory=True was requested for {cancellation_target}, "
+                "but interactive confirmation is unavailable; directory deletion was "
+                "cancelled and the existing paths will be used",
+                UserWarning,
+                stacklevel=4,
+            )
+            return
         if user_input not in {"yes", "y"}:
             warnings.warn(
                 f"clean_directory=True was requested for {cancellation_target}, "

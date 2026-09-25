@@ -410,19 +410,26 @@ def normalize_renamed_registration(
     if original is None or not isinstance(renamed, dict):
         return function_or_path, param_mapping, var_pos_name, var_kw_name
 
+    # Nested rename_args wrappers are normalized from the inside out so the
+    # persisted callable and mapping always target the original callable.
+    base, inner_mapping, inner_pos_name, inner_kw_name = (
+        normalize_renamed_registration(original, None, None, None)
+    )
+    inner_exposed = dict(inner_mapping or {})
     explicit = dict(param_mapping or {})
     wrapper_pos_name = getattr(function_or_path, "__mlpipeline_var_pos_name__", None)
     wrapper_kw_name = getattr(function_or_path, "__mlpipeline_var_kw_name__", None)
     composed: dict[str, str | None] = {}
     exposed_names: set[str] = set()
-    for parameter in callable_signature(original).parameters.values():
+    for parameter in callable_signature(base).parameters.values():
         if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
-            exposed_names.add(wrapper_pos_name or parameter.name)
+            exposed_names.add(wrapper_pos_name or inner_pos_name or parameter.name)
             continue
         if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-            exposed_names.add(wrapper_kw_name or parameter.name)
+            exposed_names.add(wrapper_kw_name or inner_kw_name or parameter.name)
             continue
-        exposed_name = renamed.get(parameter.name, parameter.name)
+        inner_name = inner_exposed.get(parameter.name, parameter.name)
+        exposed_name = renamed.get(inner_name, inner_name)
         exposed_names.add(exposed_name)
         target_name = explicit.get(exposed_name, exposed_name)
         if exposed_name in explicit or target_name != parameter.name:
@@ -435,10 +442,10 @@ def normalize_renamed_registration(
             f"{sorted(unknown)}"
         )
     return (
-        original,
+        base,
         composed or None,
-        var_pos_name or wrapper_pos_name,
-        var_kw_name or wrapper_kw_name,
+        var_pos_name or wrapper_pos_name or inner_pos_name,
+        var_kw_name or wrapper_kw_name or inner_kw_name,
     )
 
 

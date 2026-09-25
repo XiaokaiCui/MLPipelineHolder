@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from ..core.constants import _IMMUTABLE_TYPES, _MISSING
 from ..core.models import (
@@ -166,9 +166,27 @@ class ValueAccessMixin:
             else "",
         )
 
+    @overload
     def get_selected_node_output(
         self,
-        output_names: str | list[str],
+        output_names: str,
+        *,
+        priority: int | None = ...,
+        node_name: str | None = ...,
+    ) -> Any: ...
+
+    @overload
+    def get_selected_node_output(
+        self,
+        output_names: list[str] | tuple[str, ...],
+        *,
+        priority: int | None = ...,
+        node_name: str | None = ...,
+    ) -> tuple[Any, ...]: ...
+
+    def get_selected_node_output(
+        self,
+        output_names: str | list[str] | tuple[str, ...],
         *,
         priority: int | None = None,
         node_name: str | None = None,
@@ -181,13 +199,15 @@ class ValueAccessMixin:
         ):
             raise ValueError("node_name must be a non-empty string")
 
-        return_tuple = isinstance(output_names, list)
+        return_tuple = isinstance(output_names, (list, tuple))
         if isinstance(output_names, str):
             names = [output_names]
         elif return_tuple:
-            names = output_names
+            names = list(output_names)
         else:
-            raise TypeError("output_names must be a string or list of strings")
+            raise TypeError(
+                "output_names must be a string, list of strings, or tuple of strings"
+            )
         if not names or any(
             not isinstance(name, str) or not name.strip() for name in names
         ):

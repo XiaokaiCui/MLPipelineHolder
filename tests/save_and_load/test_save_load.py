@@ -99,6 +99,43 @@ class SaveLoadTests(unittest.TestCase):
             self.assertEqual(registration.param_mapping, {"seed": "raw_value"})
             self.assertEqual(loaded.get_value("result"), 11)
 
+    def test_nested_rename_args_composes_and_round_trips(self) -> None:
+        nested = rename_args(
+            rename_args(raw_increment, {"seed": "first_name"}),
+            {"first_name": "second_name"},
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "nested-rename",
+                {"second_name": 10},
+                root / "project",
+            )
+            block = pipeline.add_block("increment", 1)
+            registration = block.register_function(nested, ["result"])
+
+            self.assertEqual(nested(second_name=4), 5)
+            self.assertEqual(registration.callable_obj, raw_increment)
+            self.assertEqual(registration.param_mapping, {"seed": "second_name"})
+
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result"), 11)
+
+            bundle = root / "bundle"
+            pipeline.save_pipeline(bundle)
+            loaded = PipelineHandler.load_pipeline(
+                bundle,
+                forced_deleting=True,
+                trust_project=True,
+            )
+            loaded_registration = loaded.get_block("increment").functions[0]
+            self.assertEqual(
+                loaded_registration.param_mapping,
+                {"seed": "second_name"},
+            )
+            loaded.run_all()
+            self.assertEqual(loaded.get_value("result"), 11)
+
     def test_rename_args_preserves_explicit_identity_mapping_in_strict_mode(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler(

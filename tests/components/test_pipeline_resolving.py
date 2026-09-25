@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pandas as pd
@@ -286,18 +287,51 @@ class PipelineResolvingTests(unittest.TestCase):
             )
             pipeline.run_all()
 
-            for invalid_priority in (True, 1.0, "1"):
-                with self.assertRaisesRegex(TypeError, "must be an integer"):
-                    pipeline.inspect("selected_value", priority=invalid_priority)  # type: ignore[arg-type]
-                with self.assertRaisesRegex(TypeError, "must be an integer"):
+            invalid_priorities: tuple[Any, ...] = (True, 1.0, 1.2, "1")
+            for invalid_priority in invalid_priorities:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "integer priority group, not an exact node priority",
+                ):
+                    pipeline.inspect("selected_value", priority=invalid_priority)
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "integer priority group, not an exact node priority",
+                ):
                     pipeline.get_selected_node_output(
                         "selected_value",
-                        priority=invalid_priority,  # type: ignore[arg-type]
+                        priority=invalid_priority,
                     )
             with self.assertRaisesRegex(ValueError, "priority or node_name"):
                 pipeline.get_selected_node_output("selected_value")
-            with self.assertRaisesRegex(TypeError, "string or list"):
-                pipeline.get_selected_node_output(("selected_value",), node_name="producer")  # type: ignore[arg-type]
+
+    def test_get_selected_node_output_accepts_tuples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = PipelineHandler(
+                "root",
+                local_folder_path=Path(tmp) / "root",
+            )
+            root.add_block("pair", 1).register_function(
+                produce_pair,
+                ["first_value", "second_value"],
+            )
+            root.run_all()
+
+            self.assertEqual(
+                root.get_selected_node_output(
+                    ("second_value", "first_value"),
+                    node_name="pair",
+                ),
+                ("second", "first"),
+            )
+            self.assertEqual(
+                root.get_selected_node_output(("first_value",), node_name="pair"),
+                ("first",),
+            )
+            with self.assertRaisesRegex(ValueError, "non-empty strings"):
+                root.get_selected_node_output((), node_name="pair")
+            with self.assertRaisesRegex(ValueError, "non-empty strings"):
+                root.get_selected_node_output(("first_value", ""), node_name="pair")
 
     def test_inspect_dictionary_access_handles_attribute_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
