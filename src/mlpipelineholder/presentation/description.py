@@ -257,11 +257,28 @@ class DescriptionMixin:
     ) -> list[str]:
         visible_output_names = self._declared_output_names_before_priority(priority)
         visible_config_names = self._visible_config_names()
-        input_names = (
-            block._effective_expression_input_names(registration)
-            if block is not None and isinstance(registration, ExpressionRegistration)
-            else registration.input_names
-        )
+        if block is not None and isinstance(registration, ExpressionRegistration):
+            input_names = block._effective_expression_input_names(registration)
+        elif block is not None and isinstance(registration, FunctionRegistration):
+            # Concrete dependencies from registration metadata. Explicit
+            # variadic helper labels are appended below; hide the members those
+            # labels already represent so the chart stays compact.
+            input_names = list(registration.input_names)
+            if registration.var_pos_name is not None:
+                input_names = [
+                    name
+                    for name in input_names
+                    if name not in (registration.args_registration_state or ())
+                ]
+            if registration.var_kw_name is not None:
+                covered = set(
+                    (registration.kwargs_registration_state or {}).values()
+                )
+                input_names = [
+                    name for name in input_names if name not in covered
+                ]
+        else:
+            input_names = registration.input_names
         displayed = [
             name
             for name in input_names

@@ -7,6 +7,7 @@ from typing import Any
 from ..exceptions import RegistrationError
 from ..pipeline_holder import PipelineHolder
 from .atom_registry import register_atom_pipeline_class
+from .inspection import DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN
 from .registration import _is_child_pipeline
 
 
@@ -25,6 +26,44 @@ class AtomPipeline(PipelineHolder):
 
     _is_atom = True
     _sealed = False
+
+    def inspect(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self,
+        function_name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        strict_mode: bool | None = None,
+        resolve_only: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    ) -> Any:
+        """Inspect the atom's internal registration without evaluating its gate."""
+        if self.parent_pipeline is None or self.execution_priority is None:
+            raise RegistrationError(
+                f"Atom pipeline '{self.registration_name}' is not attached to a parent"
+            )
+        blocks = [node for node in self._sorted_nodes() if not _is_child_pipeline(node)]
+        if len(blocks) != 1 or len(blocks) != len(self.nodes):
+            raise RegistrationError(
+                f"Atom pipeline '{self.registration_name}' must contain exactly one "
+                "internal block for inspection"
+            )
+        upstream_outputs = self.parent_pipeline._visible_outputs_before_priority(
+            self.execution_priority
+        )
+        previous_outputs = dict(
+            self.parent_pipeline.producer_outputs.get(self.registration_name, {})
+        )
+        return blocks[0]._inspect_registration(
+            function_name=function_name,
+            overrides=overrides,
+            strict_mode=strict_mode,
+            resolve_only=resolve_only,
+            allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
+            node_name=self.registration_name,
+            upstream_outputs=upstream_outputs,
+            previous_outputs=previous_outputs,
+        )
 
     def _seal(self) -> None:
         """Lock the atom; extension methods reject mutation after this call."""

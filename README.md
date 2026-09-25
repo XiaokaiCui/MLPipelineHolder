@@ -1,6 +1,6 @@
 # MLPipelineHolder
 
-**MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks. It helps you progressively turn mature parts of an exploratory workflow into stable pipeline stages, while keeping configurations, hyperparameters, and pipeline structure flexible and easy to change.**
+**MLPipelineHolder is a straightforward framework for reproducible machine-learning experimentation in Jupyter notebooks. It helps you progressively turn mature parts of an exploratory workflow into stable pipeline stages, while keeping configurations, hyperparameters, and pipeline structure flexible and easy to change and inspect.**
 
 I originally developed MLPipelineHolder for my own quantitative investing experiments because I found that the available alternatives were either more complex than I needed or not quite flexible enough for active experimentation.
 
@@ -9,6 +9,8 @@ If those are not concerns for you, I would also recommend looking at [Apache Ham
 If you have similar concerns to mine, however, MLPipelineHolder may be worth trying. It is designed to be adopted at almost any stage of experimentation without requiring you to rebuild your workflow from scratch. In many cases, an existing notebook can be converted into a pipeline-managed structure in less than 30 minutes while keeping most of its original organisation and logic.
 
 The idea is not to force an exploratory notebook into a rigid workflow, but to let you progressively turn the parts that have become mature into stable pipeline stages while keeping configurations, hyperparameters, functions, and pipeline structure easy to experiment with and change.
+
+To support this flexibility, the built-in inspection feature (v0.4.1+) makes MLPipelineHolder easy to verify: users can examine how each node resolves its inputs, validate its execution, and confirm its behaviour conveniently.
 
 ## Installation
 
@@ -56,8 +58,8 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Organise data flows and manage variables, configurations, outputs, and dependencies through clearly defined scopes. (use `strict_mode` to make it even safer)
 - Build a pipeline around your existing Jupyter notebook in a straightforward way while retaining most of its original structure and logic.
 - Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed (more effective when used together with `save_to_disk`).
-- Keep arbitrary experiment objects in well-managed storage that is persisted with the pipeline.
-- Track and record logs, results, and pipeline state with minimal effort by using built-in logger.
+- Store arbitrary experiment objects in pipeline-managed storage, with logs and results recorded through the built-in logger and persisted alongside the pipeline.
+- Run a registered function or expression with temporary input overrides, inspect its resolved arguments, and explore alternative scenarios without committing the results or invalidating the pipeline.
 
 ### Example notebook
 

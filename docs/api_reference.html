@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.3.19) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.4.1) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -188,9 +188,13 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     GateBlock,
     PipelineLogger,
     ExecutionError,
+    InspectionCopyError,
+    InspectionMemoryError,
     PersistenceError,
     PipelineError,
     RegistrationError,
+    ResolutionSource,
+    ResolvedInspectionCall,
     ResolutionError,
     pipeline_resolving,
     rename_args,
@@ -227,6 +231,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#registrationerror">RegistrationError</a></li>
     <li><a class="anchor" href="#resolutionerror">ResolutionError</a></li>
     <li><a class="anchor" href="#executionerror">ExecutionError</a></li>
+    <li><a class="anchor" href="#inspectioncopyerror">InspectionCopyError</a></li>
+    <li><a class="anchor" href="#inspectionmemoryerror">InspectionMemoryError</a></li>
     <li><a class="anchor" href="#persistenceerror">PersistenceError</a></li>
     <li class="toc-group">Data models</li>
     <li><a class="anchor" href="#artifactrecord">ArtifactRecord</a></li>
@@ -234,6 +240,8 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     <li><a class="anchor" href="#runrecord">RunRecord</a></li>
     <li><a class="anchor" href="#functionregistration">FunctionRegistration</a></li>
     <li><a class="anchor" href="#expressionregistration">ExpressionRegistration</a></li>
+    <li><a class="anchor" href="#resolutionsource">ResolutionSource</a></li>
+    <li><a class="anchor" href="#resolvedinspectioncall">ResolvedInspectionCall</a></li>
     <li><a class="anchor" href="#blockargsregistration">BlockArgsRegistration</a></li>
     <li><a class="anchor" href="#blockkwargsregistration">BlockKwargsRegistration</a></li>
     <li><a class="anchor" href="#functionexecutionresult">FunctionExecutionResult</a></li>
@@ -289,13 +297,13 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <tr><td><code>torch_load_weights_only</code></td><td>bool</td><td>Load torch artifacts produced by this pipeline with <code>torch.load(weights_only=True)</code>. Stamped per artifact at save time and persisted with the pipeline; children keep their own setting.</td></tr>
   <tr><td><code>strict_mode</code></td><td>bool</td><td>Enable fail-fast registration validation and explicit registered-function input resolution. Pipeline values are resolved only through <code>param_mapping</code>, registered args/kwargs helpers, or the automatic <code>logger</code> injection; other unmapped parameters use their callable defaults, and unmapped required parameters raise <code>ResolutionError</code> at execution. Attached children inherit strict mode from the root pipeline; the setting is persisted.</td></tr>
   <tr><td><code>colourful_logs</code></td><td>bool</td><td>Emit ANSI-coloured logger console messages and Rich tracebacks when <code>True</code>. The default <code>False</code> uses terminal-default text colour. This affects logger output only: pipeline structure/chart rendering remains colourful. Attached children inherit the root value; the setting is persisted.</td></tr>
-  <tr><td><code>clean_directory</code></td><td>bool</td><td>One-time construction option. When <code>True</code> and the explicit working directory is non-empty, asks for confirmation before deleting and recreating it. Cancelling emits <code>UserWarning</code> and continues with the existing directory. Filesystem-root paths are refused. The option is not stored or propagated.</td></tr>
+  <tr><td><code>clean_directory</code></td><td>bool</td><td>One-time construction option. When <code>True</code> and the explicit working directory or configured backup directory is non-empty, asks once for confirmation before cleaning. If <code>pipeline_backup_directory</code> is set, the prompt displays both paths and confirmation deletes both; construction then recreates the working root while the backup remains absent until a later save. Cancelling, or an unavailable interactive prompt (for example redirected, closed, or missing stdin), emits <code>UserWarning</code> and preserves both directories. Filesystem-root paths are refused. The option is not stored or propagated.</td></tr>
 </table>
 
 <div class="field-label">Notes</div>
 <ul>
   <li>Attached child pipelines inherit <code>memory_saving_mode</code>, <code>memory_profile_logging</code>, <code>strict_mode</code>, and <code>colourful_logs</code> from their root pipeline.</li>
-  <li>Direct construction reuses an existing working directory and preserves its pipeline log by default. Pass <code>clean_directory=True</code> to request one-time confirmed cleanup of a non-empty explicit directory. Re-running that construction asks again.</li>
+  <li>Direct construction reuses existing working and backup directories and preserves the pipeline log by default. Pass <code>clean_directory=True</code> to request one-time confirmed cleanup. When a backup directory is configured, the single prompt names and cleans both paths. Re-running that construction asks again whenever either path requires cleanup.</li>
   <li>Configuration fields that conflict with declared output names are rejected at construction time.</li>
   <li>Builtin names (for example <code>list</code>) are rejected as configuration fields.</li>
   <li>Optuna support is optional. Install it with <code>pip install "mlpipelineholder[optuna]"</code> only when a pipeline saves or loads Optuna artifacts.</li>
@@ -324,7 +332,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 
 <h4 class="method-name" id="PipelineHolder.save_to_storage">save_to_storage()</h4>
 <div class="sig"><span class="kw">save_to_storage</span>(object_name: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_description: <span class="arg">str | None</span> = None) -&gt; <span class="ret">str</span></div>
-<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to pipeline argument resolution or execution, even when a stored name matches a configuration field, constant, or output.</p>
+<p>Adds an arbitrary object to the root-owned storage registry and returns its generated hexadecimal hash ID. Ordinary values remain in memory until <a class="anchor" href="#PipelineHolder.save_pipeline"><code>save_pipeline()</code></a> persists them. An Optuna <code>Study</code> is persisted eagerly as an independent copy: its exact incoming name receives the next free appended suffix across the shared database, so <code>abc</code> becomes <code>abc_1</code> while <code>abc_1</code> becomes <code>abc_1_1</code>. Stored objects are never exposed to registered pipeline arguments or execution, even when a stored name matches a configuration field, constant, or output. Root-level temporary investigation APIs may use storage as their final fallback.</p>
 
 <h4 class="method-name" id="PipelineHolder.update_storage">update_storage()</h4>
 <div class="sig"><span class="kw">update_storage</span>(hash_id: <span class="arg">str</span>, object_value: <span class="arg">Any</span>, object_name: <span class="arg">str | None</span> = None, object_description: <span class="arg">str | None</span> = None, to_disk: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -340,6 +348,48 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 
 <p>All five storage methods are root-only. Calling one on any attached child or atom raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a>. Attaching a standalone pipeline merges its storage into the ultimate root. A root record wins any hash collision and the child's colliding artifact is deleted. Values with no dedicated serializer fall back to pickle with a warning; values that pickle cannot serialize remain usable in memory but are omitted from saved state with a warning.</p>
 
+<h4 class="method-name" id="PipelineHolder.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(*names: <span class="arg">str</span>, compute: <span class="arg">bool</span> = False, priority: <span class="arg">int | None</span> = None) -&gt; <span class="ret">PipelineInspection</span></div>
+<p>Returns a one-shot context manager that resolves several values for temporary interactive investigation without registering a node or changing pipeline state. Values resolve when the <code>with</code> block starts through the same source-of-truth rules used by <a class="anchor" href="#pipeline_resolving"><code>pipeline_resolving()</code></a>: visible produced outputs, pipeline constants, visible configuration, and finally uncached object storage for a root pipeline. Retrieval failures propagate without falling through to a lower-priority source.</p>
+<ul class="param-desc">
+  <li><code>names</code>: one or more unique, non-empty pipeline-facing names.</li>
+  <li><code>compute</code>: boolean only. When <code>True</code>, compute resolved Dask DataFrame and Series values before exposing them.</li>
+  <li><code>priority</code>: optional integer execution group used to select an investigation node at or below that group before resolving produced outputs.</li>
+</ul>
+<p>Priority-based value inspection selects a node for investigation; it does not guarantee that a normal pipeline run will execute that same node. In particular, if evaluating a child-pipeline gate fails during selection, the selector retains its intentional fail-open behaviour and may select that child. <a class="anchor" href="#PipelineHolder.inspect_node"><code>inspect_node(priority=...)</code></a> is different: it selects one immediate block or atom by its exact finite numeric priority and does not perform priority-group fallback.</p>
+<p>Inside the block, valid non-conflicting names support attribute access such as <code>data.selected_df</code>. Dictionary access such as <code>data["selected_df"]</code> works for every requested name and is required for names that are not valid Python attributes or that conflict with context-object attributes. On exit, the context clears its value references and pipeline reference. Access after exit and context reuse raise <code>RuntimeError</code>; values assigned to another variable by user code remain available normally.</p>
+<p>This value-context form is available on root and ordinary child pipelines. <a class="anchor" href="#AtomPipeline.inspect"><code>AtomPipeline.inspect()</code></a> and <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a> intentionally use the same method name for non-committing inspection of a registered function or expression instead.</p>
+<div class="example">
+  <div class="example-title">Inspect lazy DataFrame values temporarily</div>
+<pre>with dr_pipeline.inspect(
+    "selected_df",
+    "common_df",
+    compute=False,
+) as data:
+    print(data.selected_df.head())
+    print(
+        data["common_df"].groupby("ticker")["market"]
+        .max()
+        .compute()
+    )</pre>
+</div>
+
+<h4 class="method-name" id="PipelineHolder.inspect_node">inspect_node()</h4>
+<div class="sig"><span class="kw">inspect_node</span>(*, node_name: <span class="arg">str | None</span> = None, priority: <span class="arg">int | float | None</span> = None, function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Inspects one immediate execution block or atom without committing outputs. Select by <code>node_name</code>, exact finite numeric <code>priority</code>, or both when they identify the same node. Unlike runtime priority-group selection, this method never truncates a float priority or falls back to an earlier group. An ordinary child-pipeline container is rejected; call that child's <code>inspect_node()</code> instead.</p>
+<p><code>function_name</code>, <code>overrides</code>, <code>strict_mode</code>, <code>resolve_only</code>, <code>allow_mutable_objects</code>, and <code>memory_safety_margin</code> have the same meanings and safeguards as <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>.</p>
+<div class="example">
+  <div class="example-title">Resolve a node call without invoking it</div>
+  <pre>resolved = pipeline.inspect_node(
+    node_name="prepare_training_inputs",
+    priority=20.1,
+    overrides={"sample_size": 100},
+    resolve_only=True,
+)
+print(resolved.arguments)
+print(resolved.sources)</pre>
+</div>
+
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
 <div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
@@ -347,7 +397,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <ul class="param-desc">
   <li><code>registration_name</code>: unique public name used for lookup, path targeting, logs, and persistence.</li>
   <li><code>execution_priority</code>: numeric position in this pipeline. Priorities with the same integer part form an alternative group.</li>
-  <li><code>forced</code>: replace a conflicting node by default; pass <code>False</code> to log a warning and return <code>None</code> instead.</li>
+  <li><code>forced</code>: replace a conflicting node by default; pass <code>False</code> to log a warning and return <code>None</code> instead. Replacement may remove the prior node's outputs and invalidate dependent outputs.</li>
 </ul>
 <p>Returns the new <code>ExecutionBlock</code>, an identical existing expression block during a forced re-registration, or <code>None</code> when non-strict registration is skipped. Invalid names and strict-mode conflicts raise <code>RegistrationError</code>.</p>
 
@@ -359,7 +409,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>child_pipeline</code>: detached or re-attachable pipeline to place under this parent; a pipeline cannot attach itself.</li>
   <li><code>execution_priority</code>: numeric position of the child among this parent's blocks and child pipelines.</li>
   <li><code>registration_name</code>: optional replacement for the child's current public name before attachment.</li>
-  <li><code>forced</code>: by default, replace a conflicting registered node and detach the child from a previous parent when permitted; pass <code>False</code> to skip conflicts.</li>
+  <li><code>forced</code>: by default, replace a conflicting registered node, remove its previous outputs as applicable, and detach the child from a previous parent when permitted; pass <code>False</code> to skip conflicts.</li>
 </ul>
 <p>Returns the attached child, or <code>None</code> when a non-forced duplicate is skipped.</p>
 <p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the child's declared output names conflict with visible configuration fields or pipeline constants anywhere in the tree.</p>
@@ -467,6 +517,24 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
   <li><code>output_name</code>: output declared and already produced by that node.</li>
 </ul>
 <p>An atom with one internal producer returns that value directly; if multiple internal priorities produced the same name, the return value is a <code>dict[float, Any]</code> keyed by internal priority. Unknown nodes and missing outputs raise <code>ResolutionError</code>.</p>
+
+<h4 class="method-name" id="PipelineHolder.get_selected_node_output">get_selected_node_output()</h4>
+<div class="sig"><span class="kw">get_selected_node_output</span>(output_names: <span class="arg">str | list[str] | tuple[str, ...]</span>, *, priority: <span class="arg">int | None</span> = None, node_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">Any | tuple[Any, ...]</span></div>
+<p>Returns materialized outputs owned by one selected immediate node. Blocks, atom pipelines, and ordinary child pipelines can all be selected. Supply at least one selector: <code>priority</code> applies the same runtime-compatible selection and lower-group fallback as priority-scoped <a class="anchor" href="#PipelineHolder.inspect"><code>inspect()</code></a>, while <code>node_name</code> directly selects an immediate node. If both are supplied, they must resolve to the same node. The pipeline logger records the selected node.</p>
+<ul class="param-desc">
+  <li><code>output_names</code>: one non-empty output name, or a non-empty list or tuple of names.</li>
+  <li><code>priority</code>: optional integer priority group. Float priorities sharing that integer are treated as alternatives, and inactive groups fall back to the nearest lower selectable group.</li>
+  <li><code>node_name</code>: optional immediate block, atom-pipeline, or ordinary child-pipeline name.</li>
+</ul>
+<p>A string returns its value directly. A list or tuple returns a tuple of values in the same order as the requested names. Output pointers are followed and disk-backed outputs are loaded. Missing selectors, invalid selectors, inconsistent priority/name selections, unknown nodes, and unproduced outputs raise <code>ValueError</code>, <code>TypeError</code>, or <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> as appropriate.</p>
+<div class="example">
+  <div class="example-title">Read outputs from a priority-selected node</div>
+  <pre>feature_size, beta = pipeline.get_selected_node_output(
+    ["feature_size", "beta"],
+    priority=20,
+    node_name="prepare_training_inputs",
+)</pre>
+</div>
 
 <h4 class="method-name" id="PipelineHolder.set_node_output">set_node_output()</h4>
 <div class="sig"><span class="kw">set_node_output</span>(node_name: <span class="arg">str</span>, output_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -660,6 +728,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <h4 class="method-name" id="PipelineHolder.recover_variable_from_backup">recover_variable_from_backup()</h4>
 <div class="sig"><span class="kw">recover_variable_from_backup</span>(name: <span class="arg">str</span>, *, pipeline_name: <span class="arg">str | None</span> = None) -&gt; <span class="ret">None</span></div>
 <p>Restores one current value from the latest complete in-place backup. Call on the root pipeline only. Updates in place and returns <code>None</code>.</p>
+<p>Recovery assumes the live pipeline and its backup were already trusted. Backup pickle files can execute code while loading; keep the backup directory under trusted control and never replace its files with content from an untrusted source.</p>
 <div class="field-label">Parameters</div>
 <ul>
   <li><code>name</code>: produced value or declared output name to restore.</li>
@@ -674,6 +743,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <h4 class="method-name" id="PipelineHolder.recover_config_from_backup">recover_config_from_backup()</h4>
 <div class="sig"><span class="kw">recover_config_from_backup</span>(name: <span class="arg">str</span>) -&gt; <span class="ret">None</span></div>
 <p>Restores one config field from the latest complete in-place backup. Call on the pipeline that locally owns the field. Descendants inherit the restored field through normal config visibility unless they define their own local override. Returns <code>None</code>.</p>
+<p>As with variable recovery, the configured backup is treated as trusted and must not be replaced with files from an untrusted source.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>name</code>: locally owned configuration field to restore from backup.</li></ul>
 
@@ -790,6 +860,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <h4 class="method-name" id="PipelineHolder.set_strict_mode">set_strict_mode()</h4>
 <div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
 <p>Enables or disables strict-mode registration validation and explicit registered-function input resolution for this pipeline and all attached descendants. Strict functions resolve pipeline values only through <code>param_mapping</code> and registered args/kwargs helpers; unmapped parameters use callable defaults, except <code>logger</code>, which is injected automatically. Unmapped required parameters raise <code>ResolutionError</code> at execution. Callable gates retain their existing implicit input resolution. The setting is persisted with the pipeline.</p>
+<p>Changing strict mode changes argument-resolution rules but does not erase or automatically recompute existing results. A real mode change logs a warning; call <code>run_all()</code> before relying on affected results. <code>run_all()</code> recomputes only nodes that execute under the current gates and settings, so gated-off nodes are not promised to be recomputed.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>enabled</code>: strict-mode state propagated through the attached tree.</li></ul>
 
@@ -863,12 +934,13 @@ print(pipeline.describe_pipeline())</pre>
 </p>
 <div class="field-label">What still works after creation</div>
 <ul>
-  <li>Reading state: <code>get_value()</code>, <code>get_node_output()</code>, <code>get_config()</code>,
+  <li>Reading state: <code>get_value()</code>, <code>get_node_output()</code>, <code>get_selected_node_output()</code>, <code>get_config()</code>,
       <code>get_full_config()</code>, <code>config_as_dict()</code>, <code>list_visible_*()</code>,
       <code>has_visible_*()</code>, <code>list_declared_outputs()</code>, <code>describe_pipeline()</code>,
       <code>full_path()</code>, <code>qualified_node_name()</code>, and the other read-only helpers.</li>
   <li>Running: the parent's <code>run_all()</code>, <code>run_until()</code>, <code>run_from()</code>, and
       <code>run_block()</code> execute the atom as part of the parent's node list.</li>
+  <li>Execution inspection: <code>atom.inspect()</code> resolves or invokes its target registration without committing outputs and without evaluating the atom gate.</li>
   <li>Configuration through the parent: <code>atom.config</code>, <code>atom.get_config_value()</code>, and
       execution-time argument resolution always use the parent's current configuration.</li>
   <li>Parent value changes: <code>set_constant_value()</code>, <code>set_value()</code>,
@@ -898,6 +970,10 @@ print(pipeline.describe_pipeline())</pre>
   identical definition after a load remains a no-op.
 </p>
 
+<h4 class="method-name" id="AtomPipeline.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Delegates to the atom's internal <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a>. It uses parent-visible inputs and the atom's previous committed outputs, but deliberately bypasses the atom gate so a skipped atom can still be investigated. The atom remains sealed and inspection results are not committed. See <a class="anchor" href="#ExecutionBlock.inspect"><code>ExecutionBlock.inspect()</code></a> for the shared-by-default mutability policy and the protected-mode memory preflight.</p>
+
 <h2 class="section" id="executionblock">ExecutionBlock</h2>
 
 <h3 class="class-name" id="ExecutionBlock">ExecutionBlock</h3>
@@ -916,6 +992,50 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>registration_name</code>: unique block name within the parent.</li>
   <li><code>execution_priority</code>: numeric position among the parent's immediate nodes.</li>
 </ul>
+
+<h4 class="method-name" id="ExecutionBlock.inspect">inspect()</h4>
+<div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
+<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
+<p>Inspection selects one registration, not the whole block. Other functions registered at the same priority are not run, so inspecting one registration is not equivalent to concurrently executing a multi-function block. Same-block dependency validation still applies, except that an original-parameter-name override fully replaces that parameter's dependency and removes it from the check.</p>
+<ul class="param-desc">
+  <li><code>function_name</code>: required when the block has multiple registrations. Duplicate legacy registrations are accepted only when they reference the same callable object and their effective input bindings are equivalent after inspection overrides.</li>
+  <li><code>overrides</code>: temporary values keyed by original callable parameter name, including variadic parameter names and <code>logger</code>. Unknown names raise <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a>. Overrides have highest precedence and are passed through by identity in both mutability modes.</li>
+  <li><code>strict_mode</code>: temporary resolution mode. <code>None</code> follows the root pipeline. Expressions resolve the same way in either mode.</li>
+  <li><code>resolve_only</code>: return a <a class="anchor" href="#resolvedinspectioncall"><code>ResolvedInspectionCall</code></a> containing the exact <code>args</code>, <code>kwargs</code>, signature-bound <code>arguments</code>, and structured <code>sources</code>, without invoking user code. When protected mode is selected, the memory preflight runs before constructing protected copies, so <code>resolve_only=True</code> follows the same rules.</li>
+  <li><code>allow_mutable_objects</code>: <strong>defaults to <code>True</code></strong>. Pipeline-owned mutable values and mutable callable defaults are passed to the inspected callable by reference, so inspected code may mutate them. Set this to <code>False</code> for protected mode, which copies mutable pipeline-owned values (and mutable callable defaults) with one shared memo so ordinary object aliases and cycles are preserved.</li>
+  <li><code>memory_safety_margin</code>: protected mode only. Fraction added to the estimated additional memory before comparing it with measured available memory. The default <code>0.25</code> requires 25% headroom. Must be a finite non-negative number.</li>
+</ul>
+<p><strong>Shared default:</strong> inspection functions and expressions receive original pipeline objects by reference by default. In-place mutations may change the pipeline's existing values even though inspection does not commit returned outputs, invalidate nodes, or persist artifacts. This includes pandas DataFrames, NumPy arrays, nested mutable containers, model objects, and other mutable inputs.</p>
+<p><strong>Protected mode:</strong> <code>allow_mutable_objects=False</code> copies mutable pipeline values and callable defaults, with specialized handling for pandas, NumPy, Dask, and Torch values. Exact Python functions, builtin functions, and the pipeline's real logger retain identity. Shared-state objects that cannot be isolated, including Optuna studies and samplers, raise <a class="anchor" href="#inspectioncopyerror"><code>InspectionCopyError</code></a> before a known disk-backed Optuna artifact is loaded; provide an override or explicitly opt into shared mutable objects. Copying large values such as pandas DataFrames can be slow and can temporarily double their memory footprint. Copying a Dask collection copies only the lazy graph object; it does not compute the dataset and does not sandbox graph execution or the external data sources and side effects the graph reads or triggers. Distinct NumPy views or Torch tensors that share storage may become independent protected copies, so their copied view relationship can differ from normal execution; mutating a protected copy must still leave the original pipeline-owned storage unchanged.</p>
+<p><strong>Memory preflight (best effort):</strong> before protected copying, inspection performs a lightweight estimate of materialization, copy, and temporary allocations. Numeric arrays and tabular values use storage metadata; object-dtype values and basic containers use bounded shallow samples instead of full cell or object-graph traversal. Shared already-materialized identities are counted once, while separate artifact loads are counted separately. The estimate plus <code>memory_safety_margin</code> is compared with inexpensive measurements of system RAM, container/process limits, and CUDA device memory where applicable. Measurements may be incomplete, compressed artifacts can expand unpredictably, and a Dask parquet loader may fall back from lazy Dask loading to eager pandas loading. When the estimate appears excessive, is materially uncertain, or available memory cannot be measured, an interactive terminal or Jupyter/IPython session displays the reason and asks whether to continue. Only an explicit Yes proceeds; declining or running without usable interactive input raises <a class="anchor" href="#inspectionmemoryerror"><code>InspectionMemoryError</code></a> before protected copying or artifact loading starts. This is advisory, not an OOM guarantee: another process can consume memory after preflight, a user-approved copy can still fail, and an operating-system OOM kill can terminate Python or Jupyter and lose unsaved in-memory work. Shared default mode does not run this estimation pass.</p>
+<p><strong>Not a sandbox:</strong> non-committing describes framework-managed state only. User code may still perform arbitrary external side effects, mutate an explicitly supplied override, mutate pipeline-owned objects in shared default mode, write logs through the real logger, or print into the normal captured pipeline log. Protected copying isolates pipeline-owned mutable values but does not isolate external side effects performed by arbitrary user code. Invocation failures are wrapped in <a class="anchor" href="#executionerror"><code>ExecutionError</code></a> with the original exception retained as <code>__cause__</code>.</p>
+<div class="example">
+  <div class="example-title">Inspect with shared inputs by default</div>
+  <pre>resolved = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+    resolve_only=True,
+)
+print(resolved.arguments)
+
+# Runs the callable with the original pipeline objects by reference.
+# In-place mutations by build_features persist in the pipeline.
+preview = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+)</pre>
+</div>
+<div class="example">
+  <div class="example-title">Opt into protected copying with a memory preflight</div>
+  <pre># Copies mutable pipeline inputs before invoking user code.
+# Raises InspectionCopyError for values that cannot be isolated and
+# InspectionMemoryError when copying is estimated to be unsafe.
+preview = block.inspect(
+    function_name="build_features",
+    overrides={"limit": 100},
+    allow_mutable_objects=False,
+)</pre>
+</div>
 
 <h4 class="method-name" id="ExecutionBlock.register_function">register_function()</h4>
 <div class="sig"><span class="kw">register_function</span>(
@@ -936,8 +1056,8 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>output_variable_names</code>: zero, one, or multiple positional slots matched to the callable's return value. Use <code>"_"</code> to ignore a slot.</li>
   <li><code>save_to_disk</code>: declared outputs serialized into the managed artifact tree.</li>
   <li><code>param_mapping</code>: callable parameter name to pipeline-facing value name, or literal <code>None</code>.</li>
-  <li><code>var_pos_name</code>: block args-helper name supplying the callable's <code>*args</code>.</li>
-  <li><code>var_kw_name</code>: block kwargs-helper name supplying the callable's <code>**kwargs</code>.</li>
+  <li><code>var_pos_name</code>: optional block args-helper alias supplying the callable's <code>*args</code>. When omitted, a helper registered under the variadic parameter's own name is used consistently.</li>
+  <li><code>var_kw_name</code>: optional block kwargs-helper alias supplying the callable's <code>**kwargs</code>. When omitted, a helper registered under the variadic parameter's own name is used consistently.</li>
   <li><code>forced</code>: replace the same registered function name when the definition differs.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
   <li>Returns the created <a class="anchor" href="#functionregistration"><code>FunctionRegistration</code></a>, or <code>None</code> when the registration was rejected (for example duplicate output names, output names conflicting with visible configuration fields or pipeline constants, or builtin names).</li>
@@ -946,7 +1066,7 @@ print(pipeline.describe_pipeline())</pre>
   <li><code>save_to_disk</code> names must be a subset of <code>output_variable_names</code>.</li>
   <li>The reserved marker <code>"_"</code> still counts toward return annotation and runtime arity but is discarded instead of becoming a declared or produced output. Repeated markers are allowed. Including <code>"_"</code> in <code>save_to_disk</code> raises <code>RegistrationError</code>.</li>
   <li>When global Arrow schema inference fails for a disk-backed Dask DataFrame, persistence warns and retries with <code>schema=None</code>. Each partition then infers its own Parquet schema, so partition schemas must remain compatible.</li>
-  <li>Artifact loading inspects Parquet metadata before reading. If pandas cannot parse a nested or third-party Arrow extension declaration such as <code>list&lt;item: double&gt;[pyarrow]</code>, the unreadable declaration is neutralized in the in-memory Arrow schema before conversion. PyArrow then performs its normal metadata-driven pandas reconstruction globally, covering current and future supported column and index dtypes without type-specific conversion code; unreadable Arrow-backed fields retain their physical Arrow dtype. Directory artifacts remain lazy Dask DataFrames and projected reads use the same safe partition loader.</li>
+  <li>Artifact loading inspects Parquet metadata before reading. If pandas cannot parse a nested or third-party Arrow extension declaration such as <code>list&lt;item: double&gt;[pyarrow]</code>, the unreadable declaration is neutralized in the in-memory Arrow schema before conversion. PyArrow then performs its normal metadata-driven pandas reconstruction globally, covering current and future supported column and index dtypes without type-specific conversion code; unreadable Arrow-backed fields retain their physical Arrow dtype. Directory artifacts normally remain lazy Dask DataFrames and projected reads use the same safe partition loader, but backend failures can trigger an eager pandas fallback.</li>
   <li><code>overridden_outputs</code> maps a current output name to an existing upstream <code>(pipeline_name, node_name)</code> that declares the same output.</li>
   <li>With <code>forced=True</code>, replacing a function with an <strong>identical</strong> registration (same callable identity, outputs, <code>save_to_disk</code>, mappings, and bound args/kwargs helper snapshots) is a no-op that leaves all outputs untouched. Imported functions require both the same import path and the same callable object, so <code>importlib.reload()</code> always causes replacement even when the path or source appears unchanged. An unchanged re-executed <code>__main__</code> notebook definition may remain a no-op when its executable definition and defaults match. Any real difference always erases the function's own outputs and normally invalidates from the earliest downstream consumer; after <code>forbid_invalidate_objects()</code>, downstream cached outputs are retained and may be stale. Unrelated downstream blocks are preserved.</li>
   <li><code>functools.partial</code> registrations are compared structurally by wrapped callable identity and bound <code>args</code>/<code>keywords</code>. Saving rejects a partial whose bound values would become unresolved placeholders; runtime-only bound callables must remain available under their saved <code>__main__</code> names when loading.</li>
@@ -1011,7 +1131,7 @@ block.register_function(
 <p>Registers block-scoped ordered items used to build <code>*args</code> for a specific function.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
-  <li><code>name</code>: helper name referenced by <code>register_function(var_pos_name=...)</code>.</li>
+  <li><code>name</code>: helper name referenced by <code>register_function(var_pos_name=...)</code>, or the callable's own <code>*args</code> parameter name when no alias is supplied.</li>
   <li><code>ordered_items</code>: pipeline-facing value names resolved in positional order.</li>
   <li><code>forced</code>: replace an existing same-name args helper.</li>
 </ul>
@@ -1021,7 +1141,7 @@ block.register_function(
 <p>Registers a block-scoped name mapping used to build <code>**kwargs</code> for a specific function.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
-  <li><code>name</code>: helper name referenced by <code>register_function(var_kw_name=...)</code>.</li>
+  <li><code>name</code>: helper name referenced by <code>register_function(var_kw_name=...)</code>, or the callable's own <code>**kwargs</code> parameter name when no alias is supplied.</li>
   <li><code>mapping_dct</code>: emitted keyword name to pipeline-facing value name.</li>
   <li><code>forced</code>: replace an existing same-name kwargs helper.</li>
 </ul>
@@ -1259,7 +1379,7 @@ def investigate(selected_df, common_df, splitting_date, stock_universe):
 # common_df is supplied explicitly; only the other required inputs are resolved.
 investigate(common_df=common_df)</pre>
 </div>
-<p>The decorator performs resolution on every call, does not add a pipeline node, and does not cache values loaded only for an investigation. Dask computation results remain local to the call and can be released after the function returns.</p>
+<p>The decorator performs resolution on every call, does not add a pipeline node, and does not cache values loaded only for an investigation. Dask computation results remain local to the call and can be released after the function returns. For ad hoc inspection without defining a function, use <a class="anchor" href="#PipelineHolder.inspect"><code>PipelineHolder.inspect()</code></a>.</p>
 
 <h3 class="class-name" id="rename_args">rename_args()</h3>
 <p class="class-desc">Expose safer pipeline-facing parameter names without changing the original callable.</p>
@@ -1270,7 +1390,7 @@ investigate(common_df=common_df)</pre>
   var_kw_name: <span class="arg">str | None</span> = None
 ) -&gt; <span class="ret">Any</span>
 </div>
-<p>Returns a wrapped callable whose pipeline-facing parameter names differ from the original function's. This is how <code>register_function(param_mapping=...)</code> resolves renamed inputs.</p>
+<p>Returns a wrapped callable whose pipeline-facing parameter names differ from the original function's. When this wrapper is passed directly to <code>register_function()</code>, its supported rename metadata is normalised into the saved registration so the original importable callable and renamed inputs can round-trip without serialising the wrapper itself. Arbitrary third-party wrappers are not guaranteed to restore identical wrapper behaviour after loading.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>func</code>: callable whose exposed signature should be adapted.</li>
@@ -1298,6 +1418,14 @@ investigate(common_df=common_df)</pre>
 <h3 class="class-name" id="executionerror">ExecutionError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.ExecutionError(PipelineError)</div>
 <p>Raised when pipeline execution fails (for example an unresolvable function argument or a same-block dependency that cannot run in parallel).</p>
+
+<h3 class="class-name" id="inspectioncopyerror">InspectionCopyError</h3>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.InspectionCopyError(ResolutionError)</div>
+<p>Raised when protected execution inspection cannot isolate a mutable resolved value. Use an inspection override for that parameter or pass <code>allow_mutable_objects=True</code> only when sharing the original object is intentional.</p>
+
+<h3 class="class-name" id="inspectionmemoryerror">InspectionMemoryError</h3>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.InspectionMemoryError(ResolutionError)</div>
+<p>Raised when protected execution inspection (<code>allow_mutable_objects=False</code>) is rejected by the best-effort memory preflight or when a protected copy raises <code>MemoryError</code> despite passing the preflight. The message identifies the selected node and function, the affected inputs, the estimated additional memory, the measured available resource, and whether copying had started. In interactive sessions, a failed preflight check asks whether to proceed with protected copying anyway before raising this error; declining, or running non-interactively, raises it directly. Reduce the inspection inputs, free memory, or use the shared default when the objects can be inspected by reference.</p>
 
 <h3 class="class-name" id="persistenceerror">PersistenceError</h3>
 <div class="sig"><span class="kw">class</span> mlpipelineholder.PersistenceError(PipelineError)</div>
@@ -1385,6 +1513,16 @@ investigate(common_df=common_df)</pre>
   <tr><td><code>overridden_outputs</code></td><td>dict[str, OutputAddress]</td><td>Validated upstream output addresses superseded by this expression.</td></tr>
 </table>
 <p>The <code>function_name</code> property always returns <code>"expression"</code>.</p>
+
+<h3 class="class-name" id="resolutionsource">ResolutionSource</h3>
+<p class="class-desc">Structured origin metadata for an argument resolved during execution inspection.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.ResolutionSource(kind, name=None, mapped_from=None, materialized=False, copied=False, same_node_previous_output=False, identity_passthrough=False)</div>
+<p><code>kind</code> identifies origins such as <code>inspect_override</code>, <code>pipeline_output</code>, <code>constant</code>, <code>config</code>, <code>function_default</code>, <code>registered_args</code>, <code>registered_kwargs</code>, or <code>logger</code>. The boolean fields report materialization, protected copying, previous same-node output use, and deliberate identity passthrough.</p>
+
+<h3 class="class-name" id="resolvedinspectioncall">ResolvedInspectionCall</h3>
+<p class="class-desc">The complete call shape and diagnostics returned by <code>inspect(resolve_only=True)</code>.</p>
+<div class="sig"><span class="kw">class</span> mlpipelineholder.ResolvedInspectionCall(args, kwargs, arguments, sources, callable, function_name, block_name, node_name, strict_mode, allow_mutable_objects)</div>
+<p><code>args</code> and <code>kwargs</code> are the exact invocation shape. <code>arguments</code> is the signature-bound view with defaults applied, and <code>sources</code> maps original parameter names to <a class="anchor" href="#resolutionsource"><code>ResolutionSource</code></a> records or corresponding variadic collections.</p>
 
 <h3 class="class-name" id="blockargsregistration">BlockArgsRegistration</h3>
 <p class="class-desc">Block-scoped ordered items used to build <code>*args</code> for specific functions.</p>

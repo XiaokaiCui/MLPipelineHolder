@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import __main__
 from dataclasses import dataclass
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
 import pickle
 import shutil
@@ -11,7 +11,12 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
+from mlpipelineholder import (
+    PersistenceError,
+    PipelineHandler,
+    ResolutionError,
+    rename_args,
+)
 from mlpipelineholder.core.models import RunRecord, RuntimeCallableReference, RuntimeValueReference
 
 
@@ -57,9 +62,119 @@ def call_with_value(target_callable, value: int) -> int:
     return target_callable(value)
 
 
+def raw_increment(seed: int = 0, step: int = 1) -> int:
+    return seed + step
+
+
 class SaveLoadTests(unittest.TestCase):
     def local_callable(self, value):
         return value + 1
+
+    def test_rename_args_round_trips_as_registration_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "rename",
+                {"raw_value": 10},
+                root / "project",
+            )
+            block = pipeline.add_block("increment", 1)
+            block.register_function(
+                rename_args(raw_increment, {"seed": "raw_value"}),
+                ["result"],
+            )
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result"), 11)
+
+            bundle = root / "bundle"
+            pipeline.save_pipeline(bundle)
+            loaded = PipelineHandler.load_pipeline(
+                bundle,
+                forced_deleting=True,
+                trust_project=True,
+            )
+            loaded.run_all()
+
+            registration = loaded.get_block("increment").functions[0]
+            self.assertEqual(registration.param_mapping, {"seed": "raw_value"})
+            self.assertEqual(loaded.get_value("result"), 11)
+
+    def test_nested_rename_args_composes_and_round_trips(self) -> None:
+        nested = rename_args(
+            rename_args(raw_increment, {"seed": "first_name"}),
+            {"first_name": "second_name"},
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "nested-rename",
+                {"second_name": 10},
+                root / "project",
+            )
+            block = pipeline.add_block("increment", 1)
+            registration = block.register_function(nested, ["result"])
+
+            self.assertEqual(nested(second_name=4), 5)
+            self.assertEqual(registration.callable_obj, raw_increment)
+            self.assertEqual(registration.param_mapping, {"seed": "second_name"})
+
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result"), 11)
+
+            bundle = root / "bundle"
+            pipeline.save_pipeline(bundle)
+            loaded = PipelineHandler.load_pipeline(
+                bundle,
+                forced_deleting=True,
+                trust_project=True,
+            )
+            loaded_registration = loaded.get_block("increment").functions[0]
+            self.assertEqual(
+                loaded_registration.param_mapping,
+                {"seed": "second_name"},
+            )
+            loaded.run_all()
+            self.assertEqual(loaded.get_value("result"), 11)
+
+    def test_rename_args_preserves_explicit_identity_mapping_in_strict_mode(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "rename-strict",
+                {"seed": 10},
+                Path(temp_dir),
+                strict_mode=True,
+            )
+            block = pipeline.add_block("increment", 1)
+            registration = block.register_function(
+                rename_args(raw_increment, {"seed": "raw_value"}),
+                ["result"],
+                param_mapping={"raw_value": "seed"},
+            )
+
+            pipeline.run_all()
+
+            self.assertEqual(registration.param_mapping, {"seed": "seed"})
+            self.assertEqual(pipeline.get_value("result"), 11)
+
+    def test_outer_decorator_around_rename_args_is_not_discarded(self) -> None:
+        renamed = rename_args(raw_increment, {"seed": "raw_value"})
+
+        @wraps(renamed)
+        def doubled(*args: Any, **kwargs: Any) -> int:
+            return 2 * renamed(*args, **kwargs)
+
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "rename-decorated",
+                {"raw_value": 10},
+                Path(temp_dir),
+            )
+            block = pipeline.add_block("increment", 1)
+            block.register_function(doubled, ["result"])
+
+            pipeline.run_all()
+
+            self.assertEqual(pipeline.get_value("result"), 22)
 
     def test_loading_requires_explicit_trust_before_accessing_project(self) -> None:
         loaders: tuple[Any, ...] = (

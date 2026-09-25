@@ -3,28 +3,58 @@ from __future__ import annotations
 import ast
 import builtins
 import inspect
+import math
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from textwrap import dedent
 from typing import TYPE_CHECKING, Any, Final
 
-from ..exceptions import ExecutionError, RegistrationError, ResolutionError
+from ..exceptions import (
+    ExecutionError,
+    InspectionCopyError,
+    PersistenceError,
+    RegistrationError,
+    ResolutionError,
+)
+from ..integrations.optuna.support import (
+    OPTUNA_STUDY_SERIALIZER,
+    is_optuna_sampler,
+    is_optuna_study,
+)
+from .inspection import (
+    DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    InspectionCopier,
+    InspectionCopyCandidate,
+    inspection_memory_failure,
+    preflight_protected_inspection,
+)
 from .function_registry import (
     callable_identity_matches,
     callable_signature,
+    default_map,
+    effective_variadic_names,
     infer_declared_output_count,
     inspect_exposed_input_names,
     inspect_input_names,
+    normalize_renamed_registration,
     rename_args,
     resolve_callable,
 )
 from ..core.models import (
+    ArtifactRecord,
     BlockArgsRegistration,
     BlockKwargsRegistration,
     ExpressionRegistration,
     FunctionExecutionResult,
     FunctionRegistration,
+    ResolutionSource,
+    ResolvedInspectionCall,
 )
 from ..core.naming import validate_registration_name
+from ..state.output_pointers import (
+    OutputPointer,
+    resolve_pointer_chain,
+)
 
 if TYPE_CHECKING:
     from ..pipeline_holder import PipelineHolder
@@ -342,7 +372,25 @@ class ExecutionBlock:
                 if dict(existing.mapping_dct) == dict(mapping_dct):
                     return existing
             registration = BlockKwargsRegistration(name=name, mapping_dct=dict(mapping_dct))
+            previous = self.registered_kwargs.get(name)
             self.registered_kwargs[name] = registration
+            try:
+                for consumer in self.functions:
+                    if not isinstance(consumer, FunctionRegistration):
+                        continue
+                    _, effective_kw_name = effective_variadic_names(
+                        consumer.callable_obj,
+                        var_pos_name=consumer.var_pos_name,
+                        var_kw_name=consumer.var_kw_name,
+                    )
+                    if effective_kw_name == name:
+                        self._strict_validate_registration(consumer)
+            except RegistrationError:
+                if previous is None:
+                    del self.registered_kwargs[name]
+                else:
+                    self.registered_kwargs[name] = previous
+                raise
             self._invalidate_helper_consumers(name, is_args=False)
             return registration
         except RegistrationError as exc:
@@ -352,23 +400,23 @@ class ExecutionBlock:
             return None
 
     def _invalidate_helper_consumers(self, name: str, *, is_args: bool) -> None:
-        consumers = [
-            registration
-            for registration in self.functions
-            if isinstance(registration, FunctionRegistration)
-            and (
-                registration.var_pos_name == name
-                if is_args
-                else registration.var_kw_name == name
+        consumers: list[FunctionRegistration] = []
+        for registration in self.functions:
+            if not isinstance(registration, FunctionRegistration):
+                continue
+            effective_pos_name, effective_kw_name = effective_variadic_names(
+                registration.callable_obj,
+                var_pos_name=registration.var_pos_name,
+                var_kw_name=registration.var_kw_name,
             )
-        ]
+            effective_name = effective_pos_name if is_args else effective_kw_name
+            if effective_name == name:
+                consumers.append(registration)
         output_names = [
             output_name
             for registration in consumers
             for output_name in registration.produced_output_names
         ]
-        if not output_names:
-            return
         for registration in consumers:
             if is_args:
                 registration.args_registration_state = list(
@@ -378,6 +426,9 @@ class ExecutionBlock:
                 registration.kwargs_registration_state = dict(
                     self.registered_kwargs[name].mapping_dct
                 )
+            registration.input_names = self._function_input_names(registration)
+        if not output_names:
+            return
         self.parent._erase_overridden_node_outputs(
             self.registration_name,
             self.execution_priority,
@@ -403,6 +454,14 @@ class ExecutionBlock:
             raise RegistrationError(
                 "Ignored output marker '_' cannot be included in save_to_disk"
             )
+        function_or_path, param_mapping, var_pos_name, var_kw_name = (
+            normalize_renamed_registration(
+                function_or_path,
+                param_mapping,
+                var_pos_name,
+                var_kw_name,
+            )
+        )
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         existing_registration = next(
             (
@@ -491,9 +550,14 @@ class ExecutionBlock:
         new_produced_output_names = [
             output_name for output_name in new_output_names if output_name != "_"
         ]
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            callable_obj,
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
+        )
         args_state, kwargs_state = self._variadic_registration_state(
-            var_pos_name,
-            var_kw_name,
+            effective_pos_name,
+            effective_kw_name,
         )
         normalized_overrides = self.parent._normalize_overridden_outputs(
             new_produced_output_names,
@@ -608,9 +672,14 @@ class ExecutionBlock:
 
         callable_obj, import_path, function_name = resolve_callable(function_or_path)
         declared_output_count = infer_declared_output_count(callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            callable_obj,
+            var_pos_name=var_pos_name,
+            var_kw_name=var_kw_name,
+        )
         args_state, kwargs_state = self._variadic_registration_state(
-            var_pos_name,
-            var_kw_name,
+            effective_pos_name,
+            effective_kw_name,
         )
         if not output_names and declared_output_count is not None and declared_output_count > 0:
             if not getattr(self.parent, "suppress_registration_advisories", False):
@@ -708,15 +777,28 @@ class ExecutionBlock:
             var_kw_name=None if strict else registration.var_kw_name,
             strict_mode=strict,
         )
-        if not strict:
-            return input_names
-        explicit_variadic_names = list(registration.args_registration_state or [])
-        explicit_variadic_names.extend(
-            (registration.kwargs_registration_state or {}).values()
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
         )
-        for input_name in explicit_variadic_names:
-            if input_name not in input_names:
-                input_names.append(input_name)
+        variadic_dependencies = (
+            (effective_pos_name, registration.args_registration_state),
+            (
+                effective_kw_name,
+                None
+                if registration.kwargs_registration_state is None
+                else list(registration.kwargs_registration_state.values()),
+            ),
+        )
+        for helper_name, dependencies in variadic_dependencies:
+            if dependencies is None:
+                continue
+            if helper_name in input_names:
+                input_names.remove(helper_name)
+            for input_name in dependencies:
+                if input_name not in input_names:
+                    input_names.append(input_name)
         return input_names
 
     def _warn_on_disk_backed_input_persistence_pitfall(
@@ -786,9 +868,16 @@ class ExecutionBlock:
             )
 
         # Check 8: a kwargs_dct key conflicts with an explicit function argument.
-        kwargs_registration = None
-        if registration.var_kw_name is not None:
-            kwargs_registration = self.registered_kwargs.get(registration.var_kw_name)
+        _, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
+        kwargs_registration = (
+            None
+            if effective_kw_name is None
+            else self.registered_kwargs.get(effective_kw_name)
+        )
         if kwargs_registration is not None:
             for key in kwargs_registration.mapping_dct:
                 if key in explicit_params:
@@ -887,6 +976,1111 @@ class ExecutionBlock:
                 else registration.produced_output_names
             )
         }
+
+    def inspect(
+        self,
+        function_name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        strict_mode: bool | None = None,
+        resolve_only: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    ) -> Any:
+        """Resolve and optionally invoke one registration without committing outputs."""
+        return self._inspect_registration(
+            function_name=function_name,
+            overrides=overrides,
+            strict_mode=strict_mode,
+            resolve_only=resolve_only,
+            allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
+            node_name=self.registration_name,
+        )
+
+    def _inspect_registration(
+        self,
+        *,
+        function_name: str | None,
+        overrides: dict[str, Any] | None,
+        strict_mode: bool | None,
+        resolve_only: bool,
+        allow_mutable_objects: bool,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+        node_name: str,
+        upstream_outputs: dict[str, Any] | None = None,
+        previous_outputs: dict[str, Any] | None = None,
+    ) -> Any:
+        if self.parent.nodes_by_name.get(self.registration_name) is not self:
+            raise RegistrationError(
+                f"Block '{self.registration_name}' is no longer attached to pipeline "
+                f"'{self.parent.registration_name}'"
+            )
+        if strict_mode is not None and not isinstance(strict_mode, bool):
+            raise TypeError("strict_mode must be a boolean or None")
+        if not isinstance(resolve_only, bool):
+            raise TypeError("resolve_only must be a boolean")
+        if not isinstance(allow_mutable_objects, bool):
+            raise TypeError("allow_mutable_objects must be a boolean")
+        try:
+            normalized_memory_safety_margin = float(memory_safety_margin)
+        except (TypeError, ValueError, OverflowError):
+            normalized_memory_safety_margin = float("nan")
+        if (
+            isinstance(memory_safety_margin, bool)
+            or not isinstance(memory_safety_margin, (int, float))
+            or not math.isfinite(normalized_memory_safety_margin)
+            or normalized_memory_safety_margin < 0
+        ):
+            raise TypeError(
+                "memory_safety_margin must be a finite non-negative number"
+            )
+        memory_safety_margin = normalized_memory_safety_margin
+        inspection_overrides = dict(overrides or {})
+        registration = self._select_inspection_registration(
+            function_name,
+            inspection_overrides,
+        )
+        effective_strict = (
+            self.parent._root_pipeline().strict_mode
+            if strict_mode is None
+            else strict_mode
+        )
+        self._validate_selected_inspection_dependencies(
+            registration,
+            inspection_overrides,
+            strict_mode=effective_strict,
+        )
+        visible_outputs, visible_constants, previous_names, parent_config = (
+            self._build_inspection_environment(
+                upstream_outputs=upstream_outputs,
+                previous_outputs=previous_outputs,
+            )
+        )
+        copier = InspectionCopier(
+            self.parent.logger,
+            allow_mutable_objects=allow_mutable_objects,
+        )
+        if isinstance(registration, FunctionRegistration):
+            resolved = self._resolve_inspected_registration(
+                registration,
+                inspection_overrides,
+                strict_mode=effective_strict,
+                allow_mutable_objects=allow_mutable_objects,
+                memory_safety_margin=memory_safety_margin,
+                visible_outputs=visible_outputs,
+                visible_constants=visible_constants,
+                previous_names=previous_names,
+                parent_config=parent_config,
+                copier=copier,
+                node_name=node_name,
+            )
+            if resolve_only:
+                return resolved
+            try:
+                return self.parent._capture_prints(
+                    registration.callable_obj,
+                    *resolved.args,
+                    **resolved.kwargs,
+                )
+            except MemoryError as exc:
+                raise inspection_memory_failure(
+                    node_name=node_name,
+                    function_name=registration.function_name,
+                    parameter_name=None,
+                    stage="executing the inspected function",
+                    copy_started=copier.copy_started,
+                ) from exc
+            except ResolutionError:
+                raise
+            except Exception as exc:
+                callable_label = registration.import_path or registration.function_name
+                raise ExecutionError(
+                    f"Function '{registration.function_name}' ({callable_label}) in "
+                    f"block '{self.registration_name}' failed during inspection: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+        resolved, namespace = self._resolve_inspected_expression(
+            registration,
+            inspection_overrides,
+            strict_mode=effective_strict,
+            allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
+            visible_outputs=visible_outputs,
+            visible_constants=visible_constants,
+            previous_names=previous_names,
+            parent_config=parent_config,
+            copier=copier,
+            node_name=node_name,
+        )
+        if resolve_only:
+            return resolved
+        try:
+            self.parent._capture_prints(
+                self._run_expression_code,
+                registration.code,
+                namespace,
+            )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=registration.function_name,
+                parameter_name=None,
+                stage="executing the inspected expression",
+                copy_started=copier.copy_started,
+            ) from exc
+        except ResolutionError:
+            raise
+        except Exception as exc:
+            raise ExecutionError(
+                f"Expression in block '{self.registration_name}' failed during "
+                f"inspection: {type(exc).__name__}: {exc}"
+            ) from exc
+        values = [namespace[name] for name in registration.output_names]
+        if not values:
+            return None
+        if len(values) == 1:
+            return values[0]
+        return tuple(values)
+
+    def _resolve_inspected_registration(
+        self,
+        registration: FunctionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        memory_safety_margin: float,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+    ) -> ResolvedInspectionCall:
+        if not allow_mutable_objects:
+            candidates: list[InspectionCopyCandidate] = []
+            self._resolve_inspection_callable(
+                registration,
+                overrides,
+                strict_mode=strict_mode,
+                allow_mutable_objects=allow_mutable_objects,
+                visible_outputs=visible_outputs,
+                visible_constants=visible_constants,
+                previous_names=previous_names,
+                parent_config=parent_config,
+                copier=copier,
+                node_name=node_name,
+                materialize=False,
+                planning=True,
+                candidates=candidates,
+            )
+            self._preflight_inspection_memory(
+                candidates,
+                node_name=node_name,
+                function_name=registration.function_name,
+                safety_margin=memory_safety_margin,
+            )
+        return self._resolve_inspection_callable(
+            registration,
+            overrides,
+            strict_mode=strict_mode,
+            allow_mutable_objects=allow_mutable_objects,
+            visible_outputs=visible_outputs,
+            visible_constants=visible_constants,
+            previous_names=previous_names,
+            parent_config=parent_config,
+            copier=copier,
+            node_name=node_name,
+        )
+
+    def _resolve_inspected_expression(
+        self,
+        registration: ExpressionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        memory_safety_margin: float,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+    ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
+        runtime_namespace: dict[str, Any] | None = None
+        if not allow_mutable_objects:
+            runtime_namespace = self.parent._build_expression_runtime_namespace(
+                cache=False
+            )
+            candidates: list[InspectionCopyCandidate] = []
+            self._resolve_inspection_expression(
+                registration,
+                overrides,
+                strict_mode=strict_mode,
+                allow_mutable_objects=allow_mutable_objects,
+                visible_outputs=visible_outputs,
+                visible_constants=visible_constants,
+                previous_names=previous_names,
+                parent_config=parent_config,
+                copier=copier,
+                node_name=node_name,
+                materialize=False,
+                planning=True,
+                candidates=candidates,
+                runtime_namespace=runtime_namespace,
+            )
+            self._preflight_inspection_memory(
+                candidates,
+                node_name=node_name,
+                function_name=registration.function_name,
+                safety_margin=memory_safety_margin,
+            )
+        return self._resolve_inspection_expression(
+            registration,
+            overrides,
+            strict_mode=strict_mode,
+            allow_mutable_objects=allow_mutable_objects,
+            visible_outputs=visible_outputs,
+            visible_constants=visible_constants,
+            previous_names=previous_names,
+            parent_config=parent_config,
+            copier=copier,
+            node_name=node_name,
+            runtime_namespace=runtime_namespace,
+        )
+
+    def _preflight_inspection_memory(
+        self,
+        candidates: list[InspectionCopyCandidate],
+        *,
+        node_name: str,
+        function_name: str,
+        safety_margin: float,
+    ) -> None:
+        preflight_protected_inspection(
+            candidates,
+            node_name=node_name,
+            function_name=function_name,
+            safety_margin=safety_margin,
+            pointer_reader=self._inspection_pointer_terminal,
+        )
+
+    def _inspection_pointer_terminal(self, pointer: OutputPointer) -> Any:
+        _, terminal = resolve_pointer_chain(
+            pointer.destination,
+            self.parent._root_pipeline()._read_output_address,
+        )
+        return terminal
+
+    def _select_inspection_registration(
+        self,
+        function_name: str | None,
+        overrides: dict[str, Any],
+    ) -> FunctionRegistration | ExpressionRegistration:
+        if not self.functions:
+            raise RegistrationError(
+                f"Block '{self.registration_name}' has no registered functions or expressions"
+            )
+        if len(self.functions) == 1:
+            registration = self.functions[0]
+            if function_name is not None and registration.function_name != function_name:
+                raise RegistrationError(
+                    f"Block '{self.registration_name}' has no registration named "
+                    f"'{function_name}'"
+                )
+            self._validate_inspection_override_names(registration, overrides)
+            return registration
+        if function_name is None:
+            names = [registration.function_name for registration in self.functions]
+            raise RegistrationError(
+                f"Block '{self.registration_name}' contains multiple registered functions "
+                f"{names}; function_name is required"
+            )
+        matches = [
+            registration
+            for registration in self.functions
+            if registration.function_name == function_name
+        ]
+        if not matches:
+            raise RegistrationError(
+                f"Block '{self.registration_name}' has no registration named "
+                f"'{function_name}'"
+            )
+        if len(matches) == 1:
+            self._validate_inspection_override_names(matches[0], overrides)
+            return matches[0]
+        function_matches = [
+            match for match in matches if isinstance(match, FunctionRegistration)
+        ]
+        if len(function_matches) != len(matches):
+            raise RegistrationError(
+                f"Registration name '{function_name}' is ambiguous in block "
+                f"'{self.registration_name}'"
+            )
+        callable_obj = function_matches[0].callable_obj
+        if any(
+            match.callable_obj is not callable_obj
+            for match in function_matches[1:]
+        ):
+            raise RegistrationError(
+                f"Multiple registrations named '{function_name}' refer to different "
+                "callable objects"
+            )
+        self._validate_inspection_override_names(function_matches[0], overrides)
+        descriptors = [
+            self._inspection_binding_descriptors(match, overrides)
+            for match in function_matches
+        ]
+        differing = sorted(
+            parameter_name
+            for parameter_name in descriptors[0]
+            if any(
+                descriptor.get(parameter_name) != descriptors[0].get(parameter_name)
+                for descriptor in descriptors[1:]
+            )
+        )
+        if differing:
+            raise RegistrationError(
+                f"Multiple registrations named '{function_name}' have different input "
+                f"bindings for {differing}; override those original callable parameters "
+                "to select deterministically"
+            )
+        return function_matches[0]
+
+    def _validate_inspection_override_names(
+        self,
+        registration: FunctionRegistration | ExpressionRegistration,
+        overrides: dict[str, Any],
+    ) -> None:
+        if isinstance(registration, FunctionRegistration):
+            accepted = set(callable_signature(registration.callable_obj).parameters)
+        else:
+            accepted = set(self._effective_expression_input_names(registration))
+        unknown = sorted(set(overrides).difference(accepted))
+        if unknown:
+            raise ResolutionError(
+                f"Unknown inspection override(s) {unknown} for "
+                f"'{registration.function_name}'; accepted names are {sorted(accepted)}"
+            )
+
+    def _inspection_binding_descriptors(
+        self,
+        registration: FunctionRegistration,
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        descriptors: dict[str, Any] = {}
+        signature = callable_signature(registration.callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
+        for parameter in signature.parameters.values():
+            if parameter.name in overrides:
+                descriptors[parameter.name] = ("inspection_override",)
+            elif parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                helper = (
+                    self.registered_args.get(effective_pos_name)
+                    if effective_pos_name is not None
+                    else None
+                )
+                descriptors[parameter.name] = (
+                    "registered_args",
+                    None if helper is None else tuple(helper.ordered_items),
+                    effective_pos_name,
+                )
+            elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                helper = (
+                    self.registered_kwargs.get(effective_kw_name)
+                    if effective_kw_name is not None
+                    else None
+                )
+                descriptors[parameter.name] = (
+                    "registered_kwargs",
+                    None
+                    if helper is None
+                    else tuple(sorted(helper.mapping_dct.items())),
+                    effective_kw_name,
+                )
+            elif parameter.name in registration.param_mapping:
+                descriptors[parameter.name] = (
+                    "mapped",
+                    registration.param_mapping[parameter.name],
+                )
+            else:
+                descriptors[parameter.name] = ("implicit", parameter.name)
+        return descriptors
+
+    def _validate_selected_inspection_dependencies(
+        self,
+        registration: FunctionRegistration | ExpressionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+    ) -> None:
+        if isinstance(registration, ExpressionRegistration):
+            input_names = set(self._effective_expression_input_names(registration))
+            input_names.difference_update(overrides)
+            output_names = set(registration.output_names)
+        else:
+            input_names = self._inspection_pipeline_input_names(
+                registration,
+                overrides,
+                strict_mode=strict_mode,
+            )
+            output_names = set(registration.produced_output_names)
+        same_block_dependencies = self.declared_outputs().difference(
+            output_names
+        ).intersection(input_names)
+        if same_block_dependencies:
+            raise ExecutionError(
+                f"Function '{registration.function_name}' depends on outputs from the "
+                "same block, which cannot be resolved during parallel execution: "
+                f"{sorted(same_block_dependencies)}"
+            )
+
+    def _inspection_pipeline_input_names(
+        self,
+        registration: FunctionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+    ) -> set[str]:
+        names: set[str] = set()
+        signature = callable_signature(registration.callable_obj)
+        effective_pos_name, effective_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
+        for parameter in signature.parameters.values():
+            if parameter.name in overrides:
+                continue
+            if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                helper = (
+                    self.registered_args.get(effective_pos_name)
+                    if effective_pos_name is not None
+                    else None
+                )
+                if helper is not None:
+                    names.update(helper.ordered_items)
+                elif not strict_mode:
+                    names.add(effective_pos_name or parameter.name)
+                continue
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                helper = (
+                    self.registered_kwargs.get(effective_kw_name)
+                    if effective_kw_name is not None
+                    else None
+                )
+                if helper is not None:
+                    names.update(helper.mapping_dct.values())
+                elif not strict_mode:
+                    names.add(effective_kw_name or parameter.name)
+                continue
+            if parameter.name in registration.param_mapping:
+                mapped = registration.param_mapping[parameter.name]
+                if mapped is not None:
+                    names.add(mapped)
+            elif not strict_mode and parameter.name != "logger":
+                names.add(parameter.name)
+        return names
+
+    def _build_inspection_environment(
+        self,
+        *,
+        upstream_outputs: dict[str, Any] | None,
+        previous_outputs: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], set[str], dict[str, Any]]:
+        visible_outputs = self.parent._visible_outputs_before_priority(
+            self.execution_priority,
+            upstream_outputs=upstream_outputs,
+        )
+        visible_constants = self.parent._visible_manual_values_before_priority(
+            self.execution_priority
+        )
+        for constant_name in visible_constants:
+            visible_outputs.pop(constant_name, None)
+        previous = dict(
+            self.parent.producer_outputs.get(self.registration_name, {})
+            if previous_outputs is None
+            else previous_outputs
+        )
+        visible_outputs.update(previous)
+        return (
+            visible_outputs,
+            visible_constants,
+            set(previous),
+            self.parent._ancestor_config_values(),
+        )
+
+    def _resolve_inspection_callable(
+        self,
+        registration: FunctionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
+    ) -> ResolvedInspectionCall:
+        signature = callable_signature(registration.callable_obj)
+        parameters = list(signature.parameters.values())
+        effective_var_pos_name, effective_var_kw_name = effective_variadic_names(
+            registration.callable_obj,
+            var_pos_name=registration.var_pos_name,
+            var_kw_name=registration.var_kw_name,
+        )
+        resolver_defaults = (
+            {} if strict_mode else default_map(registration.callable_obj)
+        )
+        var_pos_index = next(
+            (
+                index
+                for index, parameter in enumerate(parameters)
+                if parameter.kind == inspect.Parameter.VAR_POSITIONAL
+            ),
+            None,
+        )
+        positional_args: list[Any] = []
+        keyword_args: dict[str, Any] = {}
+        sources: dict[str, Any] = {}
+        loaded_artifacts: list[str] = []
+        declared_output_names = set(visible_outputs).union(
+            self.parent.list_declared_outputs(),
+            self.declared_outputs(),
+        )
+
+        for index, parameter in enumerate(parameters):
+            if parameter.name in overrides:
+                value = overrides[parameter.name]
+                source = ResolutionSource(
+                    kind="inspect_override",
+                    name=parameter.name,
+                    mapped_from=parameter.name,
+                )
+                if parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                    if not isinstance(value, (list, tuple)):
+                        raise ResolutionError(
+                            f"Inspection override for variadic parameter "
+                            f"'{parameter.name}' must be a list or tuple"
+                        )
+                    positional_args.extend(value)
+                    sources[parameter.name] = source
+                    continue
+                if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                    if not isinstance(value, dict):
+                        raise ResolutionError(
+                            f"Inspection override for variadic parameter "
+                            f"'{parameter.name}' must be a dictionary"
+                        )
+                    overlap = set(value).intersection(keyword_args)
+                    if overlap:
+                        raise ResolutionError(
+                            f"Inspection override for variadic parameter "
+                            f"'{parameter.name}' conflicts with explicit arguments: "
+                            f"{sorted(overlap)}"
+                        )
+                    keyword_args.update(value)
+                    sources[parameter.name] = source
+                    continue
+                sources[parameter.name] = source
+            elif parameter.kind == inspect.Parameter.VAR_POSITIONAL:
+                helper = (
+                    self.registered_args.get(effective_var_pos_name)
+                    if effective_var_pos_name is not None
+                    else None
+                )
+                if helper is not None:
+                    positional_values: list[Any] = []
+                    positional_sources: list[ResolutionSource] = []
+                    for input_name in helper.ordered_items:
+                        value, item_source = self._resolve_and_copy_inspection_input(
+                            input_name,
+                            parameter.name,
+                            registration,
+                            visible_outputs,
+                            visible_constants,
+                            previous_names,
+                            parent_config,
+                            resolver_defaults,
+                            loaded_artifacts,
+                            declared_output_names,
+                            copier,
+                            node_name=node_name,
+                            materialize=materialize,
+                            planning=planning,
+                            candidates=candidates,
+                        )
+                        positional_values.append(value)
+                        positional_sources.append(
+                            replace(item_source, kind="registered_args")
+                        )
+                    positional_args.extend(positional_values)
+                    sources[parameter.name] = tuple(positional_sources)
+                elif strict_mode:
+                    sources[parameter.name] = tuple()
+                else:
+                    input_name = effective_var_pos_name or parameter.name
+                    value, source = self._resolve_and_copy_inspection_input(
+                        input_name,
+                        parameter.name,
+                        registration,
+                        visible_outputs,
+                        visible_constants,
+                        previous_names,
+                        parent_config,
+                        resolver_defaults,
+                        loaded_artifacts,
+                        declared_output_names,
+                        copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
+                        expected_container_kind="sequence",
+                        allow_missing=True,
+                        missing_value=[],
+                    )
+                    if planning and isinstance(value, (ArtifactRecord, OutputPointer)):
+                        sources[parameter.name] = source
+                        continue
+                    if not isinstance(value, (list, tuple)):
+                        raise ResolutionError(
+                            f"Variadic positional argument '{input_name}' for function "
+                            f"'{registration.function_name}' must resolve to a list or tuple"
+                        )
+                    positional_args.extend(value)
+                    sources[parameter.name] = source
+                continue
+            elif parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                helper = (
+                    self.registered_kwargs.get(effective_var_kw_name)
+                    if effective_var_kw_name is not None
+                    else None
+                )
+                if helper is not None:
+                    keyword_values: dict[str, Any] = {}
+                    keyword_sources: dict[str, ResolutionSource] = {}
+                    for key, input_name in helper.mapping_dct.items():
+                        value, item_source = self._resolve_and_copy_inspection_input(
+                            input_name,
+                            parameter.name,
+                            registration,
+                            visible_outputs,
+                            visible_constants,
+                            previous_names,
+                            parent_config,
+                            resolver_defaults,
+                            loaded_artifacts,
+                            declared_output_names,
+                            copier,
+                            node_name=node_name,
+                            materialize=materialize,
+                            planning=planning,
+                            candidates=candidates,
+                        )
+                        keyword_values[key] = value
+                        keyword_sources[key] = replace(
+                            item_source,
+                            kind="registered_kwargs",
+                        )
+                    overlap = set(keyword_values).intersection(keyword_args)
+                    if overlap:
+                        raise ResolutionError(
+                            f"Variadic keyword argument '{parameter.name}' conflicts "
+                            f"with explicit arguments: {sorted(overlap)}"
+                        )
+                    keyword_args.update(keyword_values)
+                    sources[parameter.name] = keyword_sources
+                elif strict_mode:
+                    sources[parameter.name] = {}
+                else:
+                    input_name = effective_var_kw_name or parameter.name
+                    value, source = self._resolve_and_copy_inspection_input(
+                        input_name,
+                        parameter.name,
+                        registration,
+                        visible_outputs,
+                        visible_constants,
+                        previous_names,
+                        parent_config,
+                        resolver_defaults,
+                        loaded_artifacts,
+                        declared_output_names,
+                        copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
+                        expected_container_kind="mapping",
+                        allow_missing=True,
+                        missing_value={},
+                    )
+                    if planning and isinstance(value, (ArtifactRecord, OutputPointer)):
+                        sources[parameter.name] = source
+                        continue
+                    if not isinstance(value, dict):
+                        raise ResolutionError(
+                            f"Variadic keyword argument '{input_name}' for function "
+                            f"'{registration.function_name}' must resolve to a dict"
+                        )
+                    overlap = set(value).intersection(keyword_args)
+                    if overlap:
+                        raise ResolutionError(
+                            f"Variadic keyword argument '{input_name}' conflicts with "
+                            f"explicit arguments: {sorted(overlap)}"
+                        )
+                    keyword_args.update(value)
+                    sources[parameter.name] = source
+                continue
+            elif parameter.name in registration.param_mapping:
+                input_name = registration.param_mapping[parameter.name]
+                if input_name is None:
+                    value = None
+                    source = ResolutionSource(
+                        kind="registered_value",
+                        name=parameter.name,
+                        mapped_from=parameter.name,
+                    )
+                else:
+                    value, source = self._resolve_and_copy_inspection_input(
+                        input_name,
+                        parameter.name,
+                        registration,
+                        visible_outputs,
+                        visible_constants,
+                        previous_names,
+                        parent_config,
+                        resolver_defaults,
+                        loaded_artifacts,
+                        declared_output_names,
+                        copier,
+                        node_name=node_name,
+                        materialize=materialize,
+                        planning=planning,
+                        candidates=candidates,
+                    )
+                sources[parameter.name] = source
+            elif strict_mode:
+                if parameter.name == "logger":
+                    source = ResolutionSource(kind="logger", name="logger")
+                    value, source = self._prepare_inspection_value(
+                        self.parent.logger,
+                        parameter_name=parameter.name,
+                        source=source,
+                        copier=copier,
+                        node_name=node_name,
+                        function_name=registration.function_name,
+                        planning=planning,
+                        candidates=candidates,
+                    )
+                elif parameter.default is not inspect.Parameter.empty:
+                    source = ResolutionSource(
+                        kind="function_default",
+                        name=parameter.name,
+                    )
+                    value, source = self._prepare_inspection_value(
+                        parameter.default,
+                        parameter_name=parameter.name,
+                        source=source,
+                        copier=copier,
+                        node_name=node_name,
+                        function_name=registration.function_name,
+                        planning=planning,
+                        candidates=candidates,
+                    )
+                else:
+                    raise ResolutionError(
+                        f"Cannot resolve argument '{parameter.name}' for function "
+                        f"'{registration.function_name}': strict mode requires an "
+                        "explicit mapping, inspection override, or callable default"
+                    )
+                sources[parameter.name] = source
+            else:
+                value, source = self._resolve_and_copy_inspection_input(
+                    parameter.name,
+                    parameter.name,
+                    registration,
+                    visible_outputs,
+                    visible_constants,
+                    previous_names,
+                    parent_config,
+                    resolver_defaults,
+                    loaded_artifacts,
+                    declared_output_names,
+                    copier,
+                    node_name=node_name,
+                    materialize=materialize,
+                    planning=planning,
+                    candidates=candidates,
+                )
+                sources[parameter.name] = source
+
+            if parameter.kind == inspect.Parameter.POSITIONAL_ONLY or (
+                parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and var_pos_index is not None
+                and index < var_pos_index
+            ):
+                positional_args.append(value)
+            else:
+                keyword_args[parameter.name] = value
+
+        try:
+            bound = signature.bind(*positional_args, **keyword_args)
+            bound.apply_defaults()
+        except TypeError as exc:
+            raise ResolutionError(
+                f"Cannot bind resolved arguments for function "
+                f"'{registration.function_name}' in block "
+                f"'{self.registration_name}': {exc}"
+            ) from exc
+        return ResolvedInspectionCall(
+            args=tuple(positional_args),
+            kwargs=keyword_args,
+            arguments=dict(bound.arguments),
+            sources=sources,
+            callable=registration.callable_obj,
+            function_name=registration.function_name,
+            block_name=self.registration_name,
+            node_name=node_name,
+            strict_mode=strict_mode,
+            allow_mutable_objects=allow_mutable_objects,
+        )
+
+    def _prepare_inspection_value(
+        self,
+        value: Any,
+        *,
+        parameter_name: str,
+        source: ResolutionSource,
+        copier: InspectionCopier,
+        node_name: str,
+        function_name: str,
+        planning: bool,
+        candidates: list[InspectionCopyCandidate] | None,
+        caller_owned: bool = False,
+        expected_container_kind: str | None = None,
+    ) -> tuple[Any, ResolutionSource]:
+        if planning:
+            if (
+                is_optuna_study(value)
+                or is_optuna_sampler(value)
+                or (
+                    isinstance(value, ArtifactRecord)
+                    and (
+                        value.serializer == OPTUNA_STUDY_SERIALIZER
+                        or value.metadata.get("optuna_type") == "sampler"
+                    )
+                )
+                ):
+                raise InspectionCopyError(
+                    "This inspection input contains Optuna state (a study or sampler) "
+                    "whose shared state cannot be isolated by protected copying. "
+                    "To inspect it using its original state, call "
+                    "inspect(..., allow_mutable_objects=True)."
+                )
+            if candidates is not None and copier.requires_copy(
+                value,
+                caller_owned=caller_owned,
+            ):
+                candidates.append(
+                    InspectionCopyCandidate(
+                        parameter_name=parameter_name,
+                        value=value,
+                        expected_container_kind=expected_container_kind,
+                    )
+                )
+            return value, source
+        try:
+            return copier.prepare(
+                value,
+                parameter_name=parameter_name,
+                source=source,
+                caller_owned=caller_owned,
+            )
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+                value=value,
+                stage="copying",
+                copy_started=copier.copy_started,
+            ) from exc
+
+    def _resolve_and_copy_inspection_input(
+        self,
+        input_name: str,
+        parameter_name: str,
+        registration: FunctionRegistration | str,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        defaults: dict[str, Any],
+        loaded_artifacts: list[str],
+        declared_output_names: set[str],
+        copier: InspectionCopier,
+        *,
+        node_name: str = "",
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
+        expected_container_kind: str | None = None,
+        allow_missing: bool = False,
+        missing_value: Any = None,
+    ) -> tuple[Any, ResolutionSource]:
+        function_name = (
+            registration.function_name
+            if isinstance(registration, FunctionRegistration)
+            else registration
+        )
+        inspection_outputs = visible_outputs
+        pointer_materialized = False
+        try:
+            if input_name in previous_names:
+                previous_value = visible_outputs.get(input_name)
+                if isinstance(previous_value, OutputPointer) and materialize:
+                    inspection_outputs = dict(visible_outputs)
+                    inspection_outputs[input_name] = (
+                        self.parent._materialize_stored_value(previous_value, "")
+                    )
+                    pointer_materialized = True
+            value, source = self.parent._resolve_named_input_with_source(
+                input_name,
+                function_name,
+                {},
+                inspection_outputs,
+                parent_config,
+                defaults,
+                loaded_artifacts,
+                declared_output_names,
+                allow_missing=allow_missing,
+                missing_value=missing_value,
+                visible_constants=visible_constants,
+                same_node_previous_outputs=previous_names,
+                materialize=materialize,
+            )
+        except PersistenceError as exc:
+            if not isinstance(exc.__cause__, MemoryError):
+                raise
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+                stage="resolving or materialising",
+                copy_started=copier.copy_started,
+            ) from exc.__cause__
+        except MemoryError as exc:
+            raise inspection_memory_failure(
+                node_name=node_name,
+                function_name=function_name,
+                parameter_name=parameter_name,
+                stage="resolving or materialising",
+                copy_started=copier.copy_started,
+            ) from exc
+        source = replace(
+            source,
+            mapped_from=parameter_name,
+            materialized=source.materialized or pointer_materialized,
+        )
+        return self._prepare_inspection_value(
+            value,
+            parameter_name=parameter_name,
+            source=source,
+            copier=copier,
+            node_name=node_name,
+            function_name=function_name,
+            planning=planning,
+            candidates=candidates,
+            expected_container_kind=expected_container_kind,
+        )
+
+    def _resolve_inspection_expression(
+        self,
+        registration: ExpressionRegistration,
+        overrides: dict[str, Any],
+        *,
+        strict_mode: bool,
+        allow_mutable_objects: bool,
+        visible_outputs: dict[str, Any],
+        visible_constants: dict[str, Any],
+        previous_names: set[str],
+        parent_config: dict[str, Any],
+        copier: InspectionCopier,
+        node_name: str,
+        materialize: bool = True,
+        planning: bool = False,
+        candidates: list[InspectionCopyCandidate] | None = None,
+        runtime_namespace: dict[str, Any] | None = None,
+    ) -> tuple[ResolvedInspectionCall, dict[str, Any]]:
+        namespace = (
+            self.parent._build_expression_runtime_namespace(cache=False)
+            if runtime_namespace is None
+            else dict(runtime_namespace)
+        )
+        arguments: dict[str, Any] = {}
+        sources: dict[str, ResolutionSource] = {}
+        loaded_artifacts: list[str] = []
+        declared_output_names = set(visible_outputs).union(
+            self.parent.list_declared_outputs(),
+            self.declared_outputs(),
+        )
+        for input_name in self._effective_expression_input_names(registration):
+            if input_name in overrides:
+                value = overrides[input_name]
+                source = ResolutionSource(
+                    kind="inspect_override",
+                    name=input_name,
+                    mapped_from=input_name,
+                )
+            else:
+                value, source = self._resolve_and_copy_inspection_input(
+                    input_name,
+                    input_name,
+                    "expression",
+                    visible_outputs,
+                    visible_constants,
+                    previous_names,
+                    parent_config,
+                    {},
+                    loaded_artifacts,
+                    declared_output_names,
+                    copier,
+                    node_name=node_name,
+                    materialize=materialize,
+                    planning=planning,
+                    candidates=candidates,
+                )
+            arguments[input_name] = value
+            sources[input_name] = source
+            namespace[input_name] = value
+        namespace["logger"] = self.parent.logger
+        return (
+            ResolvedInspectionCall(
+                args=(),
+                kwargs={},
+                arguments=arguments,
+                sources=sources,
+                callable=None,
+                function_name="expression",
+                block_name=self.registration_name,
+                node_name=node_name,
+                strict_mode=strict_mode,
+                allow_mutable_objects=allow_mutable_objects,
+            ),
+            namespace,
+        )
 
     def execute(
         self,

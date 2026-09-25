@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.iml
 dist/
+docs/_build/
 uv.lock
 
 # Ignore markdown files except the pipeline creator skill

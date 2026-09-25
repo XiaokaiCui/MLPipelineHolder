@@ -70,6 +70,10 @@ from .exceptions import (
 )
 from .execution.arguments import ArgumentMixin
 from .execution.engine import EngineMixin
+from .execution.inspection import (
+    DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    InspectionMixin,
+)
 from .execution.function_registry import (
     _values_equal,
     callable_signature,
@@ -147,6 +151,7 @@ class PipelineHolder(
     AtomRegistrationMixin,
     DescriptionMixin,
     EngineMixin,
+    InspectionMixin,
     ArgumentMixin,
     SerializationMixin,
     SaveLoadMixin,
@@ -259,7 +264,7 @@ class PipelineHolder(
             )
             self._validate_backup_path_safety()
             if clean_directory and not generated_temp_root:
-                self._prepare_project_root()
+                self._prepare_project_directories()
             self.project_root.mkdir(parents=True, exist_ok=True)
             self.metadata_root = self.project_root / "metadata"
             self.metadata_root.mkdir(parents=True, exist_ok=True)
@@ -870,6 +875,130 @@ class PipelineHolder(
         if execution_priority is None:
             return -1
         return int(execution_priority)
+
+    def inspect_node(
+        self,
+        *,
+        node_name: str | None = None,
+        priority: int | float | None = None,
+        function_name: str | None = None,
+        overrides: dict[str, Any] | None = None,
+        strict_mode: bool | None = None,
+        resolve_only: bool = False,
+        allow_mutable_objects: bool = True,
+        memory_safety_margin: float = DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
+    ) -> Any:
+        """Inspect one immediate block or atom selected by name or exact priority."""
+        if node_name is None and priority is None:
+            raise ValueError("node_name or priority must be provided")
+        if node_name is not None and (
+            not isinstance(node_name, str) or not node_name.strip()
+        ):
+            raise ValueError("node_name must be a non-empty string")
+        selected_by_name = (
+            None if node_name is None else self.nodes_by_name.get(node_name)
+        )
+        if node_name is not None and selected_by_name is None:
+            raise ResolutionError(
+                f"Unknown immediate child node '{node_name}' in pipeline "
+                f"'{self.registration_name}'"
+            )
+
+        selected_by_priority: Any = None
+        if priority is not None:
+            if (
+                isinstance(priority, bool)
+                or not isinstance(priority, (int, float))
+                or not math.isfinite(float(priority))
+            ):
+                raise TypeError("priority must be a finite integer or float")
+            matches = [
+                node
+                for node in self.nodes
+                if node.execution_priority == priority
+            ]
+            if not matches:
+                raise ResolutionError(
+                    f"No immediate node has exact priority {priority} in pipeline "
+                    f"'{self.registration_name}'"
+                )
+            if len(matches) > 1:
+                raise ResolutionError(
+                    f"Multiple immediate nodes have exact priority {priority}; "
+                    "select one by node_name"
+                )
+            selected_by_priority = matches[0]
+
+        if (
+            selected_by_name is not None
+            and selected_by_priority is not None
+            and selected_by_name is not selected_by_priority
+        ):
+            raise ResolutionError(
+                f"node_name '{node_name}' and priority {priority} select different nodes"
+            )
+        selected: Any = (
+            selected_by_name
+            if selected_by_name is not None
+            else selected_by_priority
+        )
+        if selected is None:
+            raise ResolutionError("Cannot select an inspection node")
+        if isinstance(selected, PipelineHolder) and not selected._is_atom:
+            raise RegistrationError(
+                f"Node '{selected.registration_name}' is an ordinary child pipeline; "
+                "call inspect_node() on that child pipeline instead"
+            )
+        inspection_target: Any = selected
+        return inspection_target.inspect(
+            function_name=function_name,
+            overrides=overrides,
+            strict_mode=strict_mode,
+            resolve_only=resolve_only,
+            allow_mutable_objects=allow_mutable_objects,
+            memory_safety_margin=memory_safety_margin,
+        )
+
+    @staticmethod
+    def _validate_integer_priority(priority: Any) -> int:
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise TypeError(
+                "priority must be an integer priority group, not an exact node priority"
+            )
+        return priority
+
+    def _select_node_at_or_below_priority(self, priority: int) -> Any:
+        requested_priority = self._validate_integer_priority(priority)
+        groups: dict[int, list[Any]] = {}
+        for node in self._sorted_nodes():
+            integer_priority = self._priority_group(node.execution_priority)
+            if integer_priority <= requested_priority:
+                groups.setdefault(integer_priority, []).append(node)
+        for integer_priority in sorted(groups, reverse=True):
+            selected = self._select_executable_node_in_group(groups[integer_priority])
+            if selected is not None:
+                return selected
+        raise ResolutionError(
+            f"No selectable node exists at or below priority {requested_priority} "
+            f"in pipeline '{self.registration_name}'"
+        )
+
+    def _log_selected_node(
+        self,
+        node: Any,
+        *,
+        operation: str,
+        requested_priority: int | None,
+    ) -> None:
+        requested = (
+            f" requested priority {requested_priority}"
+            if requested_priority is not None
+            else ""
+        )
+        self.logger.info(
+            f"Selected node '{node.registration_name}' at priority "
+            f"{node.execution_priority} for {operation}{requested}"
+        )
 
     def _select_executable_node_in_group(self, nodes: list[Any]) -> Any:
         for node in sorted(nodes, key=lambda item: (item.execution_priority, item.registration_name)):
@@ -1504,36 +1633,70 @@ class PipelineHolder(
             return self.registration_name
         return f"{self.parent_pipeline.full_path()}/{self.registration_name}"
 
-    def _prepare_project_root(self) -> None:
-        resolved_root = self.project_root.resolve(strict=False)
-        if resolved_root == Path(resolved_root.anchor):
-            raise RegistrationError(
-                f"Refusing to clean filesystem root '{self.project_root}'"
+    def _prepare_project_directories(self) -> None:
+        paths = [self.project_root]
+        if self.pipeline_backup_root is not None:
+            paths.append(self.pipeline_backup_root)
+        for path in paths:
+            resolved_path = path.resolve(strict=False)
+            if resolved_path == Path(resolved_path.anchor):
+                raise RegistrationError(f"Refusing to clean filesystem root '{path}'")
+        if not any(self._directory_needs_cleanup(path) for path in paths):
+            return
+
+        if self.pipeline_backup_root is None:
+            prompt = (
+                f"Pipeline root folder '{self.project_root}' is not empty and "
+                "clean_directory=True. Type 'yes' or 'y' to delete and recreate it: "
             )
-        if not self.project_root.exists():
-            return
-        if (
-            self.project_root.is_dir()
-            and not self.project_root.is_symlink()
-            and not any(self.project_root.iterdir())
-        ):
-            return
-        user_input = input(
-            f"Pipeline root folder '{self.project_root}' is not empty and clean_directory=True. "
-            "Type 'yes' or 'y' to delete and recreate it: "
-        ).strip().lower()
-        if user_input not in {"yes", "y"}:
+            cancellation_target = f"pipeline root '{self.project_root}'"
+        else:
+            prompt = (
+                "clean_directory=True will clean both pipeline root folder "
+                f"'{self.project_root}' and pipeline backup folder "
+                f"'{self.pipeline_backup_root}'. Type 'yes' or 'y' to continue: "
+            )
+            cancellation_target = (
+                f"pipeline root '{self.project_root}' and pipeline backup directory "
+                f"'{self.pipeline_backup_root}'"
+            )
+
+        try:
+            user_input = input(prompt).strip().lower()
+        except (EOFError, OSError, RuntimeError, ValueError):
             warnings.warn(
-                f"clean_directory=True was requested for pipeline root '{self.project_root}', "
-                "but directory deletion was cancelled; continuing with the existing directory",
+                f"clean_directory=True was requested for {cancellation_target}, "
+                "but interactive confirmation is unavailable; directory deletion was "
+                "cancelled and the existing paths will be used",
                 UserWarning,
                 stacklevel=4,
             )
             return
-        if self.project_root.is_dir() and not self.project_root.is_symlink():
-            shutil.rmtree(self.project_root)
-        else:
-            self.project_root.unlink()
+        if user_input not in {"yes", "y"}:
+            warnings.warn(
+                f"clean_directory=True was requested for {cancellation_target}, "
+                "but directory deletion was cancelled; continuing with the existing paths",
+                UserWarning,
+                stacklevel=4,
+            )
+            return
+        for path in paths:
+            if not path.exists() and not path.is_symlink():
+                continue
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+
+    @staticmethod
+    def _directory_needs_cleanup(path: Path) -> bool:
+        if not path.exists() and not path.is_symlink():
+            return False
+        return not (
+            path.is_dir()
+            and not path.is_symlink()
+            and not any(path.iterdir())
+        )
 
 
 PipelineHandler = PipelineHolder

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, overload
 
 from ..core.constants import _IMMUTABLE_TYPES, _MISSING
 from ..core.models import (
@@ -48,6 +48,14 @@ class ValueAccessMixin:
         def _visible_output_names(self) -> set[str]: ...
         def _visible_constant_names(self) -> set[str]: ...
         def _incoming_parent_manual_values(self) -> dict[str, Any]: ...
+        def _select_node_at_or_below_priority(self, priority: int) -> Any: ...
+        def _log_selected_node(
+            self,
+            node: Any,
+            *,
+            operation: str,
+            requested_priority: int | None,
+        ) -> None: ...
         def _root_pipeline(self) -> Any: ...
         def _pipeline_by_name(self, pipeline_name: str) -> Any: ...
         @staticmethod
@@ -153,6 +161,104 @@ class ValueAccessMixin:
         return self._materialize_stored_value(
             value,
             f"Cannot get node output '{node_name}.{output_name}': it was saved as a "
+            f"placeholder ({value.reason}) and cannot be restored"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
+
+    @overload
+    def get_selected_node_output(
+        self,
+        output_names: str,
+        *,
+        priority: int | None = ...,
+        node_name: str | None = ...,
+    ) -> Any: ...
+
+    @overload
+    def get_selected_node_output(
+        self,
+        output_names: list[str] | tuple[str, ...],
+        *,
+        priority: int | None = ...,
+        node_name: str | None = ...,
+    ) -> tuple[Any, ...]: ...
+
+    def get_selected_node_output(
+        self,
+        output_names: str | list[str] | tuple[str, ...],
+        *,
+        priority: int | None = None,
+        node_name: str | None = None,
+    ) -> Any | tuple[Any, ...]:
+        """Return materialized outputs from a node selected by priority or name."""
+        if priority is None and node_name is None:
+            raise ValueError("priority or node_name must be provided")
+        if node_name is not None and (
+            not isinstance(node_name, str) or not node_name.strip()
+        ):
+            raise ValueError("node_name must be a non-empty string")
+
+        return_tuple = isinstance(output_names, (list, tuple))
+        if isinstance(output_names, str):
+            names = [output_names]
+        elif return_tuple:
+            names = list(output_names)
+        else:
+            raise TypeError(
+                "output_names must be a string, list of strings, or tuple of strings"
+            )
+        if not names or any(
+            not isinstance(name, str) or not name.strip() for name in names
+        ):
+            raise ValueError("output_names must contain non-empty strings")
+
+        selected = (
+            self._select_node_at_or_below_priority(priority)
+            if priority is not None
+            else None
+        )
+        if node_name is not None:
+            named_node = self.nodes_by_name.get(node_name)
+            if named_node is None:
+                raise ResolutionError(
+                    f"Unknown immediate child node '{node_name}' in pipeline "
+                    f"'{self.registration_name}'"
+                )
+            if selected is not None and selected is not named_node:
+                raise ResolutionError(
+                    f"Priority {priority} selects node '{selected.registration_name}', "
+                    f"not '{node_name}'"
+                )
+            selected = named_node
+        if selected is None:
+            raise ResolutionError("Cannot select a node")
+
+        self._log_selected_node(
+            selected,
+            operation="get_selected_node_output",
+            requested_priority=priority,
+        )
+        values = tuple(
+            self._get_selected_node_output(selected, output_name)
+            for output_name in names
+        )
+        return values if return_tuple else values[0]
+
+    def _get_selected_node_output(self, node: Any, output_name: str) -> Any:
+        if _is_child_pipeline(node) and node._is_atom:
+            return self.get_node_output(node.registration_name, output_name)
+        outputs = self.producer_outputs.get(node.registration_name, {})
+        if output_name not in outputs:
+            raise ResolutionError(
+                f"Node '{node.registration_name}' has no produced output named "
+                f"'{output_name}'"
+            )
+        value = outputs[output_name]
+        return self._materialize_stored_value(
+            value,
+            f"Cannot get selected node output "
+            f"'{node.registration_name}.{output_name}': it was saved as a "
             f"placeholder ({value.reason}) and cannot be restored"
             if isinstance(value, (RuntimeValueReference, DataclassValueReference))
             else "",

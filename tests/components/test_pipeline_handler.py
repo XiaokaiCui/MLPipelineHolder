@@ -221,6 +221,10 @@ def local_variadic_sum(base: int, *extra_values: int, factor: int = 1, **extra_i
     return (base + sum(extra_values) + sum(extra_items.values())) * factor
 
 
+def parameter_named_variadic_sum(*values: int, **named: int) -> int:
+    return sum(values) + sum(named.values())
+
+
 def strict_target(output_df: str, target_col: str, **extra_kwargs: Any) -> str:
     return output_df
 
@@ -1799,6 +1803,187 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertTrue(pipeline.project_root.exists())
             self.assertFalse((tmp_path / "marker.txt").exists())
 
+    def test_pipeline_creation_cleans_root_and_backup_after_one_confirmation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            (project_root / "project-marker.txt").write_text("project", encoding="utf-8")
+            (backup_root / "backup-marker.txt").write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes") as prompt:
+                pipeline = PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    project_root,
+                    pipeline_backup_directory=backup_root,
+                    clean_directory=True,
+                )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertFalse((project_root / "project-marker.txt").exists())
+            self.assertFalse(backup_root.exists())
+
+    def test_pipeline_creation_preserves_root_and_backup_when_joint_cleanup_cancelled(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            project_marker = project_root / "project-marker.txt"
+            backup_marker = backup_root / "backup-marker.txt"
+            project_marker.write_text("project", encoding="utf-8")
+            backup_marker.write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="no") as prompt:
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    "pipeline root.*pipeline backup directory.*deletion was cancelled",
+                ):
+                    PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        project_root,
+                        pipeline_backup_directory=backup_root,
+                        clean_directory=True,
+                    )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertEqual(project_marker.read_text(encoding="utf-8"), "project")
+            self.assertEqual(backup_marker.read_text(encoding="utf-8"), "backup")
+
+    def test_pipeline_creation_warns_and_reuses_root_when_confirmation_unavailable(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            marker = tmp_path / "marker.txt"
+            marker.write_text("occupied", encoding="utf-8")
+
+            with patch("builtins.input", side_effect=EOFError):
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    "interactive confirmation is unavailable",
+                ):
+                    pipeline = PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        tmp_path,
+                        clean_directory=True,
+                    )
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "occupied")
+            self.assertEqual(pipeline.project_root, tmp_path)
+
+    def test_pipeline_creation_preserves_root_and_backup_when_confirmation_unavailable(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            project_marker = project_root / "project-marker.txt"
+            backup_marker = backup_root / "backup-marker.txt"
+            project_marker.write_text("project", encoding="utf-8")
+            backup_marker.write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", side_effect=OSError):
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    "interactive confirmation is unavailable",
+                ):
+                    pipeline = PipelineHandler(
+                        "root-check",
+                        DemoConfig(base=1),
+                        project_root,
+                        pipeline_backup_directory=backup_root,
+                        clean_directory=True,
+                    )
+
+            self.assertEqual(project_marker.read_text(encoding="utf-8"), "project")
+            self.assertEqual(backup_marker.read_text(encoding="utf-8"), "backup")
+            self.assertEqual(pipeline.project_root, project_root)
+            self.assertEqual(pipeline.pipeline_backup_root, backup_root)
+
+    def test_pipeline_creation_handles_closed_or_missing_stdin(self) -> None:
+        closed_stdin = StringIO("")
+        closed_stdin.close()
+        for label, stdin in (("closed", closed_stdin), ("missing", None)):
+            with self.subTest(stdin=label), TemporaryDirectory() as temp_dir:
+                project_root = Path(temp_dir)
+                marker = project_root / "marker.txt"
+                marker.write_text("occupied", encoding="utf-8")
+
+                with patch.object(sys, "stdin", stdin):
+                    with self.assertWarnsRegex(
+                        UserWarning,
+                        "interactive confirmation is unavailable",
+                    ):
+                        pipeline = PipelineHandler(
+                            "root-check",
+                            DemoConfig(base=1),
+                            project_root,
+                            clean_directory=True,
+                        )
+
+                self.assertEqual(marker.read_text(encoding="utf-8"), "occupied")
+                self.assertEqual(pipeline.project_root, project_root)
+
+    def test_pipeline_creation_cleans_non_empty_root_after_short_yes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            (tmp_path / "marker.txt").write_text("occupied", encoding="utf-8")
+
+            with patch("builtins.input", return_value="y"):
+                pipeline = PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    tmp_path,
+                    clean_directory=True,
+                )
+
+            self.assertTrue(pipeline.project_root.exists())
+            self.assertFalse((tmp_path / "marker.txt").exists())
+
+    def test_pipeline_creation_prompts_when_only_backup_requires_cleanup(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            project_root = tmp_path / "project"
+            backup_root = tmp_path / "backup"
+            project_root.mkdir()
+            backup_root.mkdir()
+            (backup_root / "backup-marker.txt").write_text("backup", encoding="utf-8")
+
+            with patch("builtins.input", return_value="yes") as prompt:
+                PipelineHandler(
+                    "root-check",
+                    DemoConfig(base=1),
+                    project_root,
+                    pipeline_backup_directory=backup_root,
+                    clean_directory=True,
+                )
+
+            prompt.assert_called_once()
+            prompt_text = prompt.call_args.args[0]
+            self.assertIn(str(project_root), prompt_text)
+            self.assertIn(str(backup_root), prompt_text)
+            self.assertTrue(project_root.exists())
+            self.assertFalse(backup_root.exists())
+
     def test_pipeline_creation_does_not_prompt_for_empty_root_cleanup(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -2816,6 +3001,28 @@ class PipelineHandlerTests(unittest.TestCase):
 
             self.assertIn("local_variadic_sum(base_value, factor_value, args_a, kwargs_a)", chart)
             self.assertNotIn("unused_args", chart)
+
+    def test_chart_shows_upstream_dependency_for_parameter_named_variadics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "describe-implicit-helpers",
+                {"base": 1, "bonus": 5},
+                tmp_path / "pipeline",
+            )
+            source = pipeline.add_block("source", 1)
+            source.register_function(produce_seed, ["first"])
+            block = pipeline.add_block("build", 2)
+            block.register_args("values", ["first"])
+            block.register_kwargs("named", {"bonus": "bonus"})
+            block.register_function(parameter_named_variadic_sum, ["total"])
+
+            chart = strip_ansi(pipeline.describe_pipeline())
+
+            self.assertIn(
+                "parameter_named_variadic_sum(first, bonus)",
+                chart,
+            )
 
     def test_str_and_repr_show_pipeline_chart(self) -> None:
         with TemporaryDirectory() as temp_dir:

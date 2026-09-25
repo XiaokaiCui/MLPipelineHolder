@@ -141,6 +141,35 @@ class BlockKwargsRegistration:
     mapping_dct: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class ResolutionSource:
+    """Structured origin metadata for one inspection-resolved argument."""
+
+    kind: str
+    name: str | None = None
+    mapped_from: str | None = None
+    materialized: bool = False
+    copied: bool = False
+    same_node_previous_output: bool = False
+    identity_passthrough: bool = False
+
+
+@dataclass(slots=True)
+class ResolvedInspectionCall:
+    """Complete call shape and diagnostics produced by execution inspection."""
+
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    arguments: dict[str, Any]
+    sources: dict[str, Any]
+    callable: Any
+    function_name: str
+    block_name: str
+    node_name: str
+    strict_mode: bool
+    allow_mutable_objects: bool
+
+
 @dataclass(slots=True)
 class FunctionExecutionResult:
     """Normalized result of one registered function invocation."""
