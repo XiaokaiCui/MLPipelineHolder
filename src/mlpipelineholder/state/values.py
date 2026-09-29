@@ -73,6 +73,16 @@ class ValueAccessMixin:
         ) -> None: ...
 
     def get_value(self, variable_name: str) -> Any:
+        value = self._get_unmaterialized_value(variable_name)
+        return self._materialize_stored_value(
+            value,
+            f"Cannot get value '{variable_name}': it was saved as a placeholder "
+            f"({value.reason}) and cannot be restored; recreate or reset the value"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
+
+    def _get_unmaterialized_value(self, variable_name: str) -> Any:
         if variable_name in self._tree_constant_names():
             raise ResolutionError(
                 f"Cannot get value '{variable_name}': name is a pipeline constant; use get_constant_value instead"
@@ -87,13 +97,7 @@ class ValueAccessMixin:
                 value = self._descendant_visible_value(variable_name)
                 if value is _MISSING:
                     raise ResolutionError(f"Unknown pipeline value: {variable_name}")
-        return self._materialize_stored_value(
-            value,
-            f"Cannot get value '{variable_name}': it was saved as a placeholder "
-            f"({value.reason}) and cannot be restored; recreate or reset the value"
-            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
-            else "",
-        )
+        return value
 
     def list_visible_output(self) -> set[str]:
         """Return a detached set of produced output names visible without side effects.
@@ -358,6 +362,18 @@ class ValueAccessMixin:
         if isinstance(value, (RuntimeValueReference, DataclassValueReference)):
             raise ResolutionError(placeholder_error)
         return value
+
+    def _resolve_stored_terminal(self, value: Any) -> tuple[Any, Any]:
+        if not isinstance(value, OutputPointer):
+            return self, value
+        try:
+            owner_address, terminal = resolve_pointer_chain(
+                value.destination,
+                self._root_pipeline()._read_output_address,
+            )
+        except PointerResolutionError as exc:
+            raise ResolutionError(str(exc)) from exc
+        return self._pipeline_by_name(owner_address.pipeline_name), terminal
 
     def get_constant_value(
         self, variable_name: str

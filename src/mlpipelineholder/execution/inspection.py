@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import gc
 import math
 import os
 import sys
 import types
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -17,7 +19,7 @@ from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Final, Self
 from uuid import UUID
 
-from ..core.constants import _IMMUTABLE_TYPES
+from ..core.constants import _IMMUTABLE_TYPES, _MISSING
 from ..core.models import ArtifactRecord, ResolutionSource
 from ..exceptions import InspectionCopyError, InspectionMemoryError
 from ..integrations.optuna.support import (
@@ -50,6 +52,16 @@ _ARTIFACT_MEMORY_FACTORS: Final[dict[str, float]] = {
 _RETAINED_ARTIFACT_SERIALIZERS: Final[frozenset[str]] = frozenset(
     {"json", "pickle"}
 )
+
+_InspectionArtifactIdentity = tuple[str, str, bool, str, str]
+_InspectionCacheKey = tuple[_InspectionArtifactIdentity, bool]
+
+
+@dataclass(slots=True)
+class _InspectionCacheEntry:
+    artifact: ArtifactRecord
+    value: Any
+    compute: bool
 
 
 class InspectionCopier:
@@ -275,6 +287,20 @@ def _format_bytes(size: float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} GiB"
+
+
+def _format_signed_bytes(size: int) -> str:
+    sign = "+" if size >= 0 else "-"
+    return f"{sign}{_format_bytes(abs(size))}"
+
+
+def _process_rss_bytes() -> int | None:
+    try:
+        import psutil  # type: ignore
+
+        return int(psutil.Process().memory_info().rss)
+    except Exception:
+        return None
 
 
 def _path_logical_bytes(path: Path) -> tuple[int, bool]:
@@ -1345,8 +1371,17 @@ class InspectionMixin:
     """Create temporary multi-value inspection contexts."""
 
     if TYPE_CHECKING:
+        logger: Any = None
+        _inspection_cache_bindings: dict[str, _InspectionCacheKey] = {}
+        _inspection_cache_entries: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
+        _inspection_cache_lock: Any = None
+
         @staticmethod
         def _validate_integer_priority(priority: Any) -> int: ...
+        def _resolve_investigation_artifact(
+            self, input_name: str
+        ) -> tuple[Any, ArtifactRecord]: ...
+        def _attempt_allocator_trim(self) -> None: ...
 
     def inspect(
         self,
@@ -1369,3 +1404,179 @@ class InspectionMixin:
         if priority is not None:
             self._validate_integer_priority(priority)
         return PipelineInspection(self, names, compute=compute, priority=priority)
+
+    def load_for_inspection(
+        self,
+        object_names: list[str] | tuple[str, ...],
+        *,
+        compute: bool = True,
+    ) -> None:
+        """Load or refresh selected disk-backed investigation values in memory."""
+        names = self._validate_inspection_object_names(object_names)
+        if not isinstance(compute, bool):
+            raise TypeError("compute must be a boolean")
+        self._load_inspection_objects(
+            {name: compute for name in names},
+            operation="load",
+        )
+        warnings.warn(
+            "Inspection objects are shared and may become stale after pipeline or "
+            "block execution. Call unload_inspection_objects() between executions, "
+            "or call load_for_inspection() again to refresh selected objects.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    def refresh_loaded_objects(self) -> None:
+        """Refresh every currently loaded inspection object from current artifacts."""
+        with self._inspection_cache_lock:
+            requests = {
+                name: cache_key[1]
+                for name, cache_key in self._inspection_cache_bindings.items()
+            }
+        if not requests:
+            warnings.warn(
+                "No inspection objects are currently loaded; nothing was refreshed",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        self._load_inspection_objects(requests, operation="refresh")
+
+    def unload_inspection_objects(self) -> None:
+        """Release this pipeline's references to all preloaded inspection objects."""
+        with self._inspection_cache_lock:
+            if not self._inspection_cache_bindings:
+                warnings.warn(
+                    "No inspection objects are currently loaded; nothing was unloaded",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return
+        before = _process_rss_bytes()
+        self._unload_from_memory()
+        gc.collect()
+        self._attempt_allocator_trim()
+        after = _process_rss_bytes()
+        self._log_inspection_memory_delta(
+            "unload",
+            None if before is None or after is None else before - after,
+        )
+
+    def _inspection_cached_value(
+        self,
+        input_name: str,
+        artifact: ArtifactRecord,
+    ) -> Any:
+        identity = self._inspection_artifact_identity(artifact)
+        with self._inspection_cache_lock:
+            cache_key = self._inspection_cache_bindings.get(input_name)
+            if cache_key is None or cache_key[0] != identity:
+                return _MISSING
+            entry = self._inspection_cache_entries.get(cache_key)
+            return _MISSING if entry is None else entry.value
+
+    def _load_inspection_objects(
+        self,
+        requests: dict[str, bool],
+        *,
+        operation: str,
+    ) -> None:
+        plans: dict[str, tuple[Any, ArtifactRecord, _InspectionCacheKey]] = {}
+        for name, compute in requests.items():
+            owner, artifact = self._resolve_investigation_artifact(name)
+            cache_key = (self._inspection_artifact_identity(artifact), compute)
+            plans[name] = (owner, artifact, cache_key)
+
+        before = _process_rss_bytes()
+        loaded: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
+        for owner, artifact, cache_key in plans.values():
+            if cache_key in loaded:
+                continue
+            value = owner._materialize_stored_value(artifact, "")
+            value = _compute_investigation_value(value, compute=cache_key[1])
+            loaded[cache_key] = _InspectionCacheEntry(
+                artifact=artifact,
+                value=value,
+                compute=cache_key[1],
+            )
+
+        with self._inspection_cache_lock:
+            self._inspection_cache_entries.update(loaded)
+            for name, (_, _, cache_key) in plans.items():
+                self._inspection_cache_bindings[name] = cache_key
+            live_keys = set(self._inspection_cache_bindings.values())
+            for cache_key in tuple(self._inspection_cache_entries):
+                if cache_key not in live_keys:
+                    del self._inspection_cache_entries[cache_key]
+
+        gc.collect()
+        self._attempt_allocator_trim()
+        after = _process_rss_bytes()
+        self._log_inspection_memory_delta(
+            operation,
+            None if before is None or after is None else after - before,
+        )
+
+    def _unload_from_memory(
+        self,
+        object_names: Sequence[str] | None = None,
+    ) -> None:
+        with self._inspection_cache_lock:
+            if object_names is None:
+                self._inspection_cache_bindings.clear()
+                self._inspection_cache_entries.clear()
+                return
+            for name in object_names:
+                self._inspection_cache_bindings.pop(name, None)
+            live_keys = set(self._inspection_cache_bindings.values())
+            for cache_key in tuple(self._inspection_cache_entries):
+                if cache_key not in live_keys:
+                    del self._inspection_cache_entries[cache_key]
+
+    def _log_inspection_memory_delta(
+        self,
+        operation: str,
+        delta: int | None,
+    ) -> None:
+        if delta is None:
+            self.logger.warning(
+                f"Inspection cache {operation} RSS delta is unavailable; install "
+                "the 'memory' extra to enable process-memory reporting"
+            )
+            return
+        if operation == "unload":
+            self.logger.info(
+                f"Inspection cache unload RSS released: {_format_signed_bytes(delta)}"
+            )
+            return
+        self.logger.info(
+            f"Inspection cache {operation} RSS delta: {_format_signed_bytes(delta)}"
+        )
+
+    @staticmethod
+    def _inspection_artifact_identity(
+        artifact: ArtifactRecord,
+    ) -> _InspectionArtifactIdentity:
+        return (
+            str(Path(artifact.file_path).expanduser().resolve(strict=False)),
+            artifact.serializer,
+            bool(artifact.torch_load_weights_only),
+            artifact.run_id,
+            artifact.created_at,
+        )
+
+    @staticmethod
+    def _validate_inspection_object_names(
+        object_names: list[str] | tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if not isinstance(object_names, (list, tuple)):
+            raise TypeError("object_names must be a list or tuple of strings")
+        names = tuple(object_names)
+        if not names or any(
+            not isinstance(name, str) or not name.strip() for name in names
+        ):
+            raise ValueError("object_names must contain non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError("object_names must be unique")
+        return names

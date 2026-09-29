@@ -22,6 +22,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from textwrap import dedent
+from threading import RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -313,6 +314,9 @@ class PipelineHolder(
             ] = WeakKeyDictionary()
             self.run_history: list[RunRecord] = []
             self._stored_objects: dict[str, StoredObjectRecord] = {}
+            self._inspection_cache_bindings: dict[str, Any] = {}
+            self._inspection_cache_entries: dict[Any, Any] = {}
+            self._inspection_cache_lock = RLock()
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:
             if generated_temp_root and self.project_root.exists():

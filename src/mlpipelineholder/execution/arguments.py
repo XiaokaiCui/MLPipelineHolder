@@ -6,6 +6,7 @@ import inspect
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ..core.constants import _MISSING
 from ..core.models import (
     ArtifactRecord,
     CallableValueReference,
@@ -37,6 +38,9 @@ class ArgumentMixin:
             value: Any,
             placeholder_error: str,
         ) -> Any: ...
+        def _get_unmaterialized_value(self, variable_name: str) -> Any: ...
+        def _resolve_stored_terminal(self, value: Any) -> tuple[Any, Any]: ...
+        def _inspection_cached_value(self, input_name: str, artifact: ArtifactRecord) -> Any: ...
         def _ancestor_manual_values(self) -> dict[str, Any]: ...
         def _ancestor_config_values(self) -> dict[str, Any]: ...
         def _config_has_field(self, config_obj: Any, field_name: str) -> bool: ...
@@ -46,6 +50,7 @@ class ArgumentMixin:
             object_name: str,
             *,
             cache: bool,
+            materialize: bool = True,
         ) -> Any: ...
         @staticmethod
         def _restore_callable_value(reference: CallableValueReference) -> Any: ...
@@ -304,6 +309,7 @@ class ArgumentMixin:
             value = self._get_stored_object_by_name(
                 input_name,
                 cache=cache_root_storage,
+                materialize=materialize,
             )
             source = ResolutionSource(kind="storage", name=input_name, materialized=True)
         elif allow_missing:
@@ -338,22 +344,59 @@ class ArgumentMixin:
         *,
         visible_outputs: dict[str, Any] | None = None,
     ) -> Any:
+        owner, value, source = self._resolve_unmaterialized_investigation_input(
+            input_name,
+            function_name,
+            visible_outputs=visible_outputs,
+        )
+        if isinstance(value, ArtifactRecord):
+            cached = self._inspection_cached_value(input_name, value)
+            if cached is not _MISSING:
+                return cached
+        if source.kind == "storage":
+            return self._get_stored_object_by_name(
+                input_name,
+                cache=False,
+            )
+        return owner._materialize_stored_value(
+            value,
+            f"Cannot inspect value '{input_name}': it was saved as a placeholder "
+            f"({value.reason}) and cannot be restored"
+            if isinstance(value, (RuntimeValueReference, DataclassValueReference))
+            else "",
+        )
+
+    def _resolve_investigation_artifact(
+        self,
+        input_name: str,
+    ) -> tuple[Any, ArtifactRecord]:
+        owner, value, _ = self._resolve_unmaterialized_investigation_input(
+            input_name,
+            "load_for_inspection",
+        )
+        if not isinstance(value, ArtifactRecord):
+            raise ResolutionError(
+                f"Inspection preload requires disk-backed objects, but "
+                f"'{input_name}' resolved to {type(value).__name__}"
+            )
+        return owner, value
+
+    def _resolve_unmaterialized_investigation_input(
+        self,
+        input_name: str,
+        function_name: str,
+        *,
+        visible_outputs: dict[str, Any] | None = None,
+    ) -> tuple[Any, Any, ResolutionSource]:
         if visible_outputs is None:
             resolved_outputs: dict[str, Any] = {}
             if self.has_visible_output(input_name):
-                resolved_outputs[input_name] = self.get_value(input_name)
+                resolved_outputs[input_name] = self._get_unmaterialized_value(input_name)
         else:
             resolved_outputs = {}
             if input_name in visible_outputs:
-                value = visible_outputs[input_name]
-                resolved_outputs[input_name] = self._materialize_stored_value(
-                    value,
-                    f"Cannot inspect value '{input_name}': it was saved as a placeholder "
-                    f"({value.reason}) and cannot be restored"
-                    if isinstance(value, (RuntimeValueReference, DataclassValueReference))
-                    else "",
-                )
-        return self._resolve_named_input(
+                resolved_outputs[input_name] = visible_outputs[input_name]
+        value, source = self._resolve_named_input_with_source(
             input_name,
             function_name,
             {},
@@ -364,4 +407,7 @@ class ArgumentMixin:
             self.list_declared_outputs(),
             include_root_storage=True,
             cache_root_storage=False,
+            materialize=False,
         )
+        owner, terminal = self._resolve_stored_terminal(value)
+        return owner, terminal, source
