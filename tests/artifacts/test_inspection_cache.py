@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copyreg
 import gc
+import subprocess
 import sys
 import threading
 import types
@@ -1069,6 +1070,52 @@ class InspectionCacheTests(unittest.TestCase):
         gc.collect()
         self.assertIsNotNone(reference())
         self.assertTrue(any(item is reference() for item in copier._keepalive))
+
+    def test_callable_identity_rules_agree_with_prepare(self) -> None:
+        copier = InspectionCopier(None, allow_mutable_objects=False)
+        source = ResolutionSource(kind="test")
+        for template in (len, str.maketrans, int):
+            with self.subTest(template=template):
+                self.assertFalse(copier.requires_copy(template))
+                copied, _ = copier.prepare(
+                    template,
+                    parameter_name="value",
+                    source=source,
+                )
+                self.assertIs(copied, template)
+        self.assertTrue(copier.requires_copy([1].append))
+        self.assertTrue(copier.requires_copy([1].__iter__))
+
+    def test_copier_does_not_import_optional_libraries(self) -> None:
+        script = (
+            "import sys\n"
+            "from mlpipelineholder.execution.inspection import (\n"
+            "    InspectionCopier,\n"
+            "    ResolutionSource,\n"
+            ")\n"
+            "OPTIONAL = ('pandas', 'numpy', 'dask', 'torch', 'optuna', 'pyarrow')\n"
+            "before = {name for name in OPTIONAL if name in sys.modules}\n"
+            "class Value:\n"
+            "    def __init__(self):\n"
+            "        self.items = [1, 2]\n"
+            "value = Value()\n"
+            "copied, _ = InspectionCopier(None, allow_mutable_objects=False).prepare(\n"
+            "    value,\n"
+            "    parameter_name='value',\n"
+            "    source=ResolutionSource(kind='test'),\n"
+            ")\n"
+            "assert copied is not value\n"
+            "assert copied.items == [1, 2]\n"
+            "after = {name for name in OPTIONAL if name in sys.modules}\n"
+            "print(','.join(sorted(after - before)))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(result.stdout.strip(), "")
 
     @unittest.skipUnless(find_spec("torch") is not None, "torch is not installed")
     def test_torch_module_and_optimizer_keep_deepcopy_boundary(self) -> None:

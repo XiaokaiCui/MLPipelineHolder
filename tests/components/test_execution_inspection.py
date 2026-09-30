@@ -1467,6 +1467,27 @@ class ExecutionInspectionTests(unittest.TestCase):
                 ):
                     block.inspect(resolve_only=True, allow_mutable_objects=False)
 
+    def test_method_wrapper_owner_storage_is_included_in_preflight(self) -> None:
+        with TemporaryDirectory() as tmp:
+            items = [bytearray(200_000)]
+            pipeline = PipelineHandler(
+                "root",
+                {"callback": items.__iter__},
+                Path(tmp) / "root",
+            )
+            block = pipeline.add_block("callback", 1)
+            block.register_function(invoke_without_arguments, ["result"])
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._available_memory_bytes",
+                return_value=(100_000, "test RAM", ("97.7 KiB via test RAM",)),
+            ):
+                with self.assertRaisesRegex(
+                    InspectionMemoryError,
+                    "exceeds available memory",
+                ):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
     def test_unresolvable_pointer_uses_uncertainty_confirmation_path(self) -> None:
         pointer = OutputPointer(OutputAddress("root", "missing", "value"))
 

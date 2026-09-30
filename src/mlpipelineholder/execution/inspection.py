@@ -19,7 +19,7 @@ from enum import Enum
 from itertools import islice
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath, PosixPath, WindowsPath
 from types import BuiltinFunctionType, FunctionType
-from typing import TYPE_CHECKING, Any, Final, Self
+from typing import TYPE_CHECKING, Any, Final, Self, cast
 from uuid import UUID, uuid4
 
 from ..core.constants import _IMMUTABLE_TYPES, _MISSING
@@ -124,20 +124,40 @@ class _InspectionValueNotCopyable(Exception):
     """Raised when an in-memory value cannot be isolated by copying."""
 
 
-def _bound_builtin_owner(value: Any) -> Any | None:
-    """Owner of a bound built-in method, or ``None`` for stateless builtins.
+_BOUND_OWNER_CALLABLE_TYPES: Final[tuple[type, ...]] = (
+    types.MethodType,
+    BuiltinFunctionType,
+    types.MethodWrapperType,
+)
 
-    ``BuiltinFunctionType`` covers both module-level builtins such as ``len``
-    or ``math.sin`` (whose ``__self__`` is a module or absent) and methods
-    bound to a live object such as ``items.append``. Only the latter carry
-    state and must be copied through their owner.
+
+def _bound_callable_owner(value: Any) -> Any | None:
+    """Owner of any bound callable, or ``None`` for stateless callables.
+
+    Covers Python methods, built-in methods, and method wrappers such as
+    ``items.__iter__``. Module-level callables and unbound descriptors have
+    no live instance owner and are stateless for copying purposes.
     """
-    if not isinstance(value, BuiltinFunctionType):
+    if not isinstance(value, _BOUND_OWNER_CALLABLE_TYPES):
         return None
     owner = getattr(value, "__self__", None)
     if owner is None or isinstance(owner, (types.ModuleType, type)):
         return None
     return owner
+
+
+def _bound_builtin_owner(value: Any) -> Any | None:
+    """Owner of a bound built-in method, or ``None`` for stateless builtins.
+
+    ``BuiltinFunctionType`` covers both module-level builtins such as ``len``
+    or ``math.sin`` (whose ``__self__`` is a module or absent) and methods
+    bound to a live object such as ``items.append``. Only the latter are
+    excluded from identity passthrough in :meth:`InspectionCopier.prepare`;
+    Python methods and method wrappers reach the reduce protocol on their own.
+    """
+    if not isinstance(value, BuiltinFunctionType):
+        return None
+    return _bound_callable_owner(value)
 
 
 class InspectionCopier:
@@ -221,7 +241,7 @@ class InspectionCopier:
             return False
         if self._is_known_immutable(value):
             return False
-        if value is self._logger or isinstance(value, FunctionType):
+        if value is self._logger or isinstance(value, (FunctionType, type)):
             return False
         if isinstance(value, BuiltinFunctionType) and _bound_builtin_owner(value) is None:
             return False
@@ -302,9 +322,12 @@ class InspectionCopier:
                     self.prepare(item, parameter_name=parameter_name, source=source)[0]
                 )
             return copied_set
-        try:
-            import pandas as pd  # type: ignore
-
+        # Optional libraries are looked up in ``sys.modules`` instead of being
+        # imported: an instance of one of their types cannot exist unless the
+        # library was already imported, and importing here would make copying
+        # an unrelated object pull in pandas, NumPy, Dask, and Torch.
+        pd = cast(Any, sys.modules.get("pandas"))
+        if pd is not None:
             if isinstance(value, pd.DataFrame):
                 copied = value.copy(deep=True)
                 self._memo[id(value)] = copied
@@ -333,47 +356,38 @@ class InspectionCopier:
                             source=source,
                         )[0]
                 return copied
-        except ImportError:
-            pass
 
-        try:
-            import numpy as np  # type: ignore
+        np = cast(Any, sys.modules.get("numpy"))
+        if np is not None and type(value) is np.ndarray:
+            if value.dtype.hasobject:
+                return self._copy_object_ndarray(value, parameter_name, source)
+            copied = value.copy()
+            self._memo[id(value)] = copied
+            return copied
 
-            if type(value) is np.ndarray:
-                if value.dtype.hasobject:
-                    return self._copy_object_ndarray(value, parameter_name, source)
-                copied = value.copy()
-                self._memo[id(value)] = copied
-                return copied
-        except ImportError:
-            pass
+        dd = cast(Any, sys.modules.get("dask.dataframe"))
+        if dd is not None and (type(value) is dd.DataFrame or type(value) is dd.Series):
+            copied = value.copy()
+            self._memo[id(value)] = copied
+            return copied
 
-        try:
-            import dask.dataframe as dd  # type: ignore
-
-            if type(value) is dd.DataFrame or type(value) is dd.Series:
-                copied = value.copy()
-                self._memo[id(value)] = copied
-                return copied
-        except ImportError:
-            pass
-
-        try:
-            import torch  # type: ignore
-
-            if isinstance(value, torch.nn.Parameter):
+        torch = cast(Any, sys.modules.get("torch"))
+        if torch is not None:
+            nn = cast(Any, sys.modules.get("torch.nn"))
+            if nn is not None and isinstance(value, nn.Parameter):
                 return copy.deepcopy(value, self._memo)
             if type(value) is torch.Tensor:
                 copied = value.detach().clone()
                 self._memo[id(value)] = copied
                 return copied
-            if isinstance(value, (torch.nn.Module, torch.optim.Optimizer)):
+            if nn is not None and isinstance(value, nn.Module):
                 # Reconstructing a module through its reduce protocol would
                 # downgrade its Parameter tensors to plain tensors, so keep
                 # Python's deepcopy for these compatibility boundaries.
                 return copy.deepcopy(value, self._memo)
-        except ImportError:
-            pass
+            optim = cast(Any, sys.modules.get("torch.optim"))
+            if optim is not None and isinstance(value, optim.Optimizer):
+                return copy.deepcopy(value, self._memo)
 
         # Classes and modules are atomic or shared templates; they keep
         # Python's deepcopy semantics. Bound methods carry their owner and are
@@ -572,10 +586,14 @@ def _release_native_allocators() -> None:
     to drop on unload. Failures are ignored because this only improves
     reporting.
     """
+    pyarrow = sys.modules.get("pyarrow")
+    if pyarrow is None:
+        return
+    default_memory_pool = getattr(pyarrow, "default_memory_pool", None)
+    if default_memory_pool is None:
+        return
     try:
-        import pyarrow  # type: ignore
-
-        pool = pyarrow.default_memory_pool()
+        pool = default_memory_pool()
         release = getattr(pool, "release_unused", None)
         if release is not None:
             release()
@@ -870,10 +888,7 @@ class _InspectionMemoryEstimator:
             return sys.getsizeof(value)
         if isinstance(value, _IMMUTABLE_TYPES):
             return sys.getsizeof(value) if self._retained else 0
-        if (
-            isinstance(value, types.MethodType)
-            or _bound_builtin_owner(value) is not None
-        ):
+        if _bound_callable_owner(value) is not None:
             return self._estimate_bound_method(value, label, depth)
         if isinstance(
             value,
@@ -881,41 +896,28 @@ class _InspectionMemoryEstimator:
         ):
             return 0
 
-        try:
-            import pandas as pd  # type: ignore
-
+        pd = cast(Any, sys.modules.get("pandas"))
+        if pd is not None:
             if isinstance(value, pd.DataFrame):
                 return self._estimate_pandas_frame(value, label)
             if isinstance(value, pd.Series):
                 return self._estimate_pandas_series(value, label)
-        except ImportError:
-            pass
 
-        try:
-            import numpy as np  # type: ignore
+        np = cast(Any, sys.modules.get("numpy"))
+        if np is not None and isinstance(value, np.ndarray):
+            return self._estimate_numpy_array(value, label)
 
-            if isinstance(value, np.ndarray):
-                return self._estimate_numpy_array(value, label)
-        except ImportError:
-            pass
-
-        try:
-            import torch  # type: ignore
-
-            if isinstance(value, torch.nn.Module):
+        torch = cast(Any, sys.modules.get("torch"))
+        if torch is not None:
+            nn = cast(Any, sys.modules.get("torch.nn"))
+            if nn is not None and isinstance(value, nn.Module):
                 return self._estimate_torch_module(value, label)
             if isinstance(value, torch.Tensor):
                 return self._estimate_torch_tensor(value)
-        except ImportError:
-            pass
 
-        try:
-            import dask.dataframe as dd  # type: ignore
-
-            if isinstance(value, (dd.DataFrame, dd.Series)):
-                return self._estimate_dask_collection(value)
-        except ImportError:
-            pass
+        dd = cast(Any, sys.modules.get("dask.dataframe"))
+        if dd is not None and isinstance(value, (dd.DataFrame, dd.Series)):
+            return self._estimate_dask_collection(value)
 
         return self._estimate_generic(value, label, depth)
 
@@ -1604,9 +1606,8 @@ def preflight_protected_inspection(
 def _compute_investigation_value(value: Any, *, compute: bool) -> Any:
     if not compute:
         return value
-    try:
-        import dask.dataframe as dd
-    except ImportError:
+    dd = cast(Any, sys.modules.get("dask.dataframe"))
+    if dd is None:
         return value
     if isinstance(value, (dd.DataFrame, dd.Series)):
         return value.compute()
