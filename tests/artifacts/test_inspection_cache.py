@@ -62,6 +62,22 @@ def aliases_shared(left: dict[str, list[int]], right: dict[str, list[int]]) -> b
     return left["items"] is right["items"]
 
 
+class CallbackOwner:
+    def __init__(self) -> None:
+        self.frame = pd.DataFrame({"items": [[1, 2]]})
+
+    def mutate(self) -> None:
+        self.frame.iat[0, 0].append(3)
+
+
+def invoke_callback(callback: Any) -> None:
+    callback()
+
+
+def invoke_append_callback(callback: Any) -> None:
+    callback(2)
+
+
 class WeakPayload:
     def __init__(self, size: int = 1024) -> None:
         self.data = bytearray(size)
@@ -704,6 +720,60 @@ class InspectionCacheTests(unittest.TestCase):
                 self.assertIs(resolved.left.frame, resolved.right["frame"])
                 resolved.left.frame.iat[0, 0].append(3)
             self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_bound_method_copy_isolates_owner(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("bound-method", {}, Path(tmp))
+            owner = CallbackOwner()
+            pipeline.set_constant_value("callback", owner.mutate, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                invoke_callback,
+                ["result"],
+                param_mapping={"callback": "callback"},
+            )
+
+            resolved = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            copied_callback = resolved.arguments["callback"]
+            self.assertIsNot(copied_callback, owner.mutate)
+            self.assertIsNot(copied_callback.__self__, owner)
+
+            block.inspect(allow_mutable_objects=False)
+            self.assertEqual(owner.frame.iat[0, 0], [1, 2])
+
+            pipeline.copy_for_inspection(["callback"])
+            block.inspect(allow_mutable_objects=False)
+            self.assertEqual(owner.frame.iat[0, 0], [1, 2])
+
+    def test_bound_builtin_method_copy_isolates_owner(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("bound-builtin", {}, Path(tmp))
+            items = [1]
+            pipeline.set_constant_value("callback", items.append, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                invoke_append_callback,
+                ["result"],
+                param_mapping={"callback": "callback"},
+            )
+
+            resolved = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            copied_callback = resolved.arguments["callback"]
+            self.assertIsNot(copied_callback, items.append)
+            self.assertIsNot(copied_callback.__self__, items)
+
+            block.inspect(allow_mutable_objects=False)
+            self.assertEqual(items, [1])
+
+            pipeline.copy_for_inspection(["callback"])
+            block.inspect(allow_mutable_objects=False)
+            self.assertEqual(items, [1])
 
     def test_immutable_subclass_state_is_isolated(self) -> None:
         factories = (

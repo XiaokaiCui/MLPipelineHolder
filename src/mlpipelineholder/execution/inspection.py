@@ -124,6 +124,22 @@ class _InspectionValueNotCopyable(Exception):
     """Raised when an in-memory value cannot be isolated by copying."""
 
 
+def _bound_builtin_owner(value: Any) -> Any | None:
+    """Owner of a bound built-in method, or ``None`` for stateless builtins.
+
+    ``BuiltinFunctionType`` covers both module-level builtins such as ``len``
+    or ``math.sin`` (whose ``__self__`` is a module or absent) and methods
+    bound to a live object such as ``items.append``. Only the latter carry
+    state and must be copied through their owner.
+    """
+    if not isinstance(value, BuiltinFunctionType):
+        return None
+    owner = getattr(value, "__self__", None)
+    if owner is None or isinstance(owner, (types.ModuleType, type)):
+        return None
+    return owner
+
+
 class InspectionCopier:
     """Copy resolved values while preserving aliases within one inspection."""
 
@@ -150,10 +166,13 @@ class InspectionCopier:
             return value, source
         if self._is_known_immutable(value):
             return value, source
-        if value is self._logger or isinstance(
-            value,
-            (FunctionType, BuiltinFunctionType, type),
-        ):
+        if value is self._logger or isinstance(value, (FunctionType, type)):
+            self._memo[id(value)] = value
+            return value, replace(source, identity_passthrough=True)
+        if isinstance(value, BuiltinFunctionType) and _bound_builtin_owner(value) is None:
+            # Module-level builtins such as ``len`` or ``math.sin`` are
+            # stateless templates; bound built-in methods carry an owner and
+            # are reconstructed through the copy protocol below instead.
             self._memo[id(value)] = value
             return value, replace(source, identity_passthrough=True)
         if is_optuna_study(value) or is_optuna_sampler(value):
@@ -202,10 +221,9 @@ class InspectionCopier:
             return False
         if self._is_known_immutable(value):
             return False
-        if value is self._logger or isinstance(
-            value,
-            (FunctionType, BuiltinFunctionType),
-        ):
+        if value is self._logger or isinstance(value, FunctionType):
+            return False
+        if isinstance(value, BuiltinFunctionType) and _bound_builtin_owner(value) is None:
             return False
         if is_optuna_study(value) or is_optuna_sampler(value):
             return False
@@ -357,9 +375,10 @@ class InspectionCopier:
         except ImportError:
             pass
 
-        # Classes, modules, and bound methods are atomic or shared templates;
-        # they keep Python's deepcopy semantics.
-        if isinstance(value, (type, types.ModuleType, types.MethodType)):
+        # Classes and modules are atomic or shared templates; they keep
+        # Python's deepcopy semantics. Bound methods carry their owner and are
+        # reconstructed through the reduce protocol below.
+        if isinstance(value, (type, types.ModuleType)):
             return copy.deepcopy(value, self._memo)
 
         # Mirror copy.deepcopy's selection order. An explicit ``__deepcopy__``
@@ -851,13 +870,16 @@ class _InspectionMemoryEstimator:
             return sys.getsizeof(value)
         if isinstance(value, _IMMUTABLE_TYPES):
             return sys.getsizeof(value) if self._retained else 0
+        if (
+            isinstance(value, types.MethodType)
+            or _bound_builtin_owner(value) is not None
+        ):
+            return self._estimate_bound_method(value, label, depth)
         if isinstance(
             value,
             (FunctionType, BuiltinFunctionType, type, types.ModuleType),
         ):
             return 0
-        if isinstance(value, types.MethodType):
-            return self._estimate_bound_method(value, label, depth)
 
         try:
             import pandas as pd  # type: ignore
@@ -1081,7 +1103,7 @@ class _InspectionMemoryEstimator:
 
     def _estimate_bound_method(
         self,
-        method: types.MethodType,
+        method: Any,
         label: str,
         depth: int,
     ) -> int:
