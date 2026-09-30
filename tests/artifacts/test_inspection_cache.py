@@ -205,6 +205,88 @@ class InspectionCacheTests(unittest.TestCase):
             self.assertIs(node.arguments["value"], disk_cached)
             self.assertIs(memory_protected.arguments["value"], memory_cached)
 
+    def test_aliased_names_load_and_copy_shared_targets_once(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("aliases", {}, Path(tmp) / "project")
+            record = pipeline.artifact_store.save(
+                variable_name="shared",
+                value={"payload": [1, 2]},
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.set_constant_value("shared_artifact_a", record, copy=False)
+            pipeline.set_constant_value("shared_artifact_b", record, copy=False)
+            shared_object = [3, 4]
+            pipeline.set_constant_value("shared_memory_a", shared_object, copy=False)
+            pipeline.set_constant_value("shared_memory_b", shared_object, copy=False)
+
+            with (
+                mock.patch.object(
+                    ArtifactStore,
+                    "load",
+                    wraps=pipeline.artifact_store.load,
+                ) as load,
+                mock.patch.object(
+                    pipeline,
+                    "_isolate_inspection_value",
+                    wraps=pipeline._isolate_inspection_value,
+                ) as isolate,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(
+                    [
+                        "shared_artifact_a",
+                        "shared_artifact_b",
+                        "shared_memory_a",
+                        "shared_memory_b",
+                    ]
+                )
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(isolate.call_count, 1)
+
+            with pipeline.inspect("shared_artifact_a", "shared_artifact_b") as resolved:
+                self.assertIs(resolved.shared_artifact_a, resolved.shared_artifact_b)
+            with pipeline.inspect("shared_memory_a", "shared_memory_b") as resolved:
+                self.assertIs(resolved.shared_memory_a, resolved.shared_memory_b)
+
+    def test_identity_guard_outranks_reused_id(self) -> None:
+        class Refable:
+            pass
+
+        guard = Refable()
+        replacement = Refable()
+        binding = _InspectionCacheBinding(
+            cache_key=(("memory", id(replacement)), True),
+            kind="memory",
+            priority=None,
+            compute=True,
+            original_ref=None,
+            original_guard=guard,
+            original_id=id(replacement),
+        )
+
+        self.assertFalse(
+            InspectionMixin._inspection_original_matches(binding, replacement)
+        )
+
+    def test_replaced_non_weakrefable_value_is_not_served_stale(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("items", [1], copy=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["items"])
+
+            binding = pipeline._inspection_cache_bindings["items"]
+            self.assertIsNotNone(binding.original_guard)
+
+            pipeline.set_constant_value("items", [2, 3], copy=False)
+            with pipeline.inspect("items") as resolved:
+                self.assertEqual(resolved.items, [2, 3])
+            self.assertIsNone(binding.original_guard)
+
     def test_refresh_and_unload_apply_to_all_copied_objects(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
