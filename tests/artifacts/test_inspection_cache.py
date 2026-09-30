@@ -52,6 +52,10 @@ def append_value(value: list[int]) -> list[int]:
     return value
 
 
+def aliases_shared(left: dict[str, list[int]], right: dict[str, list[int]]) -> bool:
+    return left["items"] is right["items"]
+
+
 class WeakPayload:
     def __init__(self, size: int = 1024) -> None:
         self.data = bytearray(size)
@@ -205,6 +209,145 @@ class InspectionCacheTests(unittest.TestCase):
             self.assertIs(node.arguments["value"], disk_cached)
             self.assertIs(memory_protected.arguments["value"], memory_cached)
 
+    def test_aliased_names_load_and_copy_shared_targets_once(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("aliases", {}, Path(tmp) / "project")
+            record = pipeline.artifact_store.save(
+                variable_name="shared",
+                value={"payload": [1, 2]},
+                block_name="producer",
+                function_name="produce",
+                run_id="run",
+            )
+            pipeline.set_constant_value("shared_artifact_a", record, copy=False)
+            pipeline.set_constant_value("shared_artifact_b", record, copy=False)
+            shared_object = [3, 4]
+            pipeline.set_constant_value("shared_memory_a", shared_object, copy=False)
+            pipeline.set_constant_value("shared_memory_b", shared_object, copy=False)
+
+            with (
+                mock.patch.object(
+                    ArtifactStore,
+                    "load",
+                    wraps=pipeline.artifact_store.load,
+                ) as load,
+                mock.patch.object(
+                    pipeline,
+                    "_isolate_inspection_value",
+                    wraps=pipeline._isolate_inspection_value,
+                ) as isolate,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(
+                    [
+                        "shared_artifact_a",
+                        "shared_artifact_b",
+                        "shared_memory_a",
+                        "shared_memory_b",
+                    ]
+                )
+            self.assertEqual(load.call_count, 1)
+            self.assertEqual(isolate.call_count, 1)
+
+            with pipeline.inspect("shared_artifact_a", "shared_artifact_b") as resolved:
+                self.assertIs(resolved.shared_artifact_a, resolved.shared_artifact_b)
+            with pipeline.inspect("shared_memory_a", "shared_memory_b") as resolved:
+                self.assertIs(resolved.shared_memory_a, resolved.shared_memory_b)
+
+    def test_batch_copy_preserves_nested_aliases(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("batch-aliases", {}, Path(tmp) / "project")
+            shared = [1, 2]
+            pipeline.set_constant_value("left", {"items": shared}, copy=False)
+            pipeline.set_constant_value("right", {"items": shared}, copy=False)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["left", "right"])
+
+            cached_items: list[int] = []
+            with pipeline.inspect("left", "right") as resolved:
+                self.assertIs(
+                    resolved.left["items"],
+                    resolved.right["items"],
+                )
+                cached_items = resolved.left["items"]
+            self.assertIsNot(
+                pipeline.get_constant_value("left")["items"],
+                cached_items,
+            )
+
+    def test_block_inspection_alias_behaviour_matches_uncached_after_copy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("block-aliases", {}, Path(tmp) / "project")
+            shared = [1, 2]
+            pipeline.set_constant_value("left", {"items": shared}, copy=False)
+            pipeline.set_constant_value("right", {"items": shared}, copy=False)
+            block = pipeline.add_block("check", 1)
+            block.register_function(aliases_shared, ["result"])
+
+            uncached = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            self.assertIs(
+                uncached.arguments["left"]["items"],
+                uncached.arguments["right"]["items"],
+            )
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["left", "right"])
+
+            cached = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            )
+            self.assertTrue(
+                cached.arguments["left"]["items"]
+                is cached.arguments["right"]["items"]
+            )
+            self.assertTrue(block.inspect(allow_mutable_objects=False))
+
+    def test_identity_guard_outranks_reused_id(self) -> None:
+        class Refable:
+            pass
+
+        guard = Refable()
+        replacement = Refable()
+        binding = _InspectionCacheBinding(
+            cache_key=(("memory", id(replacement)), True),
+            kind="memory",
+            priority=None,
+            compute=True,
+            original_ref=None,
+            original_guard=guard,
+            original_id=id(replacement),
+        )
+
+        self.assertFalse(
+            InspectionMixin._inspection_original_matches(binding, replacement)
+        )
+
+    def test_replaced_non_weakrefable_value_is_not_served_stale(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("items", [1], copy=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["items"])
+
+            binding = pipeline._inspection_cache_bindings["items"]
+            self.assertIsNotNone(binding.original_guard)
+
+            pipeline.set_constant_value("items", [2, 3], copy=False)
+            with pipeline.inspect("items") as resolved:
+                self.assertEqual(resolved.items, [2, 3])
+            self.assertIsNone(binding.original_guard)
+
     def test_refresh_and_unload_apply_to_all_copied_objects(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
@@ -314,6 +457,72 @@ class InspectionCacheTests(unittest.TestCase):
                 )
                 self.assertEqual(resolved.series.iloc[0], [7, 8, 10])
 
+    def test_nested_pandas_frame_is_isolated_in_cached_and_protected_inspection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("nested-frame", {}, Path(tmp))
+            original = pd.DataFrame({"items": [[1, 2]]})
+            wrapped = {"frame": original}
+            pipeline.set_constant_value("wrapped", wrapped, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value, ["result"], param_mapping={"value": "wrapped"}
+            )
+
+            protected = block.inspect(resolve_only=True, allow_mutable_objects=False)
+            protected.arguments["value"]["frame"].iat[0, 0].append(3)
+            self.assertEqual(original.iat[0, 0], [1, 2])
+
+            pipeline.copy_for_inspection(["wrapped"])
+            with pipeline.inspect("wrapped") as resolved:
+                resolved.wrapped["frame"].iat[0, 0].append(4)
+            self.assertEqual(original.iat[0, 0], [1, 2])
+
+    def test_pandas_inside_object_array_is_isolated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("object-array-frame", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            original = np.empty(1, dtype=object)
+            original[0] = frame
+            pipeline.set_constant_value("array", original, copy=False)
+            pipeline.set_constant_value("frame", frame, copy=False)
+            pipeline.copy_for_inspection(["array", "frame"])
+
+            with pipeline.inspect("array", "frame") as resolved:
+                self.assertIs(resolved.array[0], resolved.frame)
+                resolved.array[0].iat[0, 0].append(3)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_failed_copy_does_not_expose_partial_pandas_memo_to_later_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("partial-memo", {}, Path(tmp))
+            cell = DeepcopyFailsButPicklable([1])
+            frame = pd.DataFrame({"nested": [cell]})
+            pipeline.set_constant_value("frame", frame, copy=False)
+            pipeline.set_constant_value("wrapped", {"frame": frame}, copy=False)
+
+            with mock.patch.object(pipeline.logger, "warning") as warning:
+                pipeline.copy_for_inspection(["frame", "wrapped"])
+            self.assertNotIn("frame", pipeline._inspection_cache_bindings)
+            self.assertTrue(warning.called)
+            with pipeline.inspect("wrapped") as resolved:
+                copied_cell = resolved.wrapped["frame"].iat[0, 0]
+                self.assertIsNot(copied_cell, cell)
+                copied_cell.value.append(2)
+            self.assertEqual(cell.value, [1])
+
+    def test_cyclic_standard_containers_still_preserve_aliases(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("recursive-copy", {}, Path(tmp))
+            original: list[object] = []
+            recursive_tuple = (original,)
+            original.append(recursive_tuple)
+            pipeline.set_constant_value("recursive", original, copy=False)
+            pipeline.copy_for_inspection(["recursive"])
+            with pipeline.inspect("recursive") as resolved:
+                copied = resolved.recursive
+                self.assertIsNot(copied, original)
+                self.assertIs(copied[0][0], copied)
+
     def test_dirty_storage_value_is_copied_instead_of_stale_artifact(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = PipelineHandler(
@@ -354,6 +563,19 @@ class InspectionCacheTests(unittest.TestCase):
         self.assertFalse(
             InspectionMixin._inspection_original_matches(binding, Refable())
         )
+
+    def test_replacing_in_memory_original_with_artifact_releases_identity_guard(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("guard-source-change", {}, Path(tmp))
+            pipeline.set_constant_value("items", [1], copy=False)
+            pipeline.copy_for_inspection(["items"])
+            binding = pipeline._inspection_cache_bindings["items"]
+            self.assertIsNotNone(binding.original_guard)
+
+            pipeline.set_constant_value("items", [2], to_disk=True)
+            with pipeline.inspect("items") as resolved:
+                self.assertEqual(resolved.items, [2])
+            self.assertIsNone(binding.original_guard)
 
     def test_skipped_nudge_rearms_after_original_dies(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -594,6 +816,27 @@ class InspectionCacheTests(unittest.TestCase):
 
             self.assertFalse((root / "project" / "inspection_tmp").exists())
 
+    def test_save_pipeline_cleans_child_inspection_temp_roots(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = PipelineHandler("parent", {}, root / "parent")
+            child = PipelineHandler("child", {}, root / "child")
+            child.add_block("producer", 1).register_function(
+                produce_early,
+                ["value"],
+            )
+            parent.add_child_pipeline(child, 1)
+
+            for project_root in (parent.project_root, child.project_root):
+                leftover = project_root / "inspection_tmp" / "leftover"
+                leftover.mkdir(parents=True)
+                (leftover / "file.bin").write_bytes(b"stale")
+
+            parent.save_pipeline(root / "bundle")
+
+            self.assertFalse((parent.project_root / "inspection_tmp").exists())
+            self.assertFalse((child.project_root / "inspection_tmp").exists())
+
     def test_normal_getters_and_execution_bypass_inspection_cache(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
@@ -680,6 +923,39 @@ class InspectionCacheTests(unittest.TestCase):
             pipeline.unload_inspection_objects()
             with self.assertWarnsRegex(UserWarning, "nothing was unloaded"):
                 pipeline.unload_inspection_objects()
+
+    @unittest.skipUnless(find_spec("optuna") is not None, "optuna is not installed")
+    def test_disk_backed_optuna_sampler_cannot_bypass_protected_inspection(self) -> None:
+        import optuna
+
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("sampler-copy", {}, Path(tmp))
+            record = pipeline.artifact_store.save(
+                "sampler",
+                optuna.samplers.RandomSampler(),
+                "maker",
+                "make",
+                "run",
+            )
+            pipeline.set_constant_value("sampler", record, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value, ["result"], param_mapping={"value": "sampler"}
+            )
+
+            with mock.patch.object(ArtifactStore, "load") as load:
+                with self.assertRaisesRegex(ResolutionError, "Optuna"):
+                    pipeline.copy_for_inspection(["sampler"])
+                load.assert_not_called()
+            self.assertEqual(pipeline._inspection_cache_bindings, {})
+            with self.assertRaisesRegex(InspectionCopyError, "Optuna"):
+                block.inspect(allow_mutable_objects=False)
+
+            # Older pickle records can lack the sampler metadata marker.
+            record.metadata.pop("optuna_type", None)
+            with self.assertRaisesRegex(ResolutionError, "Optuna"):
+                pipeline.copy_for_inspection(["sampler"])
+            self.assertEqual(pipeline._inspection_cache_bindings, {})
 
     def test_copies_config_artifact_records(self) -> None:
         with TemporaryDirectory() as tmp:

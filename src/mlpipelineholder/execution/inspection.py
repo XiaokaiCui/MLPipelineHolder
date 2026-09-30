@@ -94,6 +94,10 @@ class _InspectionCacheBinding:
     priority: int | None
     compute: bool
     original_ref: Any | None = None
+    # Strong identity guard for non-weak-referenceable originals (lists,
+    # dicts, ...). Object ids can be reused after destruction, so the guard
+    # keeps the exact original alive until the binding is replaced/unloaded.
+    original_guard: Any | None = None
     original_id: int = 0
 
 
@@ -220,6 +224,50 @@ class InspectionCopier:
         parameter_name: str,
         source: ResolutionSource,
     ) -> Any:
+        # Python's generic deepcopy delegates to pandas' shallow object-cell
+        # copying for DataFrames nested inside a container. Recurse through
+        # standard containers with this copier instead, preserving its shared
+        # memo and the pandas-specific cell isolation below.
+        if type(value) is dict:
+            copied_dict: dict[Any, Any] = {}
+            self._memo[id(value)] = copied_dict
+            for key, item in value.items():
+                copied_key = self.prepare(
+                    key, parameter_name=parameter_name, source=source
+                )[0]
+                copied_item = self.prepare(
+                    item, parameter_name=parameter_name, source=source
+                )[0]
+                copied_dict[copied_key] = copied_item
+            return copied_dict
+        if type(value) is list:
+            copied_list: list[Any] = []
+            self._memo[id(value)] = copied_list
+            for item in value:
+                copied_list.append(
+                    self.prepare(item, parameter_name=parameter_name, source=source)[0]
+                )
+            return copied_list
+        if type(value) is tuple:
+            copied_items = [
+                self.prepare(item, parameter_name=parameter_name, source=source)[0]
+                for item in value
+            ]
+            # Recursive tuple/list graphs may have populated the tuple's memo
+            # during the recursive copy. Reuse that copy to preserve the cycle.
+            if id(value) in self._memo:
+                return self._memo[id(value)]
+            copied_tuple = tuple(copied_items)
+            self._memo[id(value)] = copied_tuple
+            return copied_tuple
+        if type(value) is set:
+            copied_set: set[Any] = set()
+            self._memo[id(value)] = copied_set
+            for item in value:
+                copied_set.add(
+                    self.prepare(item, parameter_name=parameter_name, source=source)[0]
+                )
+            return copied_set
         try:
             import pandas as pd  # type: ignore
 
@@ -258,6 +306,14 @@ class InspectionCopier:
             import numpy as np  # type: ignore
 
             if isinstance(value, np.ndarray):
+                if type(value) is np.ndarray and value.dtype == object:
+                    copied = np.empty_like(value)
+                    self._memo[id(value)] = copied
+                    for index in np.ndindex(value.shape):
+                        copied[index] = self.prepare(
+                            value[index], parameter_name=parameter_name, source=source
+                        )[0]
+                    return copied
                 if value.dtype.hasobject:
                     return copy.deepcopy(value, self._memo)
                 copied = value.copy()
@@ -1496,6 +1552,7 @@ class InspectionMixin:
         def _resolve_investigation_copy_target(
             self, input_name: str, *, priority: int | None = None
         ) -> tuple[Any, Any, ResolutionSource]: ...
+        def _iter_attached_pipelines(self) -> list[Any]: ...
         def _attempt_allocator_trim(self) -> None: ...
 
     def inspect(
@@ -1635,17 +1692,26 @@ class InspectionMixin:
             if binding is None:
                 return _MISSING
             if artifact is not None:
-                if (
-                    binding.kind != "artifact"
-                    or binding.cache_key[0]
-                    != self._inspection_artifact_identity(artifact)
-                ):
+                if binding.kind != "artifact":
+                    # An in-memory original may be replaced by a disk-backed
+                    # generation. Release its strong identity guard on this
+                    # miss just as we do for memory-to-memory replacements.
+                    binding.original_guard = None
                     return _MISSING
-            elif binding.kind != "memory" or not self._inspection_original_matches(
-                binding,
-                original,
-            ):
-                return _MISSING
+                if binding.cache_key[0] != self._inspection_artifact_identity(artifact):
+                    return _MISSING
+            else:
+                if binding.kind != "memory":
+                    return _MISSING
+                if not self._inspection_original_matches(binding, original):
+                    if (
+                        binding.original_ref is None
+                        and binding.original_guard is not None
+                    ):
+                        # The original was replaced; release the guard so a
+                        # large stale object does not stay alive.
+                        binding.original_guard = None
+                    return _MISSING
             entry = self._inspection_cache_entries.get(binding.cache_key)
             if entry is None:
                 return _MISSING
@@ -1660,7 +1726,9 @@ class InspectionMixin:
             # A dead weakref definitively means the bound original is gone; do
             # not fall back to ``id`` because object ids can be reused.
             return binding.original_ref() is original
-        return id(original) == binding.original_id
+        if binding.original_guard is not None:
+            return binding.original_guard is original
+        return False
 
     def _copy_inspection_objects(
         self,
@@ -1686,24 +1754,40 @@ class InspectionMixin:
         _release_native_allocators()
         before = _process_rss_bytes()
 
+        # One copier per batch so shared sub-objects across the requested names
+        # keep their aliases, matching protected block inspection semantics.
+        copier = InspectionCopier(self.logger, allow_mutable_objects=False)
         prepared: dict[str, _InspectionCacheBinding] = {}
         loaded: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
+        failed: dict[_InspectionCacheKey, _InspectionValueNotCopyable] = {}
         skipped: list[tuple[str, _InspectionValueNotCopyable, Any]] = []
         for name, (owner, terminal, priority, compute) in plans.items():
-            try:
-                cache_key, binding, value = self._prepare_inspection_copy(
-                    owner,
-                    terminal,
-                    priority=priority,
-                    compute=compute,
-                )
-            except _InspectionValueNotCopyable as exc:
-                skipped.append((name, exc, terminal))
+            # Determine the identity first so aliased names share one load or
+            # one copy instead of materialising duplicates before dedup.
+            cache_key = self._inspection_copy_cache_key(terminal, compute)
+            if cache_key not in loaded and cache_key not in failed:
+                try:
+                    value = self._prepare_inspection_copy(
+                        owner,
+                        terminal,
+                        compute=compute,
+                        copier=copier,
+                    )
+                except _InspectionValueNotCopyable as exc:
+                    failed[cache_key] = exc
+                else:
+                    loaded[cache_key] = _InspectionCacheEntry(
+                        value=value,
+                        compute=compute,
+                    )
+            if cache_key in failed:
+                skipped.append((name, failed[cache_key], terminal))
                 continue
-            prepared[name] = binding
-            loaded.setdefault(
+            prepared[name] = self._inspection_cache_binding(
+                terminal,
                 cache_key,
-                _InspectionCacheEntry(value=value, compute=compute),
+                priority=priority,
+                compute=compute,
             )
 
         if operation == "refresh" and skipped:
@@ -1768,61 +1852,75 @@ class InspectionMixin:
         except Exception:
             pass
 
-    def _prepare_inspection_copy(
+    def _inspection_copy_cache_key(
         self,
-        owner: Any,
         terminal: Any,
+        compute: bool,
+    ) -> _InspectionCacheKey:
+        if isinstance(terminal, ArtifactRecord):
+            return (self._inspection_artifact_identity(terminal), compute)
+        return (("memory", id(terminal)), compute)
+
+    def _inspection_cache_binding(
+        self,
+        terminal: Any,
+        cache_key: _InspectionCacheKey,
         *,
         priority: int | None,
         compute: bool,
-    ) -> tuple[_InspectionCacheKey, _InspectionCacheBinding, Any]:
+    ) -> _InspectionCacheBinding:
         if isinstance(terminal, ArtifactRecord):
-            if terminal.serializer == OPTUNA_STUDY_SERIALIZER:
-                raise ResolutionError(
-                    "Optuna Study artifacts cannot be copied for inspection; "
-                    "inspect them with allow_mutable_objects=True instead."
-                )
-            cache_key: _InspectionCacheKey = (
-                self._inspection_artifact_identity(terminal),
-                compute,
-            )
-            value = owner._materialize_stored_value(terminal, "")
-            value = _compute_investigation_value(value, compute=compute)
-            binding = _InspectionCacheBinding(
+            return _InspectionCacheBinding(
                 cache_key=cache_key,
                 kind="artifact",
                 priority=priority,
                 compute=compute,
             )
-            return cache_key, binding, value
+        original_ref = self._weakref_or_none(terminal)
+        return _InspectionCacheBinding(
+            cache_key=cache_key,
+            kind="memory",
+            priority=priority,
+            compute=compute,
+            original_ref=original_ref,
+            original_guard=terminal if original_ref is None else None,
+            original_id=id(terminal),
+        )
+
+    def _prepare_inspection_copy(
+        self,
+        owner: Any,
+        terminal: Any,
+        *,
+        compute: bool,
+        copier: InspectionCopier,
+    ) -> Any:
+        if isinstance(terminal, ArtifactRecord):
+            if (
+                terminal.serializer == OPTUNA_STUDY_SERIALIZER
+                or terminal.metadata.get("optuna_type") == "sampler"
+            ):
+                raise ResolutionError(
+                    "Optuna studies and samplers cannot be copied for inspection; "
+                    "inspect them with allow_mutable_objects=True instead."
+                )
+            value = owner._materialize_stored_value(terminal, "")
+            # Older pickle artifacts may not carry the Optuna type marker.
+            if is_optuna_study(value) or is_optuna_sampler(value):
+                raise ResolutionError(
+                    "Optuna studies and samplers cannot be copied for inspection; "
+                    "inspect them with allow_mutable_objects=True instead."
+                )
+            return _compute_investigation_value(value, compute=compute)
 
         self._reject_uncopyable_inspection_terminal(terminal)
         if InspectionCopier._is_known_immutable(terminal):
             # Immutable values cannot be mutated, so sharing the value is safe
             # and avoids a pointless serializer round trip (small ints and some
             # strings are interned, which would look like a failed copy).
-            cache_key = (("memory", id(terminal)), compute)
-            binding = _InspectionCacheBinding(
-                cache_key=cache_key,
-                kind="memory",
-                priority=priority,
-                compute=compute,
-                original_ref=self._weakref_or_none(terminal),
-                original_id=id(terminal),
-            )
-            return cache_key, binding, terminal
-        copied = self._isolate_inspection_value(terminal)
-        copied = _compute_investigation_value(copied, compute=compute)
-        cache_key = (("memory", id(terminal)), compute)
-        binding = _InspectionCacheBinding(
-            cache_key=cache_key,
-            kind="memory",
-            priority=priority,
-            compute=compute,
-            original_ref=self._weakref_or_none(terminal),
-            original_id=id(terminal),
-        )
-        return cache_key, binding, copied
+            return terminal
+        copied = self._isolate_inspection_value(terminal, copier)
+        return _compute_investigation_value(copied, compute=compute)
 
     @staticmethod
     def _reject_uncopyable_inspection_terminal(terminal: Any) -> None:
@@ -1848,11 +1946,16 @@ class InspectionMixin:
                 "isolation; inspect them with allow_mutable_objects=True instead."
             )
 
-    def _isolate_inspection_value(self, value: Any) -> Any:
+    def _isolate_inspection_value(
+        self,
+        value: Any,
+        copier: InspectionCopier,
+    ) -> Any:
         # Reuse the protected-inspection copier so pandas object cells, NumPy
         # object arrays, Torch tensors, and Dask collections are isolated with
-        # the same semantics as ``allow_mutable_objects=False`` inspection.
-        copier = InspectionCopier(self.logger, allow_mutable_objects=False)
+        # the same semantics as ``allow_mutable_objects=False`` inspection. The
+        # copier is shared per batch, so aliases between requested names survive.
+        previous_memo = copier._memo.copy()
         try:
             copied = copier.prepare(
                 value,
@@ -1875,8 +1978,14 @@ class InspectionMixin:
             if copied is not value:
                 return copied
             isolation_error = "copy isolation returned the original object"
+        # A failed pandas copy may already have memoized an incomplete frame.
+        # Never expose that partial frame through a later name in this batch.
+        copier._memo.clear()
+        copier._memo.update(previous_memo)
         try:
-            return self._copy_value_via_temporary_artifact(value)
+            serialized = self._copy_value_via_temporary_artifact(value)
+            copier._memo[id(value)] = serialized
+            return serialized
         except Exception as exc:
             raise _InspectionValueNotCopyable(
                 f"copy isolation failed ({isolation_error}); temporary "
@@ -1906,11 +2015,13 @@ class InspectionMixin:
         return copied
 
     def _clear_inspection_temp_root(self) -> None:
-        if self.project_root is None:
-            return
-        temp_root = Path(self.project_root) / "inspection_tmp"
-        if temp_root.exists():
-            shutil.rmtree(temp_root, ignore_errors=True)
+        for pipeline in self._iter_attached_pipelines():
+            project_root = getattr(pipeline, "project_root", None)
+            if project_root is None:
+                continue
+            temp_root = Path(project_root) / "inspection_tmp"
+            if temp_root.exists():
+                shutil.rmtree(temp_root, ignore_errors=True)
 
     @staticmethod
     def _weakref_or_none(value: Any) -> Any | None:
