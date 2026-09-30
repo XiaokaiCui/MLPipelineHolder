@@ -198,13 +198,16 @@ class StorageMixin:
             object_name=object_name,
         )
         if not materialize:
-            if record.artifact is None:
-                if record.value_is_loaded:
-                    return record.value
-                raise PersistenceError(
-                    f"Stored object '{record.object_name}' has no persisted artifact"
-                )
-            return record.artifact
+            # A loaded value outranks an older persisted artifact, matching
+            # ``_load_stored_object_value`` so cached resolution cannot copy a
+            # stale representation of a storage object updated in memory.
+            if record.value_is_loaded:
+                return record.value
+            if record.artifact is not None:
+                return record.artifact
+            raise PersistenceError(
+                f"Stored object '{record.object_name}' has no persisted artifact"
+            )
         return self._load_stored_object_value(record, cache=cache)
 
     def remove_from_storage(

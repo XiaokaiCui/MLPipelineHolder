@@ -179,6 +179,21 @@ def invoke_without_arguments(callback: Callable[[], object]) -> object:
     return callback()
 
 
+def consume_value(value: object) -> object:
+    return value
+
+
+class StatefulInt(int):
+    def __init__(self, value: int = 0, /) -> None:
+        self.meta = bytearray()
+
+
+class StatefulList(list[int]):
+    def __init__(self, iterable: list[int] | None = None) -> None:
+        super().__init__(iterable or [])
+        self.cache = bytearray()
+
+
 class ExecutionInspectionTests(unittest.TestCase):
     def test_block_inspect_returns_raw_result_without_committing_outputs(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1456,6 +1471,63 @@ class ExecutionInspectionTests(unittest.TestCase):
             )
             block = pipeline.add_block("callback", 1)
             block.register_function(invoke_without_arguments, ["result"])
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._available_memory_bytes",
+                return_value=(100_000, "test RAM", ("97.7 KiB via test RAM",)),
+            ):
+                with self.assertRaisesRegex(
+                    InspectionMemoryError,
+                    "exceeds available memory",
+                ):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+    def test_method_wrapper_owner_storage_is_included_in_preflight(self) -> None:
+        with TemporaryDirectory() as tmp:
+            items = [bytearray(200_000)]
+            pipeline = PipelineHandler(
+                "root",
+                {"callback": items.__iter__},
+                Path(tmp) / "root",
+            )
+            block = pipeline.add_block("callback", 1)
+            block.register_function(invoke_without_arguments, ["result"])
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._available_memory_bytes",
+                return_value=(100_000, "test RAM", ("97.7 KiB via test RAM",)),
+            ):
+                with self.assertRaisesRegex(
+                    InspectionMemoryError,
+                    "exceeds available memory",
+                ):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+    def test_stateful_immutable_subclass_storage_is_included_in_preflight(self) -> None:
+        with TemporaryDirectory() as tmp:
+            value = StatefulInt(7)
+            value.meta = bytearray(200_000)
+            pipeline = PipelineHandler("root", {"value": value}, Path(tmp) / "root")
+            block = pipeline.add_block("value", 1)
+            block.register_function(consume_value, ["result"])
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._available_memory_bytes",
+                return_value=(100_000, "test RAM", ("97.7 KiB via test RAM",)),
+            ):
+                with self.assertRaisesRegex(
+                    InspectionMemoryError,
+                    "exceeds available memory",
+                ):
+                    block.inspect(resolve_only=True, allow_mutable_objects=False)
+
+    def test_stateful_container_subclass_storage_is_included_in_preflight(self) -> None:
+        with TemporaryDirectory() as tmp:
+            value = StatefulList([1, 2])
+            value.cache = bytearray(200_000)
+            pipeline = PipelineHandler("root", {"value": value}, Path(tmp) / "root")
+            block = pipeline.add_block("value", 1)
+            block.register_function(consume_value, ["result"])
 
             with mock.patch(
                 "mlpipelineholder.execution.inspection._available_memory_bytes",

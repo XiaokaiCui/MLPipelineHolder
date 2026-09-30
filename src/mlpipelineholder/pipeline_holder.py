@@ -317,6 +317,7 @@ class PipelineHolder(
             self._stored_objects: dict[str, StoredObjectRecord] = {}
             self._inspection_cache_bindings: dict[str, Any] = {}
             self._inspection_cache_entries: dict[Any, Any] = {}
+            self._inspection_copy_skipped: dict[str, tuple[int, Any]] = {}
             self._inspection_cache_lock = RLock()
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:

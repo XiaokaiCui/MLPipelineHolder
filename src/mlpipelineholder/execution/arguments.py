@@ -40,7 +40,35 @@ class ArgumentMixin:
         ) -> Any: ...
         def _get_unmaterialized_value(self, variable_name: str) -> Any: ...
         def _resolve_stored_terminal(self, value: Any) -> tuple[Any, Any]: ...
-        def _inspection_cached_value(self, input_name: str, artifact: ArtifactRecord) -> Any: ...
+        def _select_node_at_or_below_priority(self, priority: int) -> Any: ...
+        def _visible_outputs_before_priority(self, priority: float | None) -> dict[str, Any]: ...
+        def _log_selected_node(
+            self,
+            node: Any,
+            *,
+            operation: str,
+            requested_priority: int | None,
+        ) -> None: ...
+        def _inspection_cached_value(
+            self,
+            input_name: str,
+            *,
+            artifact: ArtifactRecord | None,
+            original: Any = None,
+        ) -> Any: ...
+        def _log_inspection_cache_hit(
+            self,
+            input_name: str,
+            binding: Any,
+            requested_priority: int | None,
+        ) -> None: ...
+        def _log_inspection_copy_nudge(
+            self,
+            input_name: str,
+            value: Any,
+            *,
+            requested_priority: int | None,
+        ) -> None: ...
         def _ancestor_manual_values(self) -> dict[str, Any]: ...
         def _ancestor_config_values(self) -> dict[str, Any]: ...
         def _config_has_field(self, config_obj: Any, field_name: str) -> bool: ...
@@ -343,6 +371,7 @@ class ArgumentMixin:
         function_name: str,
         *,
         visible_outputs: dict[str, Any] | None = None,
+        requested_priority: int | None = None,
     ) -> Any:
         owner, value, source = self._resolve_unmaterialized_investigation_input(
             input_name,
@@ -350,9 +379,26 @@ class ArgumentMixin:
             visible_outputs=visible_outputs,
         )
         if isinstance(value, ArtifactRecord):
-            cached = self._inspection_cached_value(input_name, value)
-            if cached is not _MISSING:
-                return cached
+            cached = self._inspection_cached_value(input_name, artifact=value)
+        else:
+            cached = self._inspection_cached_value(
+                input_name,
+                artifact=None,
+                original=value,
+            )
+        if cached is not _MISSING:
+            cached_value, binding = cached
+            self._log_inspection_cache_hit(
+                input_name,
+                binding,
+                requested_priority,
+            )
+            return cached_value
+        self._log_inspection_copy_nudge(
+            input_name,
+            value,
+            requested_priority=requested_priority,
+        )
         if source.kind == "storage":
             return self._get_stored_object_by_name(
                 input_name,
@@ -366,20 +412,28 @@ class ArgumentMixin:
             else "",
         )
 
-    def _resolve_investigation_artifact(
+    def _resolve_investigation_copy_target(
         self,
         input_name: str,
-    ) -> tuple[Any, ArtifactRecord]:
-        owner, value, _ = self._resolve_unmaterialized_investigation_input(
-            input_name,
-            "load_for_inspection",
-        )
-        if not isinstance(value, ArtifactRecord):
-            raise ResolutionError(
-                f"Inspection preload requires disk-backed objects, but "
-                f"'{input_name}' resolved to {type(value).__name__}"
+        *,
+        priority: int | None = None,
+    ) -> tuple[Any, Any, ResolutionSource]:
+        visible_outputs: dict[str, Any] | None = None
+        if priority is not None:
+            selected = self._select_node_at_or_below_priority(priority)
+            self._log_selected_node(
+                selected,
+                operation="copy_for_inspection",
+                requested_priority=priority,
             )
-        return owner, value
+            visible_outputs = self._visible_outputs_before_priority(
+                selected.execution_priority
+            )
+        return self._resolve_unmaterialized_investigation_input(
+            input_name,
+            "copy_for_inspection",
+            visible_outputs=visible_outputs,
+        )
 
     def _resolve_unmaterialized_investigation_input(
         self,

@@ -62,6 +62,7 @@ class SaveLoadMixin:
         _temporary_root_handle: Any = None
 
         def _root_pipeline(self) -> Any: ...
+        def _clear_inspection_temp_root(self) -> None: ...
         def _serialize_payload_for_save(
             self, target_root: Path, cache: dict[int, Any] | None = None
         ) -> dict[str, Any]: ...
@@ -130,6 +131,7 @@ class SaveLoadMixin:
         cleanup_mode: str,
     ) -> Path:
         self._root_pipeline()._validate_runtime_output_pointers()
+        self._clear_inspection_temp_root()
         target = self.project_root if path is None else Path(path)
         if self._temporary_root_handle is not None and self._normalized_path(target) != self._normalized_path(self.project_root):
             self._relocate_project_root(target)

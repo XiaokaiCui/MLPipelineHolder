@@ -40,6 +40,7 @@ from .function_registry import (
     rename_args,
     resolve_callable,
 )
+from ..core.constants import _MISSING
 from ..core.models import (
     ArtifactRecord,
     BlockArgsRegistration,
@@ -1956,6 +1957,45 @@ class ExecutionBlock:
                         self.parent._materialize_stored_value(previous_value, "")
                     )
                     pointer_materialized = True
+            if self.parent._inspection_cache_has_entries():
+                raw_value, raw_source = self.parent._resolve_named_input_with_source(
+                    input_name,
+                    function_name,
+                    {},
+                    inspection_outputs,
+                    parent_config,
+                    defaults,
+                    loaded_artifacts,
+                    declared_output_names,
+                    allow_missing=allow_missing,
+                    missing_value=missing_value,
+                    visible_constants=visible_constants,
+                    same_node_previous_outputs=previous_names,
+                    materialize=False,
+                )
+                if isinstance(raw_value, ArtifactRecord):
+                    hit = self.parent._inspection_cached_value(
+                        input_name,
+                        artifact=raw_value,
+                    )
+                else:
+                    hit = self.parent._inspection_cached_value(
+                        input_name,
+                        artifact=None,
+                        original=raw_value,
+                    )
+                if hit is not _MISSING:
+                    cached_value, binding = hit
+                    self.parent._log_inspection_cache_hit(
+                        input_name,
+                        binding,
+                        None,
+                    )
+                    return cached_value, replace(
+                        raw_source,
+                        mapped_from=parameter_name,
+                        materialized=True,
+                    )
             value, source = self.parent._resolve_named_input_with_source(
                 input_name,
                 function_name,

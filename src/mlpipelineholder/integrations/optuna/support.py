@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import sys
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
@@ -37,22 +38,30 @@ def _load_optuna() -> OptunaApi:
         ) from exc
 
 
+def _loaded_optuna_api() -> OptunaApi | None:
+    """Return the Optuna API only when optuna is already imported.
+
+    A value cannot be an Optuna study or sampler unless the library was
+    imported to create it, so classification must not import Optuna as a side
+    effect: that would make unrelated inspection copies pull in the whole
+    optional dependency stack.
+    """
+    module = sys.modules.get("optuna")
+    if module is None:
+        return None
+    return OptunaApi(module)
+
+
 def is_optuna_study(value: OptunaRuntimeValue) -> TypeGuard[OptunaStudy]:
-    try:
-        optuna = OptunaApi(import_module("optuna"))
-    except ModuleNotFoundError as exc:
-        if exc.name != "optuna":
-            raise
+    optuna = _loaded_optuna_api()
+    if optuna is None:
         return False
     return isinstance(value, optuna.study.Study)
 
 
 def is_optuna_sampler(value: OptunaRuntimeValue) -> TypeGuard[OptunaSampler]:
-    try:
-        optuna = OptunaApi(import_module("optuna"))
-    except ModuleNotFoundError as exc:
-        if exc.name != "optuna":
-            raise
+    optuna = _loaded_optuna_api()
+    if optuna is None:
         return False
     return isinstance(value, optuna.samplers.BaseSampler)
 
