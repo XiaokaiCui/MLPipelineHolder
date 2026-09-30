@@ -403,7 +403,6 @@ class InspectionCacheTests(unittest.TestCase):
                 pipeline.unload_inspection_objects()
 
             self.assertGreaterEqual(release.call_count, 2)
-            self.assertTrue(release.call_args.kwargs.get("gpu"))
 
     def test_smaps_rollup_rss_parser_uses_current_mapping_total(self) -> None:
         with TemporaryDirectory() as tmp:

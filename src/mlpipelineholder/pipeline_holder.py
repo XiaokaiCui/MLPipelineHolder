@@ -1302,10 +1302,10 @@ class PipelineHolder(
     def _cleanup_block_memory(self, node_name: str) -> None:
         gc.collect()
         self._attempt_allocator_trim()
-        # PyArrow and PyTorch keep freed buffers in their own pools, which
-        # ``malloc_trim`` cannot reach; release them so per-node cleanup can
-        # actually lower memory for dataframe and GPU workloads.
-        _release_native_allocators(gpu=True)
+        # PyArrow keeps freed buffers in its own pool, which ``malloc_trim``
+        # cannot reach; release it so per-node cleanup can actually lower
+        # memory for dataframe workloads.
+        _release_native_allocators()
         if self.memory_profile_logging:
             self._log_memory_profile(node_name, phase="after_cleanup")
 

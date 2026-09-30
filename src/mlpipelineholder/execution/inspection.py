@@ -306,12 +306,13 @@ def _process_rss_bytes() -> int | None:
         return None
 
 
-def _release_native_allocators(*, gpu: bool = False) -> None:
-    """Best-effort release of native allocator pools that bypass ``malloc_trim``.
+def _release_native_allocators() -> None:
+    """Best-effort release of PyArrow's pooled buffers.
 
-    PyArrow keeps freed buffers in its own pool (jemalloc by default), so RSS
-    can stay flat on load and fail to drop on unload. PyTorch similarly caches
-    CUDA blocks. Failures are ignored because this only improves reporting.
+    PyArrow keeps freed buffers in its own memory pool (jemalloc by default),
+    which ``malloc_trim`` cannot reach, so RSS can stay flat on load and fail
+    to drop on unload. Failures are ignored because this only improves
+    reporting.
     """
     try:
         import pyarrow  # type: ignore
@@ -320,15 +321,6 @@ def _release_native_allocators(*, gpu: bool = False) -> None:
         release = getattr(pool, "release_unused", None)
         if release is not None:
             release()
-    except Exception:
-        pass
-    if not gpu:
-        return
-    try:
-        import torch  # type: ignore
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
     except Exception:
         pass
 
@@ -1549,7 +1541,7 @@ class InspectionMixin:
         self._unload_from_memory()
         gc.collect()
         self._attempt_allocator_trim()
-        _release_native_allocators(gpu=True)
+        _release_native_allocators()
         after = _process_rss_bytes()
         try:
             self._log_inspection_memory_delta(

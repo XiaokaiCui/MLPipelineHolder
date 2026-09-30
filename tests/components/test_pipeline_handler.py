@@ -3608,7 +3608,6 @@ class PipelineHandlerTests(unittest.TestCase):
                 pipeline.run_all()
 
             release.assert_called()
-            self.assertTrue(release.call_args.kwargs.get("gpu"))
 
     def test_memory_profile_logging_reports_all_cleanup_phases(self) -> None:
         with TemporaryDirectory() as temp_dir:
