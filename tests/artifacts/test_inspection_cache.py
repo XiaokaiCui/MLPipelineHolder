@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+from collections import OrderedDict, defaultdict
+from dataclasses import dataclass
 import sys
 import threading
 import types
@@ -54,6 +56,29 @@ def append_value(value: list[int]) -> list[int]:
 
 def aliases_shared(left: dict[str, list[int]], right: dict[str, list[int]]) -> bool:
     return left["items"] is right["items"]
+
+
+@dataclass
+class FrameHolder:
+    frame: pd.DataFrame
+
+
+@dataclass(slots=True, frozen=True)
+class SlottedFrameHolder:
+    frame: pd.DataFrame
+
+
+class PlainFrameHolder:
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+
+
+class FrameDict(dict[str, pd.DataFrame]):
+    pass
+
+
+class FrameList(list[pd.DataFrame]):
+    pass
 
 
 class WeakPayload:
@@ -476,6 +501,79 @@ class InspectionCacheTests(unittest.TestCase):
             with pipeline.inspect("wrapped") as resolved:
                 resolved.wrapped["frame"].iat[0, 0].append(4)
             self.assertEqual(original.iat[0, 0], [1, 2])
+
+    def test_wrapped_pandas_frame_is_isolated_in_cache_and_protected_inspection(self) -> None:
+        wrappers = (
+            lambda frame: FrameHolder(frame),
+            lambda frame: SlottedFrameHolder(frame),
+            lambda frame: PlainFrameHolder(frame),
+            lambda frame: OrderedDict(frame=frame),
+            lambda frame: defaultdict(list, frame=frame),
+            lambda frame: FrameDict(frame=frame),
+            lambda frame: FrameList([frame]),
+            lambda frame: types.SimpleNamespace(frame=frame),
+        )
+        for wrap in wrappers:
+            with self.subTest(wrapper=wrap):
+                with TemporaryDirectory() as tmp:
+                    pipeline = PipelineHandler("wrapped-frame", {}, Path(tmp))
+                    frame = pd.DataFrame({"items": [[1, 2]]})
+                    wrapped = wrap(frame)
+                    pipeline.set_constant_value("wrapped", wrapped, copy=False)
+                    block = pipeline.add_block("use", 1)
+                    block.register_function(
+                        return_value, ["result"], param_mapping={"value": "wrapped"}
+                    )
+
+                    protected = block.inspect(
+                        resolve_only=True, allow_mutable_objects=False
+                    ).arguments["value"]
+                    copied_frame = (
+                        protected[0] if isinstance(protected, list)
+                        else protected["frame"] if isinstance(protected, dict)
+                        else protected.frame
+                    )
+                    copied_frame.iat[0, 0].append(3)
+                    self.assertEqual(frame.iat[0, 0], [1, 2])
+
+                    pipeline.copy_for_inspection(["wrapped"])
+                    with pipeline.inspect("wrapped") as resolved:
+                        cached = resolved.wrapped
+                        copied_frame = (
+                            cached[0] if isinstance(cached, list)
+                            else cached["frame"] if isinstance(cached, dict)
+                            else cached.frame
+                        )
+                        copied_frame.iat[0, 0].append(4)
+                    self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_self_referential_object_preserves_cycle(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("self-ref", {}, Path(tmp))
+            original = PlainFrameHolder(pd.DataFrame({"items": [[1, 2]]}))
+            setattr(original, "self_ref", original)
+            pipeline.set_constant_value("holder", original, copy=False)
+            pipeline.copy_for_inspection(["holder"])
+
+            with pipeline.inspect("holder") as resolved:
+                copied = resolved.holder
+                self.assertIsNot(copied, original)
+                self.assertIs(getattr(copied, "self_ref"), copied)
+                copied.frame.iat[0, 0].append(3)
+            self.assertEqual(original.frame.iat[0, 0], [1, 2])
+
+    def test_wrapped_batch_copies_keep_shared_frame_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("wrapped-alias", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            pipeline.set_constant_value("left", FrameHolder(frame), copy=False)
+            pipeline.set_constant_value("right", {"frame": frame}, copy=False)
+            pipeline.copy_for_inspection(["left", "right"])
+
+            with pipeline.inspect("left", "right") as resolved:
+                self.assertIs(resolved.left.frame, resolved.right["frame"])
+                resolved.left.frame.iat[0, 0].append(3)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
 
     def test_pandas_inside_object_array_is_isolated(self) -> None:
         with TemporaryDirectory() as tmp:
