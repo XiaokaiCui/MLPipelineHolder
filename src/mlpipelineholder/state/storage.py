@@ -189,6 +189,7 @@ class StorageMixin:
         object_name: str,
         *,
         cache: bool,
+        materialize: bool = True,
     ) -> Any:
         self._require_root_storage_owner()
         record = resolve_record(
@@ -196,6 +197,14 @@ class StorageMixin:
             hash_id=None,
             object_name=object_name,
         )
+        if not materialize:
+            if record.artifact is None:
+                if record.value_is_loaded:
+                    return record.value
+                raise PersistenceError(
+                    f"Stored object '{record.object_name}' has no persisted artifact"
+                )
+            return record.artifact
         return self._load_stored_object_value(record, cache=cache)
 
     def remove_from_storage(

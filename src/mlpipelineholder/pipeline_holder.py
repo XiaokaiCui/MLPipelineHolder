@@ -22,6 +22,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from textwrap import dedent
+from threading import RLock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -73,6 +74,7 @@ from .execution.engine import EngineMixin
 from .execution.inspection import (
     DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     InspectionMixin,
+    _release_native_allocators,
 )
 from .execution.function_registry import (
     _values_equal,
@@ -313,6 +315,9 @@ class PipelineHolder(
             ] = WeakKeyDictionary()
             self.run_history: list[RunRecord] = []
             self._stored_objects: dict[str, StoredObjectRecord] = {}
+            self._inspection_cache_bindings: dict[str, Any] = {}
+            self._inspection_cache_entries: dict[Any, Any] = {}
+            self._inspection_cache_lock = RLock()
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:
             if generated_temp_root and self.project_root.exists():
@@ -1297,6 +1302,10 @@ class PipelineHolder(
     def _cleanup_block_memory(self, node_name: str) -> None:
         gc.collect()
         self._attempt_allocator_trim()
+        # PyArrow keeps freed buffers in its own pool, which ``malloc_trim``
+        # cannot reach; release it so per-node cleanup can actually lower
+        # memory for dataframe workloads.
+        _release_native_allocators()
         if self.memory_profile_logging:
             self._log_memory_profile(node_name, phase="after_cleanup")
 

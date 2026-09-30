@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import gc
 import math
 import os
 import sys
 import types
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -17,7 +19,7 @@ from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Final, Self
 from uuid import UUID
 
-from ..core.constants import _IMMUTABLE_TYPES
+from ..core.constants import _IMMUTABLE_TYPES, _MISSING
 from ..core.models import ArtifactRecord, ResolutionSource
 from ..exceptions import InspectionCopyError, InspectionMemoryError
 from ..integrations.optuna.support import (
@@ -50,6 +52,16 @@ _ARTIFACT_MEMORY_FACTORS: Final[dict[str, float]] = {
 _RETAINED_ARTIFACT_SERIALIZERS: Final[frozenset[str]] = frozenset(
     {"json", "pickle"}
 )
+
+_InspectionArtifactIdentity = tuple[str, str, bool, str, str]
+_InspectionCacheKey = tuple[_InspectionArtifactIdentity, bool]
+
+
+@dataclass(slots=True)
+class _InspectionCacheEntry:
+    artifact: ArtifactRecord
+    value: Any
+    compute: bool
 
 
 class InspectionCopier:
@@ -277,6 +289,68 @@ def _format_bytes(size: float) -> str:
     return f"{value:.1f} GiB"
 
 
+def _format_signed_bytes(size: int) -> str:
+    sign = "+" if size >= 0 else "-"
+    return f"{sign}{_format_bytes(abs(size))}"
+
+
+def _process_rss_bytes() -> int | None:
+    rss = _read_smaps_rollup_rss()
+    if rss is not None:
+        return rss
+    try:
+        import psutil  # type: ignore
+
+        return int(psutil.Process().memory_info().rss)
+    except Exception:
+        return None
+
+
+def _release_native_allocators() -> None:
+    """Best-effort release of PyArrow's pooled buffers.
+
+    PyArrow keeps freed buffers in its own memory pool (jemalloc by default),
+    which ``malloc_trim`` cannot reach, so RSS can stay flat on load and fail
+    to drop on unload. Failures are ignored because this only improves
+    reporting.
+    """
+    try:
+        import pyarrow  # type: ignore
+
+        pool = pyarrow.default_memory_pool()
+        release = getattr(pool, "release_unused", None)
+        if release is not None:
+            release()
+    except Exception:
+        pass
+
+
+def _read_smaps_rollup_rss(
+    path: str | Path = "/proc/self/smaps_rollup",
+) -> int | None:
+    """Read synchronous Linux RSS accounting, falling back elsewhere.
+
+    ``psutil.Process().memory_info().rss`` uses Linux ``statm``, whose RSS
+    counters can lag large multithreaded allocations. ``smaps_rollup`` walks
+    current mappings and provides a reliable point-in-time baseline without a
+    sleep or duplicate computation.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.startswith("Rss:"):
+                    continue
+                fields_text = line.split()
+                if len(fields_text) < 2:
+                    return None
+                return int(fields_text[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def _path_logical_bytes(path: Path) -> tuple[int, bool]:
     try:
         if not path.is_dir():
@@ -353,15 +427,22 @@ class _InspectionMemoryEstimator:
 
     The estimator intentionally avoids walking complete Python object graphs or
     object-dtype tabular values. It uses cheap storage metadata and bounded
-    samples, recording material uncertainty for the confirmation path.
+    samples, recording material uncertainty for the confirmation path. The
+    opt-in retained mode counts immutable storage and deduplicates exact array
+    and tensor storage windows for inspection-cache reporting; protected-copy
+    preflight keeps the default copy-allocation semantics.
     """
 
     def __init__(
         self,
         pointer_reader: Callable[[OutputPointer], Any] | None = None,
+        *,
+        retained: bool = False,
     ) -> None:
         self._pointer_reader = pointer_reader
+        self._retained = retained
         self._copy_seen: set[int] = set()
+        self._retained_storage_seen: set[tuple[str, int, int]] = set()
         self._retained_materialization_bytes = 0
         self._peak_transient_materialization_bytes = 0
         self._copy_bytes = 0
@@ -526,7 +607,7 @@ class _InspectionMemoryEstimator:
             )
             return sys.getsizeof(value)
         if isinstance(value, _IMMUTABLE_TYPES):
-            return 0
+            return sys.getsizeof(value) if self._retained else 0
         if isinstance(
             value,
             (FunctionType, BuiltinFunctionType, type, types.ModuleType),
@@ -690,6 +771,18 @@ class _InspectionMemoryEstimator:
 
     def _estimate_numpy_array(self, array: Any, label: str) -> int:
         total = int(array.nbytes)
+        if self._retained:
+            try:
+                data_pointer = int(array.__array_interface__["data"][0])
+                storage_key = ("numpy", data_pointer, total)
+                if storage_key in self._retained_storage_seen:
+                    return 0
+                self._retained_storage_seen.add(storage_key)
+            except Exception:
+                self._mark_uncertain(
+                    label,
+                    "NumPy backing storage identity could not be determined",
+                )
         if array.dtype.hasobject and array.size:
             sample_count = min(int(array.size), _SHALLOW_SAMPLE_LIMIT)
             iterator = iter(array.flat)
@@ -710,6 +803,14 @@ class _InspectionMemoryEstimator:
             size = int(tensor.element_size() * tensor.nelement())
         except Exception:
             size = int(getattr(tensor, "nbytes", 0))
+        if self._retained:
+            try:
+                storage_key = ("torch", int(tensor.data_ptr()), size)
+                if storage_key in self._retained_storage_seen:
+                    return 0
+                self._retained_storage_seen.add(storage_key)
+            except Exception:
+                pass
         if bool(tensor.is_cuda):
             index = tensor.device.index
             device = 0 if index is None else int(index)
@@ -1345,8 +1446,17 @@ class InspectionMixin:
     """Create temporary multi-value inspection contexts."""
 
     if TYPE_CHECKING:
+        logger: Any = None
+        _inspection_cache_bindings: dict[str, _InspectionCacheKey] = {}
+        _inspection_cache_entries: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
+        _inspection_cache_lock: Any = None
+
         @staticmethod
         def _validate_integer_priority(priority: Any) -> int: ...
+        def _resolve_investigation_artifact(
+            self, input_name: str
+        ) -> tuple[Any, ArtifactRecord]: ...
+        def _attempt_allocator_trim(self) -> None: ...
 
     def inspect(
         self,
@@ -1369,3 +1479,255 @@ class InspectionMixin:
         if priority is not None:
             self._validate_integer_priority(priority)
         return PipelineInspection(self, names, compute=compute, priority=priority)
+
+    def load_for_inspection(
+        self,
+        object_names: list[str] | tuple[str, ...],
+        *,
+        compute: bool = True,
+    ) -> None:
+        """Load or refresh selected disk-backed investigation values in memory."""
+        names = self._validate_inspection_object_names(object_names)
+        if not isinstance(compute, bool):
+            raise TypeError("compute must be a boolean")
+        self._load_inspection_objects(
+            {name: compute for name in names},
+            operation="load",
+        )
+        self.logger.info(
+            "Inspection objects are shared and may become stale after pipeline or "
+            "block execution. Call unload_inspection_objects() between executions, "
+            "or refresh_loaded_objects() to reload every loaded object."
+        )
+
+    def refresh_loaded_objects(self) -> None:
+        """Refresh every currently loaded inspection object from current artifacts."""
+        with self._inspection_cache_lock:
+            requests = {
+                name: cache_key[1]
+                for name, cache_key in self._inspection_cache_bindings.items()
+            }
+        if not requests:
+            warnings.warn(
+                "No inspection objects are currently loaded; nothing was refreshed",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        self._load_inspection_objects(requests, operation="refresh")
+
+    def unload_inspection_objects(self) -> None:
+        """Release this pipeline's references to all preloaded inspection objects."""
+        with self._inspection_cache_lock:
+            if not self._inspection_cache_bindings:
+                warnings.warn(
+                    "No inspection objects are currently loaded; nothing was unloaded",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return
+            values = tuple(
+                entry.value for entry in self._inspection_cache_entries.values()
+            )
+        estimate = self._format_inspection_object_estimate(
+            values,
+            label="released cached size",
+        )
+        del values
+        gc.collect()
+        self._attempt_allocator_trim()
+        _release_native_allocators()
+        before = _process_rss_bytes()
+        self._unload_from_memory()
+        gc.collect()
+        self._attempt_allocator_trim()
+        _release_native_allocators()
+        after = _process_rss_bytes()
+        try:
+            self._log_inspection_memory_delta(
+                "unload",
+                None if before is None or after is None else after - before,
+                estimate,
+                phase="after cleanup",
+            )
+        except Exception:
+            pass
+
+    def _inspection_cached_value(
+        self,
+        input_name: str,
+        artifact: ArtifactRecord,
+    ) -> Any:
+        identity = self._inspection_artifact_identity(artifact)
+        with self._inspection_cache_lock:
+            cache_key = self._inspection_cache_bindings.get(input_name)
+            if cache_key is None or cache_key[0] != identity:
+                return _MISSING
+            entry = self._inspection_cache_entries.get(cache_key)
+            return _MISSING if entry is None else entry.value
+
+    def _load_inspection_objects(
+        self,
+        requests: dict[str, bool],
+        *,
+        operation: str,
+    ) -> None:
+        plans: dict[str, tuple[Any, ArtifactRecord, _InspectionCacheKey]] = {}
+        for name, compute in requests.items():
+            owner, artifact = self._resolve_investigation_artifact(name)
+            cache_key = (self._inspection_artifact_identity(artifact), compute)
+            plans[name] = (owner, artifact, cache_key)
+
+        # Return reusable free arenas to the OS before taking the baseline.
+        # Otherwise a large new object can be satisfied from memory that is
+        # already resident, making the RSS delta far smaller than the object.
+        # ``_release_native_allocators`` covers pools such as PyArrow's, which
+        # ``malloc_trim`` cannot reach.
+        gc.collect()
+        self._attempt_allocator_trim()
+        _release_native_allocators()
+        before = _process_rss_bytes()
+        loaded: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
+        for owner, artifact, cache_key in plans.values():
+            if cache_key in loaded:
+                continue
+            value = owner._materialize_stored_value(artifact, "")
+            value = _compute_investigation_value(value, compute=cache_key[1])
+            loaded[cache_key] = _InspectionCacheEntry(
+                artifact=artifact,
+                value=value,
+                compute=cache_key[1],
+            )
+
+        with self._inspection_cache_lock:
+            self._inspection_cache_entries.update(loaded)
+            for name, (_, _, cache_key) in plans.items():
+                self._inspection_cache_bindings[name] = cache_key
+            live_keys = set(self._inspection_cache_bindings.values())
+            for cache_key in tuple(self._inspection_cache_entries):
+                if cache_key not in live_keys:
+                    del self._inspection_cache_entries[cache_key]
+
+        # Sample after cleanup so the single number approximates the retained
+        # cache growth rather than the loading peak: transient loader buffers
+        # are already unreferenced, and allocator pools (PyArrow, glibc, CUDA)
+        # would otherwise keep them resident and inflate the delta.
+        gc.collect()
+        self._attempt_allocator_trim()
+        _release_native_allocators()
+        after = _process_rss_bytes()
+        # Estimate after the sample so the estimator's lazy imports (pandas,
+        # torch, dask) are not charged to the cache.
+        try:
+            estimate = self._format_inspection_object_estimate(
+                tuple(entry.value for entry in loaded.values()),
+                label="newly cached size",
+            )
+        except Exception:
+            estimate = ""
+        try:
+            self._log_inspection_memory_delta(
+                operation,
+                None if before is None or after is None else after - before,
+                estimate,
+                phase="after cleanup",
+            )
+        except Exception:
+            pass
+
+    def _unload_from_memory(
+        self,
+        object_names: Sequence[str] | None = None,
+    ) -> None:
+        with self._inspection_cache_lock:
+            if object_names is None:
+                self._inspection_cache_bindings.clear()
+                self._inspection_cache_entries.clear()
+                return
+            for name in object_names:
+                self._inspection_cache_bindings.pop(name, None)
+            live_keys = set(self._inspection_cache_bindings.values())
+            for cache_key in tuple(self._inspection_cache_entries):
+                if cache_key not in live_keys:
+                    del self._inspection_cache_entries[cache_key]
+
+    def _log_inspection_memory_delta(
+        self,
+        operation: str,
+        delta: int | None,
+        estimate: str = "",
+        *,
+        phase: str,
+    ) -> None:
+        if delta is None:
+            self.logger.warning(
+                f"Inspection cache {operation} RSS delta is unavailable ({phase})"
+                f"{estimate}; install the 'memory' extra to enable process-memory "
+                "reporting"
+            )
+            return
+        self.logger.info(
+            f"Inspection cache {operation} net process RSS change ({phase}): "
+            f"{_format_signed_bytes(delta)}{estimate}"
+        )
+
+    @staticmethod
+    def _format_inspection_object_estimate(
+        values: Sequence[Any],
+        *,
+        label: str,
+    ) -> str:
+        """Describe the estimated retained size of loaded objects.
+
+        The estimate is storage-based where possible (DataFrame memory usage,
+        array ``nbytes``, tensor element sizes), so it does not depend on
+        allocator reuse. Bounded object-graph sampling marks the result as a
+        lower bound.
+        """
+        if not values:
+            return ""
+        try:
+            estimator = _InspectionMemoryEstimator(retained=True)
+            for index, value in enumerate(values):
+                estimator.add(f"inspection value {index}", value)
+            parts: list[str] = []
+            if estimator.total_bytes > 0:
+                parts.append(f"~{_format_bytes(estimator.total_bytes)} host")
+            for device, size in sorted(estimator.cuda_bytes.items()):
+                if size > 0:
+                    parts.append(f"~{_format_bytes(size)} CUDA device {device}")
+            if not parts:
+                parts.append("~0 B host")
+            estimate = " + ".join(parts)
+            if estimator.uncertain:
+                estimate = f"at least {estimate}"
+            return f"; estimated {label}: {estimate}"
+        except Exception:
+            return f"; estimated {label}: unavailable"
+
+    @staticmethod
+    def _inspection_artifact_identity(
+        artifact: ArtifactRecord,
+    ) -> _InspectionArtifactIdentity:
+        return (
+            str(Path(artifact.file_path).expanduser().resolve(strict=False)),
+            artifact.serializer,
+            bool(artifact.torch_load_weights_only),
+            artifact.run_id,
+            artifact.created_at,
+        )
+
+    @staticmethod
+    def _validate_inspection_object_names(
+        object_names: list[str] | tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if not isinstance(object_names, (list, tuple)):
+            raise TypeError("object_names must be a list or tuple of strings")
+        names = tuple(object_names)
+        if not names or any(
+            not isinstance(name, str) or not name.strip() for name in names
+        ):
+            raise ValueError("object_names must contain non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError("object_names must be unique")
+        return names
