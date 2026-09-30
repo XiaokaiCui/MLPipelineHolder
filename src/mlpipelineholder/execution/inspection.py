@@ -886,7 +886,7 @@ class _InspectionMemoryEstimator:
                 "nested output pointer cannot be assessed without materialising its container",
             )
             return sys.getsizeof(value)
-        if isinstance(value, _IMMUTABLE_TYPES):
+        if type(value) in _IMMUTABLE_TYPES:
             return sys.getsizeof(value) if self._retained else 0
         if _bound_callable_owner(value) is not None:
             return self._estimate_bound_method(value, label, depth)
@@ -1143,7 +1143,8 @@ class _InspectionMemoryEstimator:
                     label,
                     f"dictionary contents were sampled ({len(sampled)} of {len(value)} entries)",
                 )
-            return size
+            if type(value) is dict:
+                return size
         if isinstance(value, (list, tuple, set, frozenset)):
             sampled = list(islice(value, _SHALLOW_SAMPLE_LIMIT))
             for item in sampled:
@@ -1153,7 +1154,8 @@ class _InspectionMemoryEstimator:
                     label,
                     f"container contents were sampled ({len(sampled)} of {len(value)} items)",
                 )
-            return size
+            if type(value) in (list, tuple, set, frozenset):
+                return size
 
         attributes: list[Any] = []
         attribute_count = 0
@@ -1190,7 +1192,11 @@ class _InspectionMemoryEstimator:
                 f"attributes of type '{type(value).__name__}' were sampled "
                 f"({len(sampled_attributes)} of {attribute_count})",
             )
-        elif not attributes and size >= _MATERIAL_MEMORY_BYTES:
+        elif (
+            not attributes
+            and not isinstance(value, (dict, list, tuple, set, frozenset))
+            and size >= _MATERIAL_MEMORY_BYTES
+        ):
             self._mark_uncertain(
                 label,
                 f"opaque object of type '{type(value).__name__}' cannot be estimated cheaply",
