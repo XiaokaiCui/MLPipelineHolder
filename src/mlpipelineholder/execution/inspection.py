@@ -6,9 +6,11 @@ import copy
 import gc
 import math
 import os
+import shutil
 import sys
 import types
 import warnings
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -17,11 +19,28 @@ from itertools import islice
 from pathlib import Path
 from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Final, Self
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from ..core.constants import _IMMUTABLE_TYPES, _MISSING
-from ..core.models import ArtifactRecord, ResolutionSource
-from ..exceptions import InspectionCopyError, InspectionMemoryError
+from ..core.models import (
+    ArtifactRecord,
+    CallableValueReference,
+    DataclassValueReference,
+    ResolutionSource,
+    RuntimeValueReference,
+    TorchStateArtifactRecord,
+)
+from ..exceptions import (
+    InspectionCopyError,
+    InspectionMemoryError,
+    ResolutionError,
+)
+from ..persistence.artifacts.serializers import (
+    choose_serializer,
+    dump_value,
+    extension_for,
+    load_value,
+)
 from ..integrations.optuna.support import (
     OPTUNA_STUDY_SERIALIZER,
     is_optuna_sampler,
@@ -54,14 +73,32 @@ _RETAINED_ARTIFACT_SERIALIZERS: Final[frozenset[str]] = frozenset(
 )
 
 _InspectionArtifactIdentity = tuple[str, str, bool, str, str]
-_InspectionCacheKey = tuple[_InspectionArtifactIdentity, bool]
+_InspectionMemoryIdentity = tuple[str, int]
+_InspectionCacheKey = tuple[
+    _InspectionArtifactIdentity | _InspectionMemoryIdentity, bool
+]
 
 
 @dataclass(slots=True)
 class _InspectionCacheEntry:
-    artifact: ArtifactRecord
     value: Any
     compute: bool
+
+
+@dataclass(slots=True)
+class _InspectionCacheBinding:
+    """One name bound to an artifact or to a copied in-memory value."""
+
+    cache_key: _InspectionCacheKey
+    kind: str
+    priority: int | None
+    compute: bool
+    original_ref: Any | None = None
+    original_id: int = 0
+
+
+class _InspectionValueNotCopyable(Exception):
+    """Raised when an in-memory value cannot be isolated by copying."""
 
 
 class InspectionCopier:
@@ -1401,6 +1438,7 @@ class PipelineInspection:
                         name,
                         "inspect",
                         visible_outputs=visible_outputs,
+                        requested_priority=self._priority,
                     ),
                     compute=self._compute,
                 )
@@ -1447,15 +1485,17 @@ class InspectionMixin:
 
     if TYPE_CHECKING:
         logger: Any = None
-        _inspection_cache_bindings: dict[str, _InspectionCacheKey] = {}
+        project_root: Any = None
+        _inspection_cache_bindings: dict[str, _InspectionCacheBinding] = {}
         _inspection_cache_entries: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
         _inspection_cache_lock: Any = None
+        _inspection_copy_skipped: dict[str, tuple[int, Any | None]] = {}
 
         @staticmethod
         def _validate_integer_priority(priority: Any) -> int: ...
-        def _resolve_investigation_artifact(
-            self, input_name: str
-        ) -> tuple[Any, ArtifactRecord]: ...
+        def _resolve_investigation_copy_target(
+            self, input_name: str, *, priority: int | None = None
+        ) -> tuple[Any, Any, ResolutionSource]: ...
         def _attempt_allocator_trim(self) -> None: ...
 
     def inspect(
@@ -1480,32 +1520,53 @@ class InspectionMixin:
             self._validate_integer_priority(priority)
         return PipelineInspection(self, names, compute=compute, priority=priority)
 
+    def copy_for_inspection(
+        self,
+        object_names: list[str] | tuple[str, ...],
+        *,
+        compute: bool = True,
+        priority: int | None = None,
+    ) -> None:
+        """Copy selected investigation values into memory for later inspection.
+
+        Disk-backed values are loaded and cached; in-memory values are isolated
+        with ``deepcopy`` and, when needed, a temporary serializer round trip.
+        """
+        names = self._validate_inspection_object_names(object_names)
+        if not isinstance(compute, bool):
+            raise TypeError("compute must be a boolean")
+        if priority is not None:
+            self._validate_integer_priority(priority)
+        self._copy_inspection_objects(
+            {name: (priority, compute) for name in names},
+            operation="copy",
+        )
+        self.logger.info(
+            "Copied inspection objects are shared and may become stale after pipeline "
+            "or block execution. Call unload_inspection_objects() between executions, "
+            "or refresh_copied_objects() to reload every copied object."
+        )
+
     def load_for_inspection(
         self,
         object_names: list[str] | tuple[str, ...],
         *,
         compute: bool = True,
+        priority: int | None = None,
     ) -> None:
-        """Load or refresh selected disk-backed investigation values in memory."""
-        names = self._validate_inspection_object_names(object_names)
-        if not isinstance(compute, bool):
-            raise TypeError("compute must be a boolean")
-        self._load_inspection_objects(
-            {name: compute for name in names},
-            operation="load",
-        )
-        self.logger.info(
-            "Inspection objects are shared and may become stale after pipeline or "
-            "block execution. Call unload_inspection_objects() between executions, "
-            "or refresh_loaded_objects() to reload every loaded object."
+        """Backward-compatible alias of :meth:`copy_for_inspection`."""
+        self.copy_for_inspection(
+            object_names,
+            compute=compute,
+            priority=priority,
         )
 
-    def refresh_loaded_objects(self) -> None:
-        """Refresh every currently loaded inspection object from current artifacts."""
+    def refresh_copied_objects(self) -> None:
+        """Recopy every currently copied inspection object from current state."""
         with self._inspection_cache_lock:
             requests = {
-                name: cache_key[1]
-                for name, cache_key in self._inspection_cache_bindings.items()
+                name: (binding.priority, binding.compute)
+                for name, binding in self._inspection_cache_bindings.items()
             }
         if not requests:
             warnings.warn(
@@ -1514,7 +1575,15 @@ class InspectionMixin:
                 stacklevel=2,
             )
             return
-        self._load_inspection_objects(requests, operation="refresh")
+        self._copy_inspection_objects(requests, operation="refresh")
+
+    def refresh_loaded_objects(self) -> None:
+        """Backward-compatible alias of :meth:`refresh_copied_objects`."""
+        self.refresh_copied_objects()
+
+    def _inspection_cache_has_entries(self) -> bool:
+        with self._inspection_cache_lock:
+            return bool(self._inspection_cache_bindings)
 
     def unload_inspection_objects(self) -> None:
         """Release this pipeline's references to all preloaded inspection objects."""
@@ -1556,27 +1625,56 @@ class InspectionMixin:
     def _inspection_cached_value(
         self,
         input_name: str,
-        artifact: ArtifactRecord,
+        *,
+        artifact: ArtifactRecord | None,
+        original: Any = None,
     ) -> Any:
-        identity = self._inspection_artifact_identity(artifact)
+        """Return ``(value, binding)`` for a cache hit, otherwise ``_MISSING``."""
         with self._inspection_cache_lock:
-            cache_key = self._inspection_cache_bindings.get(input_name)
-            if cache_key is None or cache_key[0] != identity:
+            binding = self._inspection_cache_bindings.get(input_name)
+            if binding is None:
                 return _MISSING
-            entry = self._inspection_cache_entries.get(cache_key)
-            return _MISSING if entry is None else entry.value
+            if artifact is not None:
+                if (
+                    binding.kind != "artifact"
+                    or binding.cache_key[0]
+                    != self._inspection_artifact_identity(artifact)
+                ):
+                    return _MISSING
+            elif binding.kind != "memory" or not self._inspection_original_matches(
+                binding,
+                original,
+            ):
+                return _MISSING
+            entry = self._inspection_cache_entries.get(binding.cache_key)
+            if entry is None:
+                return _MISSING
+            return entry.value, binding
 
-    def _load_inspection_objects(
+    @staticmethod
+    def _inspection_original_matches(
+        binding: _InspectionCacheBinding,
+        original: Any,
+    ) -> bool:
+        if binding.original_ref is not None:
+            bound = binding.original_ref()
+            if bound is not None:
+                return bound is original
+        return id(original) == binding.original_id
+
+    def _copy_inspection_objects(
         self,
-        requests: dict[str, bool],
+        requests: dict[str, tuple[int | None, bool]],
         *,
         operation: str,
     ) -> None:
-        plans: dict[str, tuple[Any, ArtifactRecord, _InspectionCacheKey]] = {}
-        for name, compute in requests.items():
-            owner, artifact = self._resolve_investigation_artifact(name)
-            cache_key = (self._inspection_artifact_identity(artifact), compute)
-            plans[name] = (owner, artifact, cache_key)
+        plans: dict[str, tuple[Any, Any, int | None, bool]] = {}
+        for name, (priority, compute) in requests.items():
+            owner, terminal, _ = self._resolve_investigation_copy_target(
+                name,
+                priority=priority,
+            )
+            plans[name] = (owner, terminal, priority, compute)
 
         # Return reusable free arenas to the OS before taking the baseline.
         # Otherwise a large new object can be satisfied from memory that is
@@ -1587,31 +1685,66 @@ class InspectionMixin:
         self._attempt_allocator_trim()
         _release_native_allocators()
         before = _process_rss_bytes()
+
+        prepared: dict[str, _InspectionCacheBinding] = {}
         loaded: dict[_InspectionCacheKey, _InspectionCacheEntry] = {}
-        for owner, artifact, cache_key in plans.values():
-            if cache_key in loaded:
+        skipped: list[tuple[str, _InspectionValueNotCopyable, Any]] = []
+        for name, (owner, terminal, priority, compute) in plans.items():
+            try:
+                cache_key, binding, value = self._prepare_inspection_copy(
+                    owner,
+                    terminal,
+                    priority=priority,
+                    compute=compute,
+                )
+            except _InspectionValueNotCopyable as exc:
+                skipped.append((name, exc, terminal))
                 continue
-            value = owner._materialize_stored_value(artifact, "")
-            value = _compute_investigation_value(value, compute=cache_key[1])
-            loaded[cache_key] = _InspectionCacheEntry(
-                artifact=artifact,
-                value=value,
-                compute=cache_key[1],
+            prepared[name] = binding
+            loaded.setdefault(
+                cache_key,
+                _InspectionCacheEntry(value=value, compute=compute),
             )
 
+        if operation == "refresh" and skipped:
+            name, exc, _ = skipped[0]
+            raise InspectionCopyError(
+                f"Could not refresh copied inspection object '{name}': {exc}. "
+                "The existing inspection cache was left unchanged."
+            ) from exc
+
         with self._inspection_cache_lock:
+            for name, _exc, _terminal in skipped:
+                self._inspection_cache_bindings.pop(name, None)
+            for name, binding in prepared.items():
+                self._inspection_cache_bindings[name] = binding
+                self._inspection_copy_skipped.pop(name, None)
             self._inspection_cache_entries.update(loaded)
-            for name, (_, _, cache_key) in plans.items():
-                self._inspection_cache_bindings[name] = cache_key
-            live_keys = set(self._inspection_cache_bindings.values())
+            live_keys = {
+                binding.cache_key
+                for binding in self._inspection_cache_bindings.values()
+            }
             for cache_key in tuple(self._inspection_cache_entries):
                 if cache_key not in live_keys:
                     del self._inspection_cache_entries[cache_key]
 
+        for name, exc, terminal in skipped:
+            self._inspection_copy_skipped[name] = (
+                id(terminal),
+                self._weakref_or_none(terminal),
+            )
+            self.logger.warning(
+                f"Inspection object '{name}' cannot be copied for isolation "
+                f"({exc}). It will be inspected by reference and may be changed "
+                "during inspection. To guarantee original objects are preserved, "
+                "save the pipeline before inspection and reload it from backup "
+                "afterwards."
+            )
+
         # Sample after cleanup so the single number approximates the retained
-        # cache growth rather than the loading peak: transient loader buffers
-        # are already unreferenced, and allocator pools (PyArrow, glibc, CUDA)
-        # would otherwise keep them resident and inflate the delta.
+        # cache growth rather than the copying peak: transient buffers are
+        # already unreferenced, and allocator pools (PyArrow, glibc) would
+        # otherwise keep them resident and inflate the delta.
         gc.collect()
         self._attempt_allocator_trim()
         _release_native_allocators()
@@ -1635,6 +1768,217 @@ class InspectionMixin:
         except Exception:
             pass
 
+    def _prepare_inspection_copy(
+        self,
+        owner: Any,
+        terminal: Any,
+        *,
+        priority: int | None,
+        compute: bool,
+    ) -> tuple[_InspectionCacheKey, _InspectionCacheBinding, Any]:
+        if isinstance(terminal, ArtifactRecord):
+            if terminal.serializer == OPTUNA_STUDY_SERIALIZER:
+                raise ResolutionError(
+                    "Optuna Study artifacts cannot be copied for inspection; "
+                    "inspect them with allow_mutable_objects=True instead."
+                )
+            cache_key: _InspectionCacheKey = (
+                self._inspection_artifact_identity(terminal),
+                compute,
+            )
+            value = owner._materialize_stored_value(terminal, "")
+            value = _compute_investigation_value(value, compute=compute)
+            binding = _InspectionCacheBinding(
+                cache_key=cache_key,
+                kind="artifact",
+                priority=priority,
+                compute=compute,
+            )
+            return cache_key, binding, value
+
+        self._reject_uncopyable_inspection_terminal(terminal)
+        if isinstance(terminal, _IMMUTABLE_TYPES):
+            # Immutable scalars cannot be mutated, so sharing the value is safe
+            # and avoids a pointless serializer round trip (small ints and some
+            # strings are interned, which would look like a failed copy).
+            cache_key = (("memory", id(terminal)), compute)
+            binding = _InspectionCacheBinding(
+                cache_key=cache_key,
+                kind="memory",
+                priority=priority,
+                compute=compute,
+                original_ref=self._weakref_or_none(terminal),
+                original_id=id(terminal),
+            )
+            return cache_key, binding, terminal
+        copied = self._isolate_inspection_value(terminal)
+        copied = _compute_investigation_value(copied, compute=compute)
+        cache_key = (("memory", id(terminal)), compute)
+        binding = _InspectionCacheBinding(
+            cache_key=cache_key,
+            kind="memory",
+            priority=priority,
+            compute=compute,
+            original_ref=self._weakref_or_none(terminal),
+            original_id=id(terminal),
+        )
+        return cache_key, binding, copied
+
+    @staticmethod
+    def _reject_uncopyable_inspection_terminal(terminal: Any) -> None:
+        if isinstance(terminal, TorchStateArtifactRecord):
+            raise ResolutionError(
+                "Torch state artifacts cannot be copied for inspection isolation."
+            )
+        if isinstance(terminal, CallableValueReference):
+            raise ResolutionError(
+                "Callable references cannot be copied for inspection isolation."
+            )
+        if isinstance(
+            terminal,
+            (RuntimeValueReference, DataclassValueReference),
+        ):
+            raise ResolutionError(
+                "Placeholder values cannot be copied for inspection isolation; "
+                "restore or reset them first."
+            )
+        if is_optuna_study(terminal) or is_optuna_sampler(terminal):
+            raise ResolutionError(
+                "Optuna studies and samplers cannot be copied for inspection "
+                "isolation; inspect them with allow_mutable_objects=True instead."
+            )
+
+    def _isolate_inspection_value(self, value: Any) -> Any:
+        try:
+            copied = copy.deepcopy(value)
+        except Exception as exc:
+            deepcopy_error = f"{type(exc).__name__}: {exc}"
+        else:
+            if copied is not value:
+                return copied
+            deepcopy_error = "deepcopy returned the original object"
+        try:
+            return self._copy_value_via_temporary_artifact(value)
+        except Exception as exc:
+            raise _InspectionValueNotCopyable(
+                f"deepcopy failed ({deepcopy_error}); temporary serialization "
+                f"failed ({type(exc).__name__}: {exc})"
+            ) from exc
+
+    def _copy_value_via_temporary_artifact(self, value: Any) -> Any:
+        if self.project_root is None:
+            raise _InspectionValueNotCopyable(
+                "no project root is available for temporary serialization"
+            )
+        temp_root = Path(self.project_root) / "inspection_tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp_dir = temp_root / uuid4().hex
+        temp_dir.mkdir()
+        try:
+            serializer = choose_serializer(value)
+            path = temp_dir / f"value{extension_for(serializer)}"
+            dump_value(value, serializer, path)
+            copied = load_value(serializer, path, torch_weights_only=False)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        if copied is value:
+            raise _InspectionValueNotCopyable(
+                "temporary serialization returned the original object"
+            )
+        return copied
+
+    def _clear_inspection_temp_root(self) -> None:
+        if self.project_root is None:
+            return
+        temp_root = Path(self.project_root) / "inspection_tmp"
+        if temp_root.exists():
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    @staticmethod
+    def _weakref_or_none(value: Any) -> Any | None:
+        try:
+            return weakref.ref(value)
+        except TypeError:
+            return None
+
+    def _log_inspection_cache_hit(
+        self,
+        input_name: str,
+        binding: _InspectionCacheBinding,
+        requested_priority: int | None,
+    ) -> None:
+        kind = (
+            "copied in-memory value"
+            if binding.kind == "memory"
+            else "copied artifact"
+        )
+        message = (
+            f"Inspection value '{input_name}' was served from copy_for_inspection "
+            f"({kind}, copied priority={binding.priority})."
+        )
+        if (
+            requested_priority is not None
+            and requested_priority != binding.priority
+        ):
+            message += (
+                f" Requested priority={requested_priority}; reuse "
+                f"copy_for_inspection(['{input_name}'], "
+                f"priority={binding.priority}) if the original object must be "
+                "preserved."
+            )
+        self.logger.info(message)
+
+    def _log_inspection_copy_nudge(
+        self,
+        input_name: str,
+        value: Any,
+        *,
+        requested_priority: int | None,
+    ) -> None:
+        if isinstance(value, _IMMUTABLE_TYPES):
+            return
+        skipped = self._inspection_copy_skipped.get(input_name)
+        if skipped is not None:
+            original_id, original_ref = skipped
+            if original_ref is not None:
+                bound = original_ref()
+                if bound is None or bound is value:
+                    return
+            elif id(value) == original_id:
+                return
+        priority_suffix = (
+            ""
+            if requested_priority is None
+            else f", priority={requested_priority}"
+        )
+        if isinstance(value, ArtifactRecord):
+            if value.serializer == OPTUNA_STUDY_SERIALIZER:
+                return
+            self.logger.info(
+                f"Inspection value '{input_name}' was loaded from disk for this "
+                "inspection; repeated inspections reload it every time. Use "
+                f"copy_for_inspection(['{input_name}']{priority_suffix}) to keep "
+                "one copy in memory."
+            )
+            return
+        if isinstance(
+            value,
+            (
+                TorchStateArtifactRecord,
+                CallableValueReference,
+                RuntimeValueReference,
+                DataclassValueReference,
+            ),
+        ):
+            return
+        if is_optuna_study(value) or is_optuna_sampler(value):
+            return
+        self.logger.info(
+            f"Inspection value '{input_name}' is an in-memory object inspected by "
+            "reference. If mutation is a concern, copy it first with "
+            f"copy_for_inspection(['{input_name}']{priority_suffix})."
+        )
+
     def _unload_from_memory(
         self,
         object_names: Sequence[str] | None = None,
@@ -1646,7 +1990,10 @@ class InspectionMixin:
                 return
             for name in object_names:
                 self._inspection_cache_bindings.pop(name, None)
-            live_keys = set(self._inspection_cache_bindings.values())
+            live_keys = {
+                binding.cache_key
+                for binding in self._inspection_cache_bindings.values()
+            }
             for cache_key in tuple(self._inspection_cache_entries):
                 if cache_key not in live_keys:
                     del self._inspection_cache_entries[cache_key]

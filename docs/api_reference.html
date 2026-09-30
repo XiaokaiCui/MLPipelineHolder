@@ -149,7 +149,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <body>
 
 <header>
-  <h1>MLPipelineHolder(v0.4.2) &mdash; API Reference</h1>
+  <h1>MLPipelineHolder(v0.4.3) &mdash; API Reference</h1>
   <p>Reference documentation for the public API: classes, methods, functions, and data models.</p>
   <span class="version">Python &ge; 3.11</span>
 </header>
@@ -351,6 +351,7 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
 <h4 class="method-name" id="PipelineHolder.inspect">inspect()</h4>
 <div class="sig"><span class="kw">inspect</span>(*names: <span class="arg">str</span>, compute: <span class="arg">bool</span> = False, priority: <span class="arg">int | None</span> = None) -&gt; <span class="ret">PipelineInspection</span></div>
 <p>Returns a one-shot context manager that resolves several values for temporary interactive investigation without registering a node or changing pipeline state. Values resolve when the <code>with</code> block starts through the same source-of-truth rules used by <a class="anchor" href="#pipeline_resolving"><code>pipeline_resolving()</code></a>: visible produced outputs, pipeline constants, visible configuration, and finally uncached object storage for a root pipeline. Retrieval failures propagate without falling through to a lower-priority source.</p>
+<p>When a value is served from <a class="anchor" href="#PipelineHolder.copy_for_inspection"><code>copy_for_inspection()</code></a>, an info log names the value and the priority it was copied with, and reminds the caller to reuse that priority if original objects must be preserved. When a value was not copied, an info log recommends copying it, and disk-backed values additionally note that repeated disk loading is inefficient. Objects that could not be copied at all are only announced by the warning emitted at copy time.</p>
 <ul class="param-desc">
   <li><code>names</code>: one or more unique, non-empty pipeline-facing names.</li>
   <li><code>compute</code>: boolean only. When <code>True</code>, compute resolved Dask DataFrame and Series values before exposing them.</li>
@@ -374,25 +375,27 @@ footer code { background: rgba(255,255,255,.12); border: none; color: #fff; }
     )</pre>
 </div>
 
-<h4 class="method-name" id="PipelineHolder.load_for_inspection">load_for_inspection()</h4>
-<div class="sig"><span class="kw">load_for_inspection</span>(object_names: <span class="arg">list[str] | tuple[str, ...]</span>, *, compute: <span class="arg">bool</span> = True) -&gt; <span class="ret">None</span></div>
-<p>Loads or refreshes selected disk-backed values into a transient cache used only by <code>PipelineHolder.inspect()</code> and <code>pipeline_resolving()</code>. Names follow the same output, constant, configuration, and root-object-storage precedence as those investigation APIs. Every requested name must currently resolve to an <code>ArtifactRecord</code>; otherwise the complete call fails without changing existing cached objects.</p>
-<p>Loading is incremental: names omitted from a later call remain cached, while every named object is re-resolved from current pipeline state and reloaded from its latest artifact. A later <code>compute</code> setting replaces the earlier setting for those names. The default <code>compute=True</code> computes Dask DataFrame and Series values before caching; <code>False</code> keeps the lazy collection. Cached objects are shared, so investigation-time mutations remain visible until the object is loaded again, all objects are refreshed, or the cache is unloaded.</p>
-<p>The method logs the signed net process-RSS change measured after post-load cleanup, together with an estimated newly cached size, and logs a reminder to call <code>unload_inspection_objects()</code> between pipeline or block executions or <code>refresh_loaded_objects()</code> to reload every loaded object, because cached artifacts may become stale. Cleanup before the sample and before the baseline collects garbage, attempts to return free allocator arenas where the platform supports it, and releases PyArrow's pool, whose freed buffers are invisible to standard allocator trimming. This keeps the single reported number close to the retained cache growth instead of the loading peak; it is best-effort, so RSS remains process-wide and can still differ from the cached size or turn negative. The retained-size estimate uses metadata such as DataFrame memory usage, immutable object sizes, array byte counts, and tensor element sizes; exact array/tensor storage windows are deduplicated, bounded sampling is prefixed with &ldquo;at least&rdquo;, and CUDA storage is reported separately by device because host RSS does not include VRAM. Normal pipeline execution, ordinary value getters, and block or atom execution inspection do not use this cache.</p>
+<h4 class="method-name" id="PipelineHolder.copy_for_inspection">copy_for_inspection()</h4>
+<div class="sig"><span class="kw">copy_for_inspection</span>(object_names: <span class="arg">list[str] | tuple[str, ...]</span>, *, compute: <span class="arg">bool</span> = True, priority: <span class="arg">int | None</span> = None) -&gt; <span class="ret">None</span></div>
+<p>Copies selected investigation values into a transient in-memory cache used by <code>PipelineHolder.inspect()</code>, <code>pipeline_resolving()</code>, <code>PipelineHolder.inspect_node()</code>, <code>ExecutionBlock.inspect()</code>, and <code>AtomPipeline.inspect()</code>. Every inspection path checks this cache first and falls back to its normal resolution when a name was not copied. Cached values are already isolated copies, so block/atom inspection never copies them again regardless of <code>allow_mutable_objects</code>. Names follow the same output, constant, configuration, and root-object-storage precedence as those investigation APIs. <code>priority</code> accepts the same integer priority group as <code>inspect(priority=...)</code> and resolves the same priority-scoped view, so preloaded values are recognized by matching-priority inspections. Every name in one call is resolved before anything is copied.</p>
+<p>Disk-backed values are loaded once and cached. In-memory values are isolated: the method deep-copies them, and when deep copying is impossible it round-trips the value through the normal artifact serializers in a temporary folder under the project root, deleting that folder afterwards. Objects that cannot be isolated at all are skipped with a logger warning that they will be inspected by reference and recommending <code>save_pipeline()</code> before inspection plus a reload from backup afterwards. Optuna studies and samplers, placeholders, callable references, and Torch state artifacts are rejected. Cached cache-priority, compute, and object identity are remembered.</p>
+<p>Copying is incremental: names omitted from a later call remain cached, while every named object is re-resolved with the requested priority and re-copied. A later <code>compute</code> setting replaces the earlier setting for those names; the default <code>compute=True</code> computes Dask DataFrame and Series values before caching, while <code>False</code> keeps the lazy collection. Cached objects are shared, so investigation-time mutations remain visible until the object is copied again, all objects are refreshed, or the cache is unloaded. Investigation calls log at info level when a value is served from this cache, and when a value is not copied they recommend copying it; disk-backed misses also note that repeated loading is inefficient. The legacy name <code>load_for_inspection()</code> remains a silent alias of this method.</p>
+<p>The method logs the signed net process-RSS change measured after post-copy cleanup, together with an estimated newly cached size, and logs a reminder to call <code>unload_inspection_objects()</code> between pipeline or block executions or <code>refresh_copied_objects()</code> to reload every copied object, because cached values may become stale. Cleanup before the sample and before the baseline collects garbage, attempts to return free allocator arenas where the platform supports it, and releases PyArrow's pool, whose freed buffers are invisible to standard allocator trimming. This keeps the single reported number close to the retained cache growth instead of the copying peak; it is best-effort, so RSS remains process-wide and can still differ from the cached size or turn negative. The retained-size estimate uses metadata such as DataFrame memory usage, immutable object sizes, array byte counts, and tensor element sizes; exact array/tensor storage windows are deduplicated, bounded sampling is prefixed with &ldquo;at least&rdquo;, and CUDA storage is reported separately by device because host RSS does not include VRAM. Normal pipeline execution and ordinary value getters never use this cache.</p>
 
-<h4 class="method-name" id="PipelineHolder.refresh_loaded_objects">refresh_loaded_objects()</h4>
-<div class="sig"><span class="kw">refresh_loaded_objects</span>() -&gt; <span class="ret">None</span></div>
-<p>Re-resolves and reloads every object currently held in this pipeline's inspection cache. Each name keeps its latest <code>compute</code> configuration. Refreshing is transactional: if any name is missing, no longer disk-backed, or fails to load, existing cached values remain unchanged. Calling it with an empty cache emits <code>UserWarning</code>.</p>
+<h4 class="method-name" id="PipelineHolder.refresh_copied_objects">refresh_copied_objects()</h4>
+<div class="sig"><span class="kw">refresh_copied_objects</span>() -&gt; <span class="ret">None</span></div>
+<p>Re-resolves and re-copies every object currently held in this pipeline's inspection cache using each name's most recent <code>priority</code> and <code>compute</code> settings; copied in-memory values are always re-copied from the current original, discarding cached mutations. Refreshing is transactional: if any name can no longer be resolved, copied, or loaded, an exception is raised and existing cached values remain unchanged. Calling it with an empty cache emits <code>UserWarning</code>. The legacy name <code>refresh_loaded_objects()</code> remains a silent alias of this method.</p>
 
 <h4 class="method-name" id="PipelineHolder.unload_inspection_objects">unload_inspection_objects()</h4>
 <div class="sig"><span class="kw">unload_inspection_objects</span>() -&gt; <span class="ret">None</span></div>
-<p>Removes every object loaded through <code>load_for_inspection()</code> on this pipeline instance, performs garbage collection and best-effort allocator trimming, and logs the net process-RSS change measured after cleanup together with the estimated size of the removed cached objects. It does not remove disk artifacts or affect another attached pipeline's independent inspection cache. The cleanup also attempts to release PyArrow's pool before the final sample. User-held references may keep objects alive, process-wide RSS can increase because of unrelated allocations, and the host RSS figure does not measure VRAM. Calling it with an empty cache emits <code>UserWarning</code>.</p>
+<p>Removes every object copied through <code>copy_for_inspection()</code> on this pipeline instance, performs garbage collection and best-effort allocator trimming, and logs the net process-RSS change measured after cleanup together with the estimated size of the removed cached objects. It does not remove disk artifacts or affect another attached pipeline's independent inspection cache. The cleanup also attempts to release PyArrow's pool before the final sample. User-held references may keep objects alive, process-wide RSS can increase because of unrelated allocations, and the host RSS figure does not measure VRAM. Calling it with an empty cache emits <code>UserWarning</code>.</p>
 
 <div class="example">
-  <div class="example-title">Reuse disk-backed values during investigation</div>
-  <pre>dr_pipeline.load_for_inspection(
+  <div class="example-title">Copy values once for repeated investigation</div>
+  <pre>dr_pipeline.copy_for_inspection(
     object_names=["selected_df", "common_df"],
     compute=True,
+    priority=None,
 )
 
 with dr_pipeline.inspect("selected_df", "common_df") as data:
@@ -403,7 +406,7 @@ def investigate(selected_df, common_df, splitting_date, stock_universe):
     ...
 
 investigate()
-dr_pipeline.refresh_loaded_objects()
+dr_pipeline.refresh_copied_objects()
 dr_pipeline.unload_inspection_objects()</pre>
 </div>
 

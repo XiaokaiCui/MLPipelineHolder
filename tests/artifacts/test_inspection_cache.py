@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 import unittest
 import warnings
@@ -10,10 +11,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from mlpipelineholder import PipelineHandler, ResolutionError, pipeline_resolving
+from mlpipelineholder import (
+    InspectionCopyError,
+    PipelineHandler,
+    ResolutionError,
+    pipeline_resolving,
+)
 from mlpipelineholder.execution.inspection import (
     InspectionMixin,
     _InspectionMemoryEstimator,
@@ -31,6 +37,14 @@ def produce_output() -> dict[str, str]:
     return {"source": "output"}
 
 
+def produce_early() -> str:
+    return "early"
+
+
+def produce_late() -> str:
+    return "late"
+
+
 def append_value(value: list[int]) -> list[int]:
     value.append(99)
     return value
@@ -41,6 +55,19 @@ class WeakPayload:
         self.data = bytearray(size)
 
 
+class DeepcopyFailsButPicklable:
+    def __init__(self, value: list[int]) -> None:
+        self.value = value
+
+    def __deepcopy__(self, memo: object) -> object:
+        raise RuntimeError("deepcopy disabled")
+
+
+class UncopyableBothWays:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+
 class InspectionCacheTests(unittest.TestCase):
     def _pipeline(self, root: Path) -> PipelineHandler:
         pipeline = PipelineHandler("inspection-cache", {}, root)
@@ -48,7 +75,7 @@ class InspectionCacheTests(unittest.TestCase):
         pipeline.set_constant_value("second", {"value": 3}, to_disk=True)
         return pipeline
 
-    def test_incremental_loading_reuses_shared_values_and_selectively_refreshes(self) -> None:
+    def test_copy_is_incremental_and_selectively_refreshes(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             with mock.patch.object(
@@ -58,7 +85,7 @@ class InspectionCacheTests(unittest.TestCase):
             ) as load:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    pipeline.load_for_inspection(["first"])
+                    pipeline.copy_for_inspection(["first"])
                 self.assertEqual(load.call_count, 1)
 
                 cached: list[int] = []
@@ -76,33 +103,124 @@ class InspectionCacheTests(unittest.TestCase):
                 self.assertIs(investigate(), cached)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    pipeline.load_for_inspection(["second"])
+                    pipeline.copy_for_inspection(["second"])
                 self.assertEqual(load.call_count, 2)
                 with pipeline.inspect("first") as resolved:
                     self.assertIs(resolved.first, cached)
 
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    pipeline.load_for_inspection(["first"])
+                    pipeline.copy_for_inspection(["first"])
                 self.assertEqual(load.call_count, 3)
                 with pipeline.inspect("first") as resolved:
                     self.assertIsNot(resolved.first, cached)
                     self.assertEqual(resolved.first, [1, 2])
 
-    def test_refresh_and_unload_apply_to_all_loaded_objects(self) -> None:
+    def test_load_for_inspection_alias_delegates(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            with mock.patch.object(
+                pipeline,
+                "copy_for_inspection",
+                wraps=pipeline.copy_for_inspection,
+            ) as copy:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    pipeline.load_for_inspection(["first"], compute=False)
+
+            copy.assert_called_once()
+            with pipeline.inspect("first") as resolved:
+                self.assertEqual(resolved.first, [1, 2])
+
+    def test_refresh_loaded_objects_alias_delegates(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first", "second"])
+                pipeline.copy_for_inspection(["first"])
 
-            with pipeline.inspect("first", "second") as resolved:
+            with mock.patch.object(
+                pipeline,
+                "refresh_copied_objects",
+                wraps=pipeline.refresh_copied_objects,
+            ) as refresh:
+                pipeline.refresh_loaded_objects()
+
+            refresh.assert_called_once()
+
+    def test_block_and_node_inspection_use_copied_objects_without_recopy(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("memory", [3, 4])
+            block = pipeline.add_block("consume", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "first"},
+            )
+            memory_block = pipeline.add_block("consume_memory", 2)
+            memory_block.register_function(
+                return_value,
+                ["result2"],
+                param_mapping={"value": "memory"},
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["first", "memory"])
+            disk_cached = pipeline._inspection_cache_entries[
+                pipeline._inspection_cache_bindings["first"].cache_key
+            ].value
+            memory_cached = pipeline._inspection_cache_entries[
+                pipeline._inspection_cache_bindings["memory"].cache_key
+            ].value
+
+            with (
+                mock.patch.object(
+                    ArtifactStore,
+                    "load",
+                    wraps=pipeline.artifact_store.load,
+                ) as load,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                protected = block.inspect(
+                    resolve_only=True,
+                    allow_mutable_objects=False,
+                )
+                shared = block.inspect(resolve_only=True)
+                node = pipeline.inspect_node(
+                    node_name="consume",
+                    resolve_only=True,
+                )
+                memory_protected = memory_block.inspect(
+                    resolve_only=True,
+                    allow_mutable_objects=False,
+                )
+                self.assertEqual(load.call_count, 0)
+
+            self.assertIs(protected.arguments["value"], disk_cached)
+            self.assertIs(shared.arguments["value"], disk_cached)
+            self.assertIs(node.arguments["value"], disk_cached)
+            self.assertIs(memory_protected.arguments["value"], memory_cached)
+
+    def test_refresh_and_unload_apply_to_all_copied_objects(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("memory", [5, 6])
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["first", "second", "memory"])
+
+            with pipeline.inspect("first", "second", "memory") as resolved:
                 resolved.first.append(8)
                 resolved.second["value"] = 9
-            pipeline.refresh_loaded_objects()
-            with pipeline.inspect("first", "second") as resolved:
+                resolved.memory.append(10)
+            pipeline.refresh_copied_objects()
+            with pipeline.inspect("first", "second", "memory") as resolved:
                 self.assertEqual(resolved.first, [1, 2])
                 self.assertEqual(resolved.second, {"value": 3})
+                self.assertEqual(resolved.memory, [5, 6])
+            self.assertEqual(pipeline.get_constant_value("memory"), [5, 6])
 
             pipeline.unload_inspection_objects()
             self.assertEqual(pipeline._inspection_cache_bindings, {})
@@ -111,25 +229,224 @@ class InspectionCacheTests(unittest.TestCase):
             with self.assertWarnsRegex(UserWarning, "nothing was unloaded"):
                 pipeline.unload_inspection_objects()
             with self.assertWarnsRegex(UserWarning, "nothing was refreshed"):
-                pipeline.refresh_loaded_objects()
+                pipeline.refresh_copied_objects()
 
-    def test_invalid_batch_does_not_partially_populate_cache(self) -> None:
+    def test_invalid_names_and_unknown_targets_are_rejected(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
-            pipeline.set_constant_value("memory_only", [4, 5])
 
-            with self.assertRaisesRegex(ResolutionError, "requires disk-backed"):
-                pipeline.load_for_inspection(["first", "memory_only"])
-
+            with self.assertRaisesRegex(ResolutionError, "missing"):
+                pipeline.copy_for_inspection(["first", "missing"])
             self.assertEqual(pipeline._inspection_cache_bindings, {})
+
             with self.assertRaisesRegex(ValueError, "must be unique"):
-                pipeline.load_for_inspection(["first", "first"])
+                pipeline.copy_for_inspection(["first", "first"])
             with self.assertRaisesRegex(ValueError, "non-empty"):
-                pipeline.load_for_inspection([])
+                pipeline.copy_for_inspection([])
             with self.assertRaisesRegex(TypeError, "list or tuple"):
-                pipeline.load_for_inspection(
+                pipeline.copy_for_inspection(
                     "first"  # pyright: ignore[reportArgumentType]
                 )
+            with self.assertRaisesRegex(TypeError, "integer priority group"):
+                pipeline.copy_for_inspection(
+                    ["first"],
+                    priority=1.5,  # pyright: ignore[reportArgumentType]
+                )
+
+    def test_in_memory_values_are_copied_and_isolated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("memory", [7, 8])
+            pipeline.set_config("threshold", 3)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["memory", "threshold"])
+
+            cached: list[int] = []
+            with pipeline.inspect("memory", "threshold") as resolved:
+                resolved.memory.append(9)
+                cached = resolved.memory
+                self.assertEqual(resolved.threshold, 3)
+
+            self.assertEqual(pipeline.get_constant_value("memory"), [7, 8])
+            with pipeline.inspect("memory") as resolved:
+                self.assertIs(resolved.memory, cached)
+                self.assertEqual(resolved.memory, [7, 8, 9])
+
+    def test_deepcopy_failure_falls_back_to_temporary_serialization(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pipeline = PipelineHandler("fallback", {}, root / "project")
+            original = DeepcopyFailsButPicklable([1, 2])
+            pipeline.set_constant_value("payload", original)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["payload"])
+
+            with pipeline.inspect("payload") as resolved:
+                self.assertIsNot(resolved.payload, original)
+                self.assertEqual(resolved.payload.value, [1, 2])
+            self.assertEqual(original.value, [1, 2])
+            temp_root = root / "project" / "inspection_tmp"
+            self.assertEqual(list(temp_root.glob("*")), [])
+
+    def test_uncopyable_object_is_skipped_with_save_reload_guidance(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            original = UncopyableBothWays()
+            pipeline.set_constant_value("lock", original)
+
+            with (
+                mock.patch.object(pipeline.logger, "warning") as warning,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["first", "lock"])
+
+            messages = [call.args[0] for call in warning.call_args_list]
+            self.assertTrue(
+                any("save the pipeline before inspection" in message for message in messages)
+            )
+            self.assertIn("first", pipeline._inspection_cache_bindings)
+            self.assertNotIn("lock", pipeline._inspection_cache_bindings)
+
+            with pipeline.inspect("lock") as resolved:
+                self.assertIs(resolved.lock, original)
+
+    def test_refresh_failure_raises_and_keeps_cache(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["first"])
+            before: list[int] = []
+            with pipeline.inspect("first") as resolved:
+                before = resolved.first
+
+            binding_before = pipeline._inspection_cache_bindings["first"]
+            pipeline.set_constant_value("first", UncopyableBothWays())
+            with self.assertRaisesRegex(InspectionCopyError, "Could not refresh"):
+                pipeline.refresh_copied_objects()
+
+            self.assertIs(
+                pipeline._inspection_cache_bindings["first"],
+                binding_before,
+            )
+            self.assertIs(
+                pipeline._inspection_cache_entries[binding_before.cache_key].value,
+                before,
+            )
+            self.assertIsInstance(
+                pipeline.get_constant_value("first"),
+                UncopyableBothWays,
+            )
+
+    def test_priority_copy_is_used_by_priority_matched_inspection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("priority", {}, Path(tmp) / "project")
+            early = pipeline.add_block("early", 1)
+            early.register_function(
+                produce_early,
+                ["generation"],
+                save_to_disk=["generation"],
+            )
+            late = pipeline.add_block("late", 2)
+            late.register_function(
+                produce_late,
+                ["generation"],
+                save_to_disk=["generation"],
+            )
+            pipeline.run_all()
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["generation"], priority=2)
+
+            with pipeline.inspect("generation", priority=2) as resolved:
+                self.assertEqual(resolved.generation, "early")
+            with pipeline.inspect("generation") as resolved:
+                self.assertEqual(resolved.generation, "late")
+
+    def test_priority_mismatch_serves_cache_with_reminder(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("reminder", {}, Path(tmp) / "project")
+            pipeline.add_block("producer", 1).register_function(
+                produce_early,
+                ["value"],
+            )
+            pipeline.set_constant_value("disk", [1, 2], to_disk=True)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["disk"], priority=1)
+
+            with (
+                mock.patch.object(pipeline.logger, "info") as info,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                with pipeline.inspect("disk", priority=2) as resolved:
+                    self.assertEqual(resolved.disk, [1, 2])
+
+            messages = [call.args[0] for call in info.call_args_list]
+            self.assertTrue(
+                any("Requested priority=2" in message for message in messages)
+            )
+
+    def test_miss_nudges_recommend_copy_for_inspection(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("memory", [4, 5])
+
+            with mock.patch.object(pipeline.logger, "info") as info:
+                with pipeline.inspect("memory", "first") as resolved:
+                    self.assertEqual(resolved.memory, [4, 5])
+                    self.assertEqual(resolved.first, [1, 2])
+
+            messages = [call.args[0] for call in info.call_args_list]
+            self.assertTrue(
+                any(
+                    "copy it first with copy_for_inspection" in message
+                    for message in messages
+                )
+            )
+            self.assertTrue(
+                any(
+                    "loaded from disk for this inspection" in message
+                    for message in messages
+                )
+            )
+
+    def test_skipped_object_does_not_repeat_copy_nudge(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            pipeline.set_constant_value("lock", UncopyableBothWays())
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["lock"])
+
+            with mock.patch.object(pipeline.logger, "info") as info:
+                with pipeline.inspect("lock") as resolved:
+                    self.assertIsInstance(resolved.lock, UncopyableBothWays)
+
+            messages = [call.args[0] for call in info.call_args_list]
+            self.assertFalse(
+                any("copy it first with copy_for_inspection" in message for message in messages)
+            )
+
+    def test_save_pipeline_cleans_inspection_temp_root(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pipeline = self._pipeline(root / "project")
+            leftover = root / "project" / "inspection_tmp" / "leftover"
+            leftover.mkdir(parents=True)
+            (leftover / "file.bin").write_bytes(b"stale")
+
+            pipeline.save_pipeline(root / "bundle")
+
+            self.assertFalse((root / "project" / "inspection_tmp").exists())
 
     def test_normal_getters_and_execution_bypass_inspection_cache(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -142,7 +459,7 @@ class InspectionCacheTests(unittest.TestCase):
             )
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
             with pipeline.inspect("first") as resolved:
                 resolved.first.append(7)
 
@@ -152,40 +469,12 @@ class InspectionCacheTests(unittest.TestCase):
             with pipeline.inspect("first") as resolved:
                 self.assertEqual(resolved.first, [1, 2, 7])
 
-    def test_inspect_node_bypasses_inspection_cache(self) -> None:
-        with TemporaryDirectory() as tmp:
-            pipeline = self._pipeline(Path(tmp))
-            block = pipeline.add_block("consume", 1)
-            block.register_function(
-                return_value,
-                ["result"],
-                param_mapping={"value": "first"},
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
-            with pipeline.inspect("first") as resolved:
-                resolved.first.append(7)
-
-            with mock.patch.object(
-                ArtifactStore,
-                "load",
-                wraps=pipeline.artifact_store.load,
-            ) as load:
-                inspection = pipeline.inspect_node(
-                    node_name="consume",
-                    resolve_only=True,
-                )
-                self.assertEqual(load.call_count, 1)
-
-            self.assertEqual(inspection.arguments["value"], [1, 2])
-
     def test_new_artifact_generation_bypasses_stale_cache(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
             stale: list[int] = []
             with pipeline.inspect("first") as resolved:
                 stale = resolved.first
@@ -197,11 +486,11 @@ class InspectionCacheTests(unittest.TestCase):
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
             with pipeline.inspect("first") as resolved:
                 self.assertEqual(resolved.first, [10])
 
-    def test_preloads_disk_backed_outputs_and_root_storage(self) -> None:
+    def test_copies_disk_backed_outputs_and_root_storage(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             pipeline = PipelineHandler("sources", {}, root / "project")
@@ -228,7 +517,7 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["output_value", "stored"])
+                pipeline.copy_for_inspection(["output_value", "stored"])
                 self.assertEqual(load.call_count, 2)
 
                 with pipeline.inspect("output_value", "stored") as resolved:
@@ -240,7 +529,7 @@ class InspectionCacheTests(unittest.TestCase):
             with self.assertWarnsRegex(UserWarning, "nothing was unloaded"):
                 pipeline.unload_inspection_objects()
 
-    def test_preloads_config_artifact_records(self) -> None:
+    def test_copies_config_artifact_records(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             pipeline = PipelineHandler("config-source", {}, root / "project")
@@ -262,7 +551,7 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["frame"])
+                pipeline.copy_for_inspection(["frame"])
                 self.assertEqual(load.call_count, 1)
 
                 with pipeline.inspect("frame") as resolved:
@@ -275,7 +564,7 @@ class InspectionCacheTests(unittest.TestCase):
             pipeline = self._pipeline(root / "project")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
             bundle = root / "bundle"
             pipeline.save_pipeline(bundle)
 
@@ -300,14 +589,14 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
             message = next(
                 call.args[0]
                 for call in info.call_args_list
                 if "net process RSS change" in call.args[0]
             )
             self.assertIn(
-                "Inspection cache load net process RSS change (after cleanup): +50 B",
+                "Inspection cache copy net process RSS change (after cleanup): +50 B",
                 message,
             )
             self.assertIn("estimated newly cached size:", message)
@@ -340,28 +629,30 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["second"])
+                pipeline.copy_for_inspection(["second"])
             message = next(
                 call.args[0]
                 for call in info.call_args_list
                 if "net process RSS change" in call.args[0]
             )
             self.assertIn(
-                "Inspection cache load net process RSS change (after cleanup): -30 B",
+                "Inspection cache copy net process RSS change (after cleanup): -30 B",
                 message,
             )
             self.assertIn("estimated newly cached size:", message)
 
-    def test_load_logs_refresh_reminder(self) -> None:
+    def test_copy_logs_refresh_reminder(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
 
             with mock.patch.object(pipeline.logger, "info") as info:
-                pipeline.load_for_inspection(["first"])
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    pipeline.copy_for_inspection(["first"])
 
             messages = [call.args[0] for call in info.call_args_list]
             self.assertTrue(
-                any("refresh_loaded_objects()" in message for message in messages)
+                any("refresh_copied_objects()" in message for message in messages)
             )
 
     def test_native_allocator_release_is_best_effort(self) -> None:
@@ -380,9 +671,7 @@ class InspectionCacheTests(unittest.TestCase):
             def release_unused(self) -> None:
                 raise RuntimeError("pool failure")
 
-        fake_broken = types.SimpleNamespace(
-            default_memory_pool=lambda: BrokenPool()
-        )
+        fake_broken = types.SimpleNamespace(default_memory_pool=lambda: BrokenPool())
         with mock.patch.dict(sys.modules, {"pyarrow": fake_broken}):
             _release_native_allocators()
 
@@ -396,7 +685,7 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
                 self.assertGreaterEqual(release.call_count, 1)
 
                 release.reset_mock()
@@ -429,10 +718,10 @@ class InspectionCacheTests(unittest.TestCase):
             )
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["payload"])
-            cache_key = pipeline._inspection_cache_bindings["payload"]
+                pipeline.copy_for_inspection(["payload"])
+            binding = pipeline._inspection_cache_bindings["payload"]
             reference = weakref.ref(
-                pipeline._inspection_cache_entries[cache_key].value
+                pipeline._inspection_cache_entries[binding.cache_key].value
             )
             released_at_samples: list[bool] = []
 
@@ -469,7 +758,7 @@ class InspectionCacheTests(unittest.TestCase):
         view_estimator.add("duplicate", duplicate)
         self.assertEqual(view_estimator.total_bytes, first.nbytes)
 
-    def test_estimate_failure_does_not_change_successful_cache_load(self) -> None:
+    def test_estimate_failure_does_not_change_successful_cache_copy(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             with (
@@ -486,7 +775,7 @@ class InspectionCacheTests(unittest.TestCase):
                 warnings.catch_warnings(),
             ):
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["first"])
+                pipeline.copy_for_inspection(["first"])
 
             self.assertIn("first", pipeline._inspection_cache_bindings)
             self.assertGreaterEqual(trim.call_count, 2)
@@ -530,13 +819,13 @@ class InspectionCacheTests(unittest.TestCase):
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["frame"])
+                pipeline.copy_for_inspection(["frame"])
             with pipeline.inspect("frame", compute=False) as resolved:
                 self.assertIsInstance(resolved.frame, pd.DataFrame)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                pipeline.load_for_inspection(["frame"], compute=False)
+                pipeline.copy_for_inspection(["frame"], compute=False)
             with pipeline.inspect("frame", compute=False) as resolved:
                 self.assertIsInstance(resolved.frame, dd.DataFrame)
             with pipeline.inspect("frame", compute=True) as resolved:

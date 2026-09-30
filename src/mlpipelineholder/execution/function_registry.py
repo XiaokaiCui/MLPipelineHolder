@@ -336,6 +336,7 @@ def pipeline_resolving(
                 value = pipeline._resolve_investigation_input(
                     input_name,
                     getattr(func, "__name__", type(func).__name__),
+                    requested_priority=None,
                 )
                 value = _compute_investigation_value(value, compute=compute)
                 bound.arguments[parameter.name] = value

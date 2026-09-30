@@ -23,8 +23,8 @@ _PARAMETER_PATTERN = re.compile(r"(?P<name>\*{0,2}[A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 _PUBLIC_METHODS: dict[str, Callable[..., Any]] = {
     "PipelineHolder.inspect": PipelineHandler.inspect,
-    "PipelineHolder.load_for_inspection": PipelineHandler.load_for_inspection,
-    "PipelineHolder.refresh_loaded_objects": PipelineHandler.refresh_loaded_objects,
+    "PipelineHolder.copy_for_inspection": PipelineHandler.copy_for_inspection,
+    "PipelineHolder.refresh_copied_objects": PipelineHandler.refresh_copied_objects,
     "PipelineHolder.unload_inspection_objects": PipelineHandler.unload_inspection_objects,
     "PipelineHolder.inspect_node": PipelineHandler.inspect_node,
     "PipelineHolder.get_selected_node_output": PipelineHandler.get_selected_node_output,
