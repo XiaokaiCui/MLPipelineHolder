@@ -1657,9 +1657,9 @@ class InspectionMixin:
         original: Any,
     ) -> bool:
         if binding.original_ref is not None:
-            bound = binding.original_ref()
-            if bound is not None:
-                return bound is original
+            # A dead weakref definitively means the bound original is gone; do
+            # not fall back to ``id`` because object ids can be reused.
+            return binding.original_ref() is original
         return id(original) == binding.original_id
 
     def _copy_inspection_objects(
@@ -1797,8 +1797,8 @@ class InspectionMixin:
             return cache_key, binding, value
 
         self._reject_uncopyable_inspection_terminal(terminal)
-        if isinstance(terminal, _IMMUTABLE_TYPES):
-            # Immutable scalars cannot be mutated, so sharing the value is safe
+        if InspectionCopier._is_known_immutable(terminal):
+            # Immutable values cannot be mutated, so sharing the value is safe
             # and avoids a pointless serializer round trip (small ints and some
             # strings are interned, which would look like a failed copy).
             cache_key = (("memory", id(terminal)), compute)
@@ -1849,20 +1849,38 @@ class InspectionMixin:
             )
 
     def _isolate_inspection_value(self, value: Any) -> Any:
+        # Reuse the protected-inspection copier so pandas object cells, NumPy
+        # object arrays, Torch tensors, and Dask collections are isolated with
+        # the same semantics as ``allow_mutable_objects=False`` inspection.
+        copier = InspectionCopier(self.logger, allow_mutable_objects=False)
         try:
-            copied = copy.deepcopy(value)
+            copied = copier.prepare(
+                value,
+                parameter_name="value",
+                source=ResolutionSource(
+                    kind="copy_for_inspection",
+                    name="value",
+                ),
+            )[0]
+        except InspectionCopyError as exc:
+            cause = exc.__cause__
+            isolation_error = (
+                f"{type(cause).__name__}: {cause}"
+                if cause is not None
+                else "the value could not be isolated"
+            )
         except Exception as exc:
-            deepcopy_error = f"{type(exc).__name__}: {exc}"
+            isolation_error = f"{type(exc).__name__}: {exc}"
         else:
             if copied is not value:
                 return copied
-            deepcopy_error = "deepcopy returned the original object"
+            isolation_error = "copy isolation returned the original object"
         try:
             return self._copy_value_via_temporary_artifact(value)
         except Exception as exc:
             raise _InspectionValueNotCopyable(
-                f"deepcopy failed ({deepcopy_error}); temporary serialization "
-                f"failed ({type(exc).__name__}: {exc})"
+                f"copy isolation failed ({isolation_error}); temporary "
+                f"serialization failed ({type(exc).__name__}: {exc})"
             ) from exc
 
     def _copy_value_via_temporary_artifact(self, value: Any) -> Any:
@@ -1941,8 +1959,9 @@ class InspectionMixin:
         if skipped is not None:
             original_id, original_ref = skipped
             if original_ref is not None:
-                bound = original_ref()
-                if bound is None or bound is value:
+                # Only the exact skipped original suppresses the reminder; a
+                # dead weakref means the replacement deserves the reminder.
+                if original_ref() is value:
                     return
             elif id(value) == original_id:
                 return

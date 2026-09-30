@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import sys
 import threading
 import types
@@ -22,6 +23,7 @@ from mlpipelineholder import (
 )
 from mlpipelineholder.execution.inspection import (
     InspectionMixin,
+    _InspectionCacheBinding,
     _InspectionMemoryEstimator,
     _read_smaps_rollup_rss,
     _release_native_allocators,
@@ -274,6 +276,111 @@ class InspectionCacheTests(unittest.TestCase):
                 self.assertIs(resolved.memory, cached)
                 self.assertEqual(resolved.memory, [7, 8, 9])
 
+    def test_pandas_object_cells_are_isolated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler(
+                "pandas-isolation",
+                {},
+                Path(tmp) / "project",
+            )
+            frame = pd.DataFrame(
+                {
+                    "nested": [[1, 2]],
+                    "meta": pd.Series([{"flags": ["selected"]}], dtype=object),
+                }
+            )
+            series = pd.Series([[7, 8]], dtype=object)
+            pipeline.set_constant_value("frame", frame, copy=False)
+            pipeline.set_constant_value("series", series, copy=False)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["frame", "series"])
+
+            with pipeline.inspect("frame", "series") as resolved:
+                resolved.frame.iloc[0, 0].append(3)
+                resolved.frame.iloc[0, 1]["flags"].append("experimental")
+                resolved.series.iloc[0].append(10)
+
+            self.assertEqual(frame.iloc[0, 0], [1, 2])
+            self.assertEqual(frame.iloc[0, 1], {"flags": ["selected"]})
+            self.assertEqual(series.iloc[0], [7, 8])
+
+            with pipeline.inspect("frame", "series") as resolved:
+                self.assertEqual(resolved.frame.iloc[0, 0], [1, 2, 3])
+                self.assertEqual(
+                    resolved.frame.iloc[0, 1],
+                    {"flags": ["selected", "experimental"]},
+                )
+                self.assertEqual(resolved.series.iloc[0], [7, 8, 10])
+
+    def test_dirty_storage_value_is_copied_instead_of_stale_artifact(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler(
+                "dirty-storage",
+                {},
+                Path(tmp) / "project",
+            )
+            hash_id = pipeline.save_to_storage("model_data", {"version": 1})
+            pipeline.update_storage(hash_id, {"version": 1}, to_disk=True)
+            pipeline.update_storage(hash_id, {"version": 2}, to_disk=False)
+
+            uncached: object = None
+            with pipeline.inspect("model_data") as resolved:
+                uncached = resolved.model_data
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["model_data"])
+            with pipeline.inspect("model_data") as resolved:
+                self.assertEqual(resolved.model_data, uncached)
+            self.assertEqual(uncached, {"version": 2})
+
+    def test_dead_weakref_binding_does_not_match_by_id(self) -> None:
+        class Refable:
+            pass
+
+        original = Refable()
+        binding = _InspectionCacheBinding(
+            cache_key=(("memory", id(original)), True),
+            kind="memory",
+            priority=None,
+            compute=True,
+            original_ref=weakref.ref(original),
+            original_id=id(original),
+        )
+        del original
+        gc.collect()
+
+        self.assertFalse(
+            InspectionMixin._inspection_original_matches(binding, Refable())
+        )
+
+    def test_skipped_nudge_rearms_after_original_dies(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            uncopyable = UncopyableBothWays()
+            pipeline.set_constant_value("lock", uncopyable)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["lock"])
+            self.assertIn("lock", pipeline._inspection_copy_skipped)
+
+            del uncopyable
+            pipeline.set_constant_value("lock", [1, 2])
+            gc.collect()
+
+            with mock.patch.object(pipeline.logger, "info") as info:
+                with pipeline.inspect("lock") as resolved:
+                    self.assertEqual(resolved.lock, [1, 2])
+
+            messages = [call.args[0] for call in info.call_args_list]
+            self.assertTrue(
+                any(
+                    "copy it first with copy_for_inspection" in message
+                    for message in messages
+                )
+            )
+
     def test_deepcopy_failure_falls_back_to_temporary_serialization(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -368,6 +475,45 @@ class InspectionCacheTests(unittest.TestCase):
                 self.assertEqual(resolved.generation, "early")
             with pipeline.inspect("generation") as resolved:
                 self.assertEqual(resolved.generation, "late")
+
+    def test_priority_views_match_uncached_resolution(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("priority-views", {}, Path(tmp) / "project")
+            pipeline.add_block("early", 1).register_function(
+                produce_early,
+                ["generation"],
+                save_to_disk=["generation"],
+            )
+            pipeline.add_block("late", 2).register_function(
+                produce_late,
+                ["generation"],
+                save_to_disk=["generation"],
+            )
+            pipeline.run_all()
+
+            # The selected node's own output is excluded from its view, so both
+            # priority=2 and priority=3 inspect the state before the late node.
+            uncached_priority_view = ""
+            with pipeline.inspect("generation", priority=3) as resolved:
+                uncached_priority_view = resolved.generation
+            self.assertEqual(uncached_priority_view, "early")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.copy_for_inspection(["generation"], priority=2)
+
+            with mock.patch.object(
+                ArtifactStore,
+                "load",
+                wraps=pipeline.artifact_store.load,
+            ) as load:
+                with pipeline.inspect("generation", priority=3) as resolved:
+                    self.assertEqual(resolved.generation, uncached_priority_view)
+                self.assertEqual(load.call_count, 0)
+
+                with pipeline.inspect("generation") as resolved:
+                    self.assertEqual(resolved.generation, "late")
+                self.assertEqual(load.call_count, 1)
 
     def test_priority_mismatch_serves_cache_with_reminder(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -508,6 +654,10 @@ class InspectionCacheTests(unittest.TestCase):
                 to_disk=True,
             )
 
+            uncached_storage: object = None
+            with pipeline.inspect("stored") as resolved:
+                uncached_storage = resolved.stored
+
             with (
                 mock.patch.object(
                     ArtifactStore,
@@ -518,12 +668,14 @@ class InspectionCacheTests(unittest.TestCase):
             ):
                 warnings.simplefilter("ignore", UserWarning)
                 pipeline.copy_for_inspection(["output_value", "stored"])
-                self.assertEqual(load.call_count, 2)
+                # Only the produced output is an artifact; the stored object is
+                # currently loaded in memory and is copied directly.
+                self.assertEqual(load.call_count, 1)
 
                 with pipeline.inspect("output_value", "stored") as resolved:
                     self.assertEqual(resolved.output_value, {"source": "output"})
-                    self.assertEqual(resolved.stored, {"source": "storage"})
-                self.assertEqual(load.call_count, 2)
+                    self.assertEqual(resolved.stored, uncached_storage)
+                self.assertEqual(load.call_count, 1)
 
             pipeline.unload_inspection_objects()
             with self.assertWarnsRegex(UserWarning, "nothing was unloaded"):
