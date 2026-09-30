@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import copyreg
 import gc
-from collections import OrderedDict, defaultdict
-from dataclasses import dataclass
 import sys
 import threading
 import types
 import unittest
 import warnings
 import weakref
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest import mock
 
 import numpy as np
@@ -24,7 +26,9 @@ from mlpipelineholder import (
     pipeline_resolving,
 )
 from mlpipelineholder.execution.inspection import (
+    InspectionCopier,
     InspectionMixin,
+    ResolutionSource,
     _InspectionCacheBinding,
     _InspectionMemoryEstimator,
     _read_smaps_rollup_rss,
@@ -58,29 +62,6 @@ def aliases_shared(left: dict[str, list[int]], right: dict[str, list[int]]) -> b
     return left["items"] is right["items"]
 
 
-@dataclass
-class FrameHolder:
-    frame: pd.DataFrame
-
-
-@dataclass(slots=True, frozen=True)
-class SlottedFrameHolder:
-    frame: pd.DataFrame
-
-
-class PlainFrameHolder:
-    def __init__(self, frame: pd.DataFrame) -> None:
-        self.frame = frame
-
-
-class FrameDict(dict[str, pd.DataFrame]):
-    pass
-
-
-class FrameList(list[pd.DataFrame]):
-    pass
-
-
 class WeakPayload:
     def __init__(self, size: int = 1024) -> None:
         self.data = bytearray(size)
@@ -97,6 +78,130 @@ class DeepcopyFailsButPicklable:
 class UncopyableBothWays:
     def __init__(self) -> None:
         self.lock = threading.Lock()
+
+
+@dataclass
+class FrameHolder:
+    frame: pd.DataFrame
+
+
+@dataclass(slots=True, frozen=True)
+class SlottedFrameHolder:
+    frame: pd.DataFrame
+
+
+class PlainFrameHolder:
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.self_ref: PlainFrameHolder = self
+
+
+class FrameDict(dict[str, pd.DataFrame]):
+    pass
+
+
+class FrameList(list[pd.DataFrame]):
+    pass
+
+
+class TaggedTuple(tuple[Any, ...]):
+    def __init__(self, iterable: Any = (), /) -> None:
+        self.meta: list[int] = []
+
+
+class TaggedInt(int):
+    def __init__(self, value: int = 0) -> None:
+        self.meta: list[int] = []
+
+
+class PrivateSlotHolder:
+    __slots__ = ("__payload",)
+
+    def __init__(self) -> None:
+        self.__payload = [1]
+
+    def payload(self) -> list[int]:
+        return self.__payload
+
+
+class PrivateSlotChild(PrivateSlotHolder):
+    __slots__ = ("__extra",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.__extra = ["child"]
+
+    def extra(self) -> list[str]:
+        return self.__extra
+
+
+class SpecialList(list[Any]):
+    token: str
+
+    def __new__(cls, token: str, iterable: Any = ()) -> "SpecialList":
+        obj: Any = super().__new__(cls)
+        obj.token = token
+        return obj
+
+    def __init__(self, token: str, iterable: Any = ()) -> None:
+        super().__init__(iterable)
+        self.token = token
+
+    def __getnewargs__(self) -> tuple[str]:
+        return (self.token,)
+
+
+@dataclass
+class CustomState:
+    value: int
+    cache: list[str]
+
+    def __getstate__(self) -> dict[str, Any]:
+        return {"value": self.value, "cache": ["via-state"]}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.value = state["value"]
+        self.cache = state["cache"]
+
+
+class RegisteredValue:
+    def __init__(self, payload: list[int]) -> None:
+        self.payload = payload
+
+
+class ProtocolAware:
+    seen_protocol: int | None = None
+
+    def __reduce_ex__(self, protocol: Any) -> tuple[Any, ...]:
+        type(self).seen_protocol = protocol
+        return (ProtocolAware, ())
+
+
+class TrustedDeepcopy:
+    def __init__(self, marker: str) -> None:
+        self.marker = marker
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "TrustedDeepcopy":
+        copied = TrustedDeepcopy("from-deepcopy")
+        memo[id(self)] = copied
+        return copied
+
+
+class ProtocolArray(np.ndarray):
+    marker: str = ""
+
+    def __deepcopy__(self, memo: dict[int, Any] | None) -> Any:
+        copied: Any = self.view(np.ndarray).copy().view(ProtocolArray)
+        copied.marker = "via-protocol"
+        return copied
+
+
+def wrapped_frame(value: Any) -> pd.DataFrame:
+    if isinstance(value, dict):
+        return value["frame"]
+    if isinstance(value, (list, deque)):
+        return value[0]
+    return value.frame
 
 
 class InspectionCacheTests(unittest.TestCase):
@@ -502,6 +607,21 @@ class InspectionCacheTests(unittest.TestCase):
                 resolved.wrapped["frame"].iat[0, 0].append(4)
             self.assertEqual(original.iat[0, 0], [1, 2])
 
+    def test_pandas_inside_object_array_is_isolated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("object-array-frame", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            original = np.empty(1, dtype=object)
+            original[0] = frame
+            pipeline.set_constant_value("array", original, copy=False)
+            pipeline.set_constant_value("frame", frame, copy=False)
+            pipeline.copy_for_inspection(["array", "frame"])
+
+            with pipeline.inspect("array", "frame") as resolved:
+                self.assertIs(resolved.array[0], resolved.frame)
+                resolved.array[0].iat[0, 0].append(3)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
     def test_wrapped_pandas_frame_is_isolated_in_cache_and_protected_inspection(self) -> None:
         wrappers = (
             lambda frame: FrameHolder(frame),
@@ -512,6 +632,7 @@ class InspectionCacheTests(unittest.TestCase):
             lambda frame: FrameDict(frame=frame),
             lambda frame: FrameList([frame]),
             lambda frame: types.SimpleNamespace(frame=frame),
+            lambda frame: deque([frame]),
         )
         for wrap in wrappers:
             with self.subTest(wrapper=wrap):
@@ -522,43 +643,52 @@ class InspectionCacheTests(unittest.TestCase):
                     pipeline.set_constant_value("wrapped", wrapped, copy=False)
                     block = pipeline.add_block("use", 1)
                     block.register_function(
-                        return_value, ["result"], param_mapping={"value": "wrapped"}
+                        return_value,
+                        ["result"],
+                        param_mapping={"value": "wrapped"},
                     )
 
                     protected = block.inspect(
-                        resolve_only=True, allow_mutable_objects=False
+                        resolve_only=True,
+                        allow_mutable_objects=False,
                     ).arguments["value"]
-                    copied_frame = (
-                        protected[0] if isinstance(protected, list)
-                        else protected["frame"] if isinstance(protected, dict)
-                        else protected.frame
-                    )
-                    copied_frame.iat[0, 0].append(3)
+                    protected_frame = wrapped_frame(protected)
+                    self.assertIsNot(protected_frame, frame)
+                    protected_frame.iat[0, 0].append(3)
                     self.assertEqual(frame.iat[0, 0], [1, 2])
 
                     pipeline.copy_for_inspection(["wrapped"])
                     with pipeline.inspect("wrapped") as resolved:
-                        cached = resolved.wrapped
-                        copied_frame = (
-                            cached[0] if isinstance(cached, list)
-                            else cached["frame"] if isinstance(cached, dict)
-                            else cached.frame
-                        )
-                        copied_frame.iat[0, 0].append(4)
+                        cached_frame = wrapped_frame(resolved.wrapped)
+                        self.assertIsNot(cached_frame, frame)
+                        cached_frame.iat[0, 0].append(4)
                     self.assertEqual(frame.iat[0, 0], [1, 2])
 
     def test_self_referential_object_preserves_cycle(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = PipelineHandler("self-ref", {}, Path(tmp))
             original = PlainFrameHolder(pd.DataFrame({"items": [[1, 2]]}))
-            setattr(original, "self_ref", original)
+            original.self_ref = original
             pipeline.set_constant_value("holder", original, copy=False)
-            pipeline.copy_for_inspection(["holder"])
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "holder"},
+            )
 
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertIsNot(protected, original)
+            self.assertIs(protected.self_ref, protected)
+
+            pipeline.copy_for_inspection(["holder"])
             with pipeline.inspect("holder") as resolved:
                 copied = resolved.holder
                 self.assertIsNot(copied, original)
-                self.assertIs(getattr(copied, "self_ref"), copied)
+                self.assertIs(copied.self_ref, copied)
                 copied.frame.iat[0, 0].append(3)
             self.assertEqual(original.frame.iat[0, 0], [1, 2])
 
@@ -575,20 +705,342 @@ class InspectionCacheTests(unittest.TestCase):
                 resolved.left.frame.iat[0, 0].append(3)
             self.assertEqual(frame.iat[0, 0], [1, 2])
 
-    def test_pandas_inside_object_array_is_isolated(self) -> None:
-        with TemporaryDirectory() as tmp:
-            pipeline = PipelineHandler("object-array-frame", {}, Path(tmp))
-            frame = pd.DataFrame({"items": [[1, 2]]})
-            original = np.empty(1, dtype=object)
-            original[0] = frame
-            pipeline.set_constant_value("array", original, copy=False)
-            pipeline.set_constant_value("frame", frame, copy=False)
-            pipeline.copy_for_inspection(["array", "frame"])
+    def test_immutable_subclass_state_is_isolated(self) -> None:
+        factories = (
+            lambda: TaggedTuple((1, 2)),
+            lambda: TaggedInt(7),
+        )
+        for factory in factories:
+            with self.subTest(factory=factory):
+                with TemporaryDirectory() as tmp:
+                    pipeline = PipelineHandler("tagged", {}, Path(tmp))
+                    value = factory()
+                    value.meta = [3]
+                    pipeline.set_constant_value("value", value, copy=False)
+                    block = pipeline.add_block("use", 1)
+                    block.register_function(
+                        return_value,
+                        ["result"],
+                        param_mapping={"value": "value"},
+                    )
 
-            with pipeline.inspect("array", "frame") as resolved:
-                self.assertIs(resolved.array[0], resolved.frame)
-                resolved.array[0].iat[0, 0].append(3)
+                    protected = block.inspect(
+                        resolve_only=True,
+                        allow_mutable_objects=False,
+                    ).arguments["value"]
+                    self.assertIsNot(protected, value)
+                    self.assertEqual(protected.meta, [3])
+                    protected.meta.append(4)
+                    self.assertEqual(value.meta, [3])
+
+                    pipeline.copy_for_inspection(["value"])
+                    with pipeline.inspect("value") as resolved:
+                        cached = resolved.value
+                        self.assertIsNot(cached, value)
+                        self.assertEqual(cached.meta, [3])
+                        cached.meta.append(5)
+                    self.assertEqual(value.meta, [3])
+
+    def test_private_slot_state_is_copied(self) -> None:
+        for holder_type in (PrivateSlotHolder, PrivateSlotChild):
+            with self.subTest(holder=holder_type):
+                with TemporaryDirectory() as tmp:
+                    pipeline = PipelineHandler("private-slots", {}, Path(tmp))
+                    holder = holder_type()
+                    pipeline.set_constant_value("holder", holder, copy=False)
+                    block = pipeline.add_block("use", 1)
+                    block.register_function(
+                        return_value,
+                        ["result"],
+                        param_mapping={"value": "holder"},
+                    )
+
+                    protected = block.inspect(
+                        resolve_only=True,
+                        allow_mutable_objects=False,
+                    ).arguments["value"]
+                    self.assertEqual(protected.payload(), [1])
+                    if isinstance(protected, PrivateSlotChild):
+                        self.assertEqual(protected.extra(), ["child"])
+                    protected.payload().append(3)
+                    self.assertEqual(holder.payload(), [1])
+
+                    pipeline.copy_for_inspection(["holder"])
+                    with pipeline.inspect("holder") as resolved:
+                        cached = resolved.holder
+                        self.assertIsNot(cached, holder)
+                        self.assertEqual(cached.payload(), [1])
+                        if isinstance(cached, PrivateSlotChild):
+                            self.assertEqual(cached.extra(), ["child"])
+                        cached.payload().append(4)
+                    self.assertEqual(holder.payload(), [1])
+
+    def test_container_subclass_with_custom_new_round_trips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("special-list", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            value = SpecialList("tok", [frame])
+            pipeline.set_constant_value("value", value, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "value"},
+            )
+
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertIsInstance(protected, SpecialList)
+            self.assertEqual(protected.token, "tok")
+            self.assertEqual(len(protected), 1)
+            self.assertIsNot(protected[0], frame)
+            protected[0].iat[0, 0].append(3)
             self.assertEqual(frame.iat[0, 0], [1, 2])
+
+            pipeline.copy_for_inspection(["value"])
+            with pipeline.inspect("value") as resolved:
+                cached = resolved.value
+                self.assertIsInstance(cached, SpecialList)
+                self.assertEqual(cached.token, "tok")
+                self.assertEqual(len(cached), 1)
+                self.assertIsNot(cached[0], frame)
+                cached[0].iat[0, 0].append(4)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_dataclass_custom_state_hooks_are_honored(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("custom-state", {}, Path(tmp))
+            original = CustomState(1, ["original"])
+            pipeline.set_constant_value("state", original, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "state"},
+            )
+
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertEqual(protected.cache, ["via-state"])
+
+            pipeline.copy_for_inspection(["state"])
+            with pipeline.inspect("state") as resolved:
+                self.assertEqual(resolved.state.cache, ["via-state"])
+            self.assertEqual(original.cache, ["original"])
+
+    def test_copyreg_registered_reducer_is_honoured(self) -> None:
+        calls: list[list[int]] = []
+
+        def reducer(value: RegisteredValue) -> tuple[Any, ...]:
+            calls.append(value.payload)
+            return (RegisteredValue, (value.payload,))
+
+        copyreg.pickle(RegisteredValue, reducer)
+        try:
+            with TemporaryDirectory() as tmp:
+                pipeline = PipelineHandler("copyreg", {}, Path(tmp))
+                original = RegisteredValue([1, 2])
+                pipeline.set_constant_value("value", original, copy=False)
+                block = pipeline.add_block("use", 1)
+                block.register_function(
+                    return_value,
+                    ["result"],
+                    param_mapping={"value": "value"},
+                )
+
+                protected = block.inspect(
+                    resolve_only=True,
+                    allow_mutable_objects=False,
+                ).arguments["value"]
+                self.assertIsNot(protected, original)
+                self.assertEqual(protected.payload, [1, 2])
+
+                pipeline.copy_for_inspection(["value"])
+                with pipeline.inspect("value") as resolved:
+                    cached = resolved.value
+                    self.assertIsNot(cached, original)
+                    self.assertEqual(cached.payload, [1, 2])
+        finally:
+            copyreg.dispatch_table.pop(RegisteredValue, None)
+        self.assertEqual(len(calls), 2)
+
+    def test_reduce_ex_receives_deepcopy_protocol(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("protocol", {}, Path(tmp))
+            original = ProtocolAware()
+            pipeline.set_constant_value("value", original, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "value"},
+            )
+
+            ProtocolAware.seen_protocol = None
+            block.inspect(resolve_only=True, allow_mutable_objects=False)
+            self.assertEqual(ProtocolAware.seen_protocol, 4)
+
+            ProtocolAware.seen_protocol = None
+            pipeline.copy_for_inspection(["value"])
+            with pipeline.inspect("value") as resolved:
+                self.assertIsInstance(resolved.value, ProtocolAware)
+            self.assertEqual(ProtocolAware.seen_protocol, 4)
+
+    def test_explicit_deepcopy_is_trusted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("trusted-deepcopy", {}, Path(tmp))
+            original = TrustedDeepcopy("original")
+            pipeline.set_constant_value("value", original, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "value"},
+            )
+
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertEqual(protected.marker, "from-deepcopy")
+
+            pipeline.copy_for_inspection(["value"])
+            with pipeline.inspect("value") as resolved:
+                self.assertEqual(resolved.value.marker, "from-deepcopy")
+
+    def test_exact_object_ndarray_subclass_follows_its_protocol(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("protocol-array", {}, Path(tmp))
+            original = np.empty(1, dtype=object).view(ProtocolArray)
+            pipeline.set_constant_value("array", original, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "array"},
+            )
+
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertIsInstance(protected, ProtocolArray)
+            self.assertEqual(protected.marker, "via-protocol")
+
+    def test_structured_object_ndarray_is_isolated(self) -> None:
+        dtype = np.dtype([("frame", object), ("score", np.int64)])
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("structured-array", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            original = np.empty(1, dtype=dtype)
+            original["frame"][0] = frame
+            original["score"][0] = 10
+            pipeline.set_constant_value("array", original, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "array"},
+            )
+
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertEqual(protected["score"][0], 10)
+            self.assertIsNot(protected["frame"][0], frame)
+            protected["frame"][0].iat[0, 0].append(3)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
+            pipeline.copy_for_inspection(["array"])
+            with pipeline.inspect("array") as resolved:
+                cached = resolved.array
+                self.assertEqual(cached["score"][0], 10)
+                self.assertIsNot(cached["frame"][0], frame)
+                cached["frame"][0].iat[0, 0].append(4)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_nested_structured_object_ndarray_is_isolated(self) -> None:
+        inner = np.dtype([("frame", object), ("label", object)])
+        dtype = np.dtype([("inner", inner), ("score", np.int64)])
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("nested-structured-array", {}, Path(tmp))
+            frame = pd.DataFrame({"items": [[1, 2]]})
+            original = np.empty(1, dtype=dtype)
+            original["inner"]["frame"][0] = frame
+            original["inner"]["label"][0] = "kept"
+            original["score"][0] = 10
+            pipeline.set_constant_value("array", original, copy=False)
+            pipeline.copy_for_inspection(["array"])
+
+            with pipeline.inspect("array") as resolved:
+                cached = resolved.array
+                self.assertEqual(cached["inner"]["label"][0], "kept")
+                self.assertEqual(cached["score"][0], 10)
+                self.assertIsNot(cached["inner"]["frame"][0], frame)
+                cached["inner"]["frame"][0].iat[0, 0].append(3)
+            self.assertEqual(frame.iat[0, 0], [1, 2])
+
+    def test_copier_keeps_originals_alive_for_id_safety(self) -> None:
+        copier = InspectionCopier(None, allow_mutable_objects=False)
+        original = WeakPayload()
+        reference = weakref.ref(original)
+        copied, _ = copier.prepare(
+            original,
+            parameter_name="value",
+            source=ResolutionSource(kind="test"),
+        )
+        self.assertIsNot(copied, original)
+        del original
+        gc.collect()
+        self.assertIsNotNone(reference())
+        self.assertTrue(any(item is reference() for item in copier._keepalive))
+
+    @unittest.skipUnless(find_spec("torch") is not None, "torch is not installed")
+    def test_torch_module_and_optimizer_keep_deepcopy_boundary(self) -> None:
+        import torch
+
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("torch-boundary", {}, Path(tmp))
+            module = torch.nn.Linear(2, 2)
+            optimizer = torch.optim.SGD(module.parameters(), lr=0.1)
+            pipeline.set_constant_value("module", module, copy=False)
+            pipeline.set_constant_value("optimizer", optimizer, copy=False)
+            block = pipeline.add_block("use", 1)
+            block.register_function(
+                return_value,
+                ["result"],
+                param_mapping={"value": "module"},
+            )
+
+            before = module.weight.detach().clone()
+            protected = block.inspect(
+                resolve_only=True,
+                allow_mutable_objects=False,
+            ).arguments["value"]
+            self.assertIsInstance(next(protected.parameters()), torch.nn.Parameter)
+
+            pipeline.copy_for_inspection(["module", "optimizer"])
+            with pipeline.inspect("module", "optimizer") as resolved:
+                copied_module = resolved.module
+                copied_optimizer = resolved.optimizer
+                self.assertIsNot(copied_module, module)
+                self.assertIsNot(copied_optimizer, optimizer)
+                self.assertIsInstance(
+                    next(copied_module.parameters()),
+                    torch.nn.Parameter,
+                )
+                self.assertIsInstance(
+                    copied_optimizer.param_groups[0]["params"][0],
+                    torch.nn.Parameter,
+                )
+                with torch.no_grad():
+                    copied_module.weight.add_(1)
+            self.assertTrue(torch.equal(module.weight, before))
 
     def test_failed_copy_does_not_expose_partial_pandas_memo_to_later_names(self) -> None:
         with TemporaryDirectory() as tmp:

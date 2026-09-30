@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import copyreg
 import gc
 import math
 import os
@@ -11,13 +12,12 @@ import sys
 import types
 import warnings
 import weakref
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import date, datetime, time, timedelta
 from enum import Enum
 from itertools import islice
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath, PosixPath, WindowsPath
 from types import BuiltinFunctionType, FunctionType
 from typing import TYPE_CHECKING, Any, Final, Self
 from uuid import UUID, uuid4
@@ -60,6 +60,24 @@ _SHALLOW_SAMPLE_LIMIT: Final[int] = 32
 _SHALLOW_DEPTH_LIMIT: Final[int] = 2
 _PATH_ENTRY_LIMIT: Final[int] = 4096
 _TEMPORARY_ALLOCATION_FRACTION: Final[float] = 0.1
+
+# Concrete immutable leaf types whose subclasses may carry mutable instance
+# state and therefore must not be shared by identity.
+_IMMUTABLE_EXACT_TYPES: Final[tuple[type, ...]] = (
+    Path,
+    PurePath,
+    PosixPath,
+    PurePosixPath,
+    WindowsPath,
+    PureWindowsPath,
+    date,
+    datetime,
+    time,
+    timedelta,
+    UUID,
+    range,
+    slice,
+)
 
 _ARTIFACT_MEMORY_FACTORS: Final[dict[str, float]] = {
     "numpy": 1.1,
@@ -113,6 +131,7 @@ class InspectionCopier:
         self._logger = logger
         self._allow_mutable_objects = allow_mutable_objects
         self._memo: dict[int, Any] = {}
+        self._keepalive: list[Any] = []
         self._copy_started = False
 
     @property
@@ -133,7 +152,7 @@ class InspectionCopier:
             return value, source
         if value is self._logger or isinstance(
             value,
-            (FunctionType, BuiltinFunctionType),
+            (FunctionType, BuiltinFunctionType, type),
         ):
             self._memo[id(value)] = value
             return value, replace(source, identity_passthrough=True)
@@ -167,6 +186,9 @@ class InspectionCopier:
                 "copying returned the original object",
             )
         self._memo[id(value)] = copied
+        # Keep the original alive for the batch so its object id cannot be
+        # reused while this memo still maps it, mirroring copy._keep_alive.
+        self._keepalive.append(value)
         return copied, replace(source, copied=True)
 
     def requires_copy(self, value: Any, *, caller_owned: bool = False) -> bool:
@@ -199,23 +221,13 @@ class InspectionCopier:
 
     @classmethod
     def _is_known_immutable(cls, value: Any) -> bool:
-        if isinstance(
-            value,
-            (
-                *_IMMUTABLE_TYPES,
-                Path,
-                date,
-                datetime,
-                time,
-                timedelta,
-                UUID,
-                Enum,
-                range,
-                slice,
-            ),
-        ):
+        if type(value) in _IMMUTABLE_TYPES:
             return True
-        if isinstance(value, (tuple, frozenset)):
+        if type(value) in _IMMUTABLE_EXACT_TYPES:
+            return True
+        if isinstance(value, Enum):
+            return True
+        if type(value) is tuple or type(value) is frozenset:
             return all(cls._is_known_immutable(item) for item in value)
         return False
 
@@ -227,12 +239,13 @@ class InspectionCopier:
     ) -> Any:
         # Python's generic deepcopy delegates to pandas' shallow object-cell
         # copying for DataFrames nested inside containers or wrapper objects.
-        # Recurse through standard containers and ordinary Python objects with
-        # this copier instead, preserving its shared memo and the pandas-aware
-        # cell isolation below. Classes with a custom copy protocol or custom
-        # ``__new__`` keep Python's deepcopy semantics.
-        if isinstance(value, dict):
-            copied_dict: Any = type(value).__new__(type(value))
+        # Exact builtin containers recurse through this copier; every other
+        # object is reconstructed from its own copy/reduce protocol below with
+        # prepared components, preserving the shared memo and pandas-aware cell
+        # isolation. Specialized handlers only claim exact library types so
+        # subclasses can describe themselves through their own protocol.
+        if type(value) is dict:
+            copied_dict: dict[Any, Any] = {}
             self._memo[id(value)] = copied_dict
             for key, item in value.items():
                 copied_key = self.prepare(
@@ -242,29 +255,16 @@ class InspectionCopier:
                     item, parameter_name=parameter_name, source=source
                 )[0]
                 copied_dict[copied_key] = copied_item
-            if isinstance(value, defaultdict):
-                factory = value.default_factory
-                copied_dict.default_factory = (
-                    factory
-                    if factory is None or isinstance(factory, type)
-                    else self.prepare(
-                        factory,
-                        parameter_name=parameter_name,
-                        source=source,
-                    )[0]
-                )
-            self._copy_instance_attributes(value, copied_dict, parameter_name, source)
             return copied_dict
-        if isinstance(value, list):
-            copied_list = type(value).__new__(type(value))
+        if type(value) is list:
+            copied_list: list[Any] = []
             self._memo[id(value)] = copied_list
             for item in value:
                 copied_list.append(
                     self.prepare(item, parameter_name=parameter_name, source=source)[0]
                 )
-            self._copy_instance_attributes(value, copied_list, parameter_name, source)
             return copied_list
-        if isinstance(value, tuple):
+        if type(value) is tuple:
             copied_items = [
                 self.prepare(item, parameter_name=parameter_name, source=source)[0]
                 for item in value
@@ -273,42 +273,17 @@ class InspectionCopier:
             # during the recursive copy. Reuse that copy to preserve the cycle.
             if id(value) in self._memo:
                 return self._memo[id(value)]
-            value_type = type(value)
-            if value_type is tuple:
-                copied_tuple: Any = tuple(copied_items)
-            else:
-                copied_tuple = tuple.__new__(value_type, copied_items)
-                self._copy_instance_attributes(
-                    value, copied_tuple, parameter_name, source
-                )
+            copied_tuple = tuple(copied_items)
             self._memo[id(value)] = copied_tuple
             return copied_tuple
-        if isinstance(value, set):
-            copied_set = type(value).__new__(type(value))
+        if type(value) is set:
+            copied_set: set[Any] = set()
             self._memo[id(value)] = copied_set
             for item in value:
                 copied_set.add(
                     self.prepare(item, parameter_name=parameter_name, source=source)[0]
                 )
-            self._copy_instance_attributes(value, copied_set, parameter_name, source)
             return copied_set
-        if isinstance(value, frozenset):
-            copied_frozen_items = [
-                self.prepare(item, parameter_name=parameter_name, source=source)[0]
-                for item in value
-            ]
-            if id(value) in self._memo:
-                return self._memo[id(value)]
-            value_type = type(value)
-            if value_type is frozenset:
-                copied_frozen: Any = frozenset(copied_frozen_items)
-            else:
-                copied_frozen = frozenset.__new__(value_type, copied_frozen_items)
-                self._copy_instance_attributes(
-                    value, copied_frozen, parameter_name, source
-                )
-            self._memo[id(value)] = copied_frozen
-            return copied_frozen
         try:
             import pandas as pd  # type: ignore
 
@@ -346,17 +321,9 @@ class InspectionCopier:
         try:
             import numpy as np  # type: ignore
 
-            if isinstance(value, np.ndarray):
-                if type(value) is np.ndarray and value.dtype == object:
-                    copied = np.empty_like(value)
-                    self._memo[id(value)] = copied
-                    for index in np.ndindex(value.shape):
-                        copied[index] = self.prepare(
-                            value[index], parameter_name=parameter_name, source=source
-                        )[0]
-                    return copied
+            if type(value) is np.ndarray:
                 if value.dtype.hasobject:
-                    return copy.deepcopy(value, self._memo)
+                    return self._copy_object_ndarray(value, parameter_name, source)
                 copied = value.copy()
                 self._memo[id(value)] = copied
                 return copied
@@ -366,7 +333,7 @@ class InspectionCopier:
         try:
             import dask.dataframe as dd  # type: ignore
 
-            if isinstance(value, (dd.DataFrame, dd.Series)):
+            if type(value) is dd.DataFrame or type(value) is dd.Series:
                 copied = value.copy()
                 self._memo[id(value)] = copied
                 return copied
@@ -376,77 +343,151 @@ class InspectionCopier:
         try:
             import torch  # type: ignore
 
-            if isinstance(value, torch.Tensor):
+            if isinstance(value, torch.nn.Parameter):
+                return copy.deepcopy(value, self._memo)
+            if type(value) is torch.Tensor:
                 copied = value.detach().clone()
                 self._memo[id(value)] = copied
                 return copied
+            if isinstance(value, (torch.nn.Module, torch.optim.Optimizer)):
+                # Reconstructing a module through its reduce protocol would
+                # downgrade its Parameter tensors to plain tensors, so keep
+                # Python's deepcopy for these compatibility boundaries.
+                return copy.deepcopy(value, self._memo)
         except ImportError:
             pass
 
-        # Classes and modules are identity/atomic values for copying, and bound
-        # methods keep Python's deepcopy semantics for their owner.
+        # Classes, modules, and bound methods are atomic or shared templates;
+        # they keep Python's deepcopy semantics.
         if isinstance(value, (type, types.ModuleType, types.MethodType)):
             return copy.deepcopy(value, self._memo)
 
-        # SimpleNamespace defines its own ``__reduce__``, but its complete
-        # state is the instance ``__dict__`` (plus subclass slots).
-        if isinstance(value, types.SimpleNamespace):
-            copied_namespace: Any = type(value).__new__(type(value))
-            self._memo[id(value)] = copied_namespace
-            self._copy_instance_attributes(
-                value, copied_namespace, parameter_name, source
-            )
-            return copied_namespace
+        # Mirror copy.deepcopy's selection order. An explicit ``__deepcopy__``
+        # owns its isolation semantics and is trusted as written.
+        deepcopier = getattr(value, "__deepcopy__", None)
+        if deepcopier is not None:
+            return deepcopier(self._memo)
+        reductor = copyreg.dispatch_table.get(type(value))
+        if reductor is not None:
+            reduction = reductor(value)
+        else:
+            reductor = getattr(value, "__reduce_ex__", None)
+            if reductor is not None:
+                reduction = reductor(4)
+            else:
+                reductor = getattr(value, "__reduce__", None)
+                if reductor is None:
+                    raise TypeError(
+                        f"un(deep)copyable object of type {type(value).__name__}"
+                    )
+                reduction = reductor()
+        if isinstance(reduction, str):
+            return value
+        return self._copy_reduced(value, reduction, parameter_name, source)
 
-        value_type = type(value)
-        attributes = getattr(value, "__dict__", None)
-        slots = _slot_names(value_type)
-        if attributes is None and not slots:
-            return copy.deepcopy(value, self._memo)
-        # A custom ``__new__`` may require arguments or build C-level state
-        # that ``__dict__``/``__slots__`` cannot reproduce, so only shell plain
-        # Python objects through their default constructor.
-        if value_type.__new__ is not object.__new__ or _defines_copy_protocol(
-            value_type
-        ):
-            return copy.deepcopy(value, self._memo)
-
-        shell = object.__new__(value_type)
-        self._memo[id(value)] = shell
-        self._copy_instance_attributes(value, shell, parameter_name, source)
-        return shell
-
-    def _copy_instance_attributes(
+    def _copy_reduced(
         self,
         value: Any,
-        shell: Any,
+        reduction: Any,
+        parameter_name: str,
+        source: ResolutionSource,
+    ) -> Any:
+        """Reconstruct ``value`` from its reduce tuple with prepared components.
+
+        This intentionally mirrors :func:`copy._reconstruct`: the only
+        difference is that each recursive ``deepcopy(component, memo)`` call
+        becomes ``self.prepare(component, ...)[0]``.
+        """
+        if len(reduction) > 5:
+            raise TypeError(
+                "reduce tuple with more than five items is not supported"
+            )
+        func = reduction[0]
+        args = reduction[1] if len(reduction) > 1 else ()
+        state = reduction[2] if len(reduction) > 2 else None
+        listitems = reduction[3] if len(reduction) > 3 else None
+        dictitems = reduction[4] if len(reduction) > 4 else None
+
+        copied_args = tuple(
+            self.prepare(arg, parameter_name=parameter_name, source=source)[0]
+            for arg in args
+        )
+        copied = func(*copied_args)
+        self._memo[id(value)] = copied
+
+        if state is not None:
+            copied_state = self.prepare(
+                state, parameter_name=parameter_name, source=source
+            )[0]
+            if hasattr(copied, "__setstate__"):
+                copied.__setstate__(copied_state)
+            else:
+                dict_state: Any
+                slot_state: Any
+                if isinstance(copied_state, tuple) and len(copied_state) == 2:
+                    dict_state, slot_state = copied_state
+                else:
+                    dict_state, slot_state = copied_state, None
+                if dict_state is not None:
+                    copied.__dict__.update(dict_state)
+                if slot_state is not None:
+                    for key, item in slot_state.items():
+                        setattr(copied, key, item)
+
+        if listitems is not None:
+            for item in listitems:
+                copied.append(
+                    self.prepare(item, parameter_name=parameter_name, source=source)[0]
+                )
+        if dictitems is not None:
+            for key, item in dictitems:
+                copied[
+                    self.prepare(key, parameter_name=parameter_name, source=source)[0]
+                ] = self.prepare(item, parameter_name=parameter_name, source=source)[0]
+        return copied
+
+    def _copy_object_ndarray(
+        self,
+        value: Any,
+        parameter_name: str,
+        source: ResolutionSource,
+    ) -> Any:
+        """Copy an ndarray whose dtype holds Python objects at any depth.
+
+        The shell is copied and memoized first so an object leaf that
+        references the containing array still resolves to the copy, then every
+        Python-object leaf, including fields of structured dtypes and subarray
+        fields, is replaced through :meth:`prepare`.
+        """
+        copied = value.copy()
+        self._memo[id(value)] = copied
+        self._isolate_ndarray_objects(copied, value, parameter_name, source)
+        return copied
+
+    def _isolate_ndarray_objects(
+        self,
+        copied: Any,
+        original: Any,
         parameter_name: str,
         source: ResolutionSource,
     ) -> None:
-        """Copy ``__dict__`` and slot state of ``value`` into ``shell``.
+        import numpy as np  # type: ignore
 
-        Attributes are prepared through this copier so nested pandas/numpy/
-        torch values receive the same specialized copying as direct values and
-        aliases stay shared within one inspection batch.
-        """
-        attributes = getattr(value, "__dict__", None)
-        if attributes:
-            copied_attributes = self.prepare(
-                attributes, parameter_name=parameter_name, source=source
-            )[0]
-            try:
-                shell.__dict__.update(copied_attributes)
-            except AttributeError:
-                pass
-        for slot_name in _slot_names(type(value)):
-            try:
-                item = getattr(value, slot_name)
-            except AttributeError:
+        if original.dtype == object:
+            for index in np.ndindex(original.shape):
+                copied[index] = self.prepare(
+                    original[index], parameter_name=parameter_name, source=source
+                )[0]
+            return
+        for name in original.dtype.names or ():
+            field_dtype = original.dtype.fields[name][0]
+            if not field_dtype.hasobject:
                 continue
-            object.__setattr__(
-                shell,
-                slot_name,
-                self.prepare(item, parameter_name=parameter_name, source=source)[0],
+            self._isolate_ndarray_objects(
+                copied[name],
+                original[name],
+                parameter_name,
+                source,
             )
 
     @staticmethod
@@ -604,41 +645,6 @@ def _parquet_directory_file_count(path: Path) -> tuple[int, bool]:
     return count, False
 
 
-_COPY_PROTOCOL_NAMES: tuple[str, ...] = (
-    "__copy__",
-    "__deepcopy__",
-    "__getnewargs__",
-    "__getnewargs_ex__",
-    "__getstate__",
-    "__setstate__",
-    "__reduce__",
-    "__reduce_ex__",
-)
-
-
-def _defines_copy_protocol(value_type: type) -> bool:
-    """Whether the class overrides its own copying or pickling protocol.
-
-    Classes that opt into a custom copy/reduce protocol may carry state that a
-    structural ``__dict__``/``__slots__`` copy cannot reproduce, so protected
-    copying keeps delegating those to Python's ``deepcopy``. Dataclasses with
-    ``slots=True`` get generated ``__getstate__``/``__setstate__`` helpers that
-    describe exactly the structural state, so those are ignored here.
-    """
-    generated_names = (
-        {"__getstate__", "__setstate__"} if is_dataclass(value_type) else set()
-    )
-    for base in value_type.__mro__:
-        if base is object:
-            continue
-        for name in _COPY_PROTOCOL_NAMES:
-            if name in generated_names:
-                continue
-            if name in base.__dict__:
-                return True
-    return False
-
-
 def _slot_names(value_type: type) -> tuple[str, ...]:
     names: list[str] = []
     for cls in value_type.__mro__:
@@ -648,8 +654,12 @@ def _slot_names(value_type: type) -> tuple[str, ...]:
         if isinstance(slots, str):
             slots = (slots,)
         for name in slots:
-            if name in ("__dict__", "__weakref__"):
+            if not isinstance(name, str) or name in ("__dict__", "__weakref__"):
                 continue
+            # Private slot names are stored name-mangled on the instance, so
+            # the declaring class must mangle them the same way to read them.
+            if name.startswith("__") and not name.endswith("__"):
+                name = f"_{cls.__name__.lstrip('_')}{name}"
             if name not in names:
                 names.append(name)
     return tuple(names)
