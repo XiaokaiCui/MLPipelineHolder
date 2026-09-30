@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import sys
+import types
 import unittest
 import warnings
+import weakref
 from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
 import pandas as pd
+import numpy as np
 
 from mlpipelineholder import PipelineHandler, ResolutionError, pipeline_resolving
+from mlpipelineholder.execution.inspection import (
+    InspectionMixin,
+    _InspectionMemoryEstimator,
+    _read_smaps_rollup_rss,
+    _release_native_allocators,
+)
 from mlpipelineholder.persistence.artifacts.store import ArtifactStore
 
 
@@ -24,6 +34,11 @@ def produce_output() -> dict[str, str]:
 def append_value(value: list[int]) -> list[int]:
     value.append(99)
     return value
+
+
+class WeakPayload:
+    def __init__(self, size: int = 1024) -> None:
+        self.data = bytearray(size)
 
 
 class InspectionCacheTests(unittest.TestCase):
@@ -286,7 +301,16 @@ class InspectionCacheTests(unittest.TestCase):
             ):
                 warnings.simplefilter("ignore", UserWarning)
                 pipeline.load_for_inspection(["first"])
-            info.assert_called_with("Inspection cache load RSS delta: +50 B")
+            message = next(
+                call.args[0]
+                for call in info.call_args_list
+                if "net process RSS change" in call.args[0]
+            )
+            self.assertIn(
+                "Inspection cache load net process RSS change (after cleanup): +50 B",
+                message,
+            )
+            self.assertIn("estimated newly cached size:", message)
 
             with (
                 mock.patch(
@@ -296,7 +320,199 @@ class InspectionCacheTests(unittest.TestCase):
                 mock.patch.object(pipeline.logger, "info") as info,
             ):
                 pipeline.unload_inspection_objects()
-            info.assert_called_with("Inspection cache unload RSS released: +30 B")
+            message = next(
+                call.args[0]
+                for call in info.call_args_list
+                if "net process RSS change" in call.args[0]
+            )
+            self.assertIn(
+                "Inspection cache unload net process RSS change (after cleanup): -30 B",
+                message,
+            )
+            self.assertIn("estimated released cached size:", message)
+
+            with (
+                mock.patch(
+                    "mlpipelineholder.execution.inspection._process_rss_bytes",
+                    side_effect=[200, 170],
+                ),
+                mock.patch.object(pipeline.logger, "info") as info,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.load_for_inspection(["second"])
+            message = next(
+                call.args[0]
+                for call in info.call_args_list
+                if "net process RSS change" in call.args[0]
+            )
+            self.assertIn(
+                "Inspection cache load net process RSS change (after cleanup): -30 B",
+                message,
+            )
+            self.assertIn("estimated newly cached size:", message)
+
+    def test_load_logs_refresh_reminder(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+
+            with mock.patch.object(pipeline.logger, "info") as info:
+                pipeline.load_for_inspection(["first"])
+
+            messages = [call.args[0] for call in info.call_args_list]
+            self.assertTrue(
+                any("refresh_loaded_objects()" in message for message in messages)
+            )
+
+    def test_native_allocator_release_is_best_effort(self) -> None:
+        calls: list[str] = []
+
+        class FakePool:
+            def release_unused(self) -> None:
+                calls.append("release_unused")
+
+        fake_pyarrow = types.SimpleNamespace(default_memory_pool=lambda: FakePool())
+        with mock.patch.dict(sys.modules, {"pyarrow": fake_pyarrow}):
+            _release_native_allocators()
+        self.assertEqual(calls, ["release_unused"])
+
+        class BrokenPool:
+            def release_unused(self) -> None:
+                raise RuntimeError("pool failure")
+
+        fake_broken = types.SimpleNamespace(
+            default_memory_pool=lambda: BrokenPool()
+        )
+        with mock.patch.dict(sys.modules, {"pyarrow": fake_broken}):
+            _release_native_allocators()
+
+    def test_cache_operations_release_native_allocators(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            with (
+                mock.patch(
+                    "mlpipelineholder.execution.inspection._release_native_allocators"
+                ) as release,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.load_for_inspection(["first"])
+                self.assertGreaterEqual(release.call_count, 1)
+
+                release.reset_mock()
+                pipeline.unload_inspection_objects()
+
+            self.assertGreaterEqual(release.call_count, 2)
+            self.assertTrue(release.call_args.kwargs.get("gpu"))
+
+    def test_smaps_rollup_rss_parser_uses_current_mapping_total(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rollup = Path(tmp) / "smaps_rollup"
+            rollup.write_text(
+                "00400000-7fffffffffff ---p 00000000 00:00 0 [rollup]\n"
+                "Rss:             1843200 kB\n"
+                "Pss:             1700000 kB\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                _read_smaps_rollup_rss(rollup),
+                1_843_200 * 1024,
+            )
+
+    def test_unload_drops_cache_references_before_final_rss_sample(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("release", {}, Path(tmp))
+            pipeline.set_constant_value(
+                "payload",
+                WeakPayload(1_000_000),
+                to_disk=True,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.load_for_inspection(["payload"])
+            cache_key = pipeline._inspection_cache_bindings["payload"]
+            reference = weakref.ref(
+                pipeline._inspection_cache_entries[cache_key].value
+            )
+            released_at_samples: list[bool] = []
+
+            def rss_sample() -> int:
+                released_at_samples.append(reference() is None)
+                return 100 if len(released_at_samples) == 1 else 80
+
+            with mock.patch(
+                "mlpipelineholder.execution.inspection._process_rss_bytes",
+                side_effect=rss_sample,
+            ):
+                pipeline.unload_inspection_objects()
+
+            self.assertEqual(released_at_samples, [False, True])
+            self.assertIsNone(reference())
+
+    def test_retained_estimate_counts_immutables_and_deduplicates_exact_views(
+        self,
+    ) -> None:
+        large_string = "x" * 1_000_000
+        copy_estimator = _InspectionMemoryEstimator()
+        copy_estimator.add("strings", [large_string])
+        retained_estimator = _InspectionMemoryEstimator(retained=True)
+        retained_estimator.add("strings", [large_string])
+
+        self.assertLess(copy_estimator.total_bytes, 1_000_000)
+        self.assertGreater(retained_estimator.total_bytes, 1_000_000)
+
+        base = np.arange(1_000, dtype=np.int64)
+        first = base[:500]
+        duplicate = base[:500]
+        view_estimator = _InspectionMemoryEstimator(retained=True)
+        view_estimator.add("first", first)
+        view_estimator.add("duplicate", duplicate)
+        self.assertEqual(view_estimator.total_bytes, first.nbytes)
+
+    def test_estimate_failure_does_not_change_successful_cache_load(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = self._pipeline(Path(tmp))
+            with (
+                mock.patch.object(
+                    _InspectionMemoryEstimator,
+                    "add",
+                    side_effect=MemoryError("simulated estimate failure"),
+                ),
+                mock.patch.object(
+                    pipeline,
+                    "_attempt_allocator_trim",
+                    wraps=pipeline._attempt_allocator_trim,
+                ) as trim,
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", UserWarning)
+                pipeline.load_for_inspection(["first"])
+
+            self.assertIn("first", pipeline._inspection_cache_bindings)
+            self.assertGreaterEqual(trim.call_count, 2)
+
+    @unittest.skipUnless(find_spec("torch") is not None, "torch is not installed")
+    def test_cuda_estimate_is_reported_separately(self) -> None:
+        import torch
+
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is not available")
+        tensor = torch.zeros(1_024, device="cuda")
+        estimator = _InspectionMemoryEstimator(retained=True)
+        estimator.add("tensor", tensor)
+
+        device = 0 if tensor.device.index is None else int(tensor.device.index)
+        self.assertEqual(estimator.total_bytes, 0)
+        self.assertEqual(
+            estimator.cuda_bytes[device],
+            tensor.element_size() * tensor.nelement(),
+        )
+        estimate = InspectionMixin._format_inspection_object_estimate(
+            [tensor],
+            label="cached size",
+        )
+        self.assertIn(f"CUDA device {device}", estimate)
 
     @unittest.skipUnless(
         find_spec("dask.dataframe") is not None,

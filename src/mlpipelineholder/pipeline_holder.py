@@ -74,6 +74,7 @@ from .execution.engine import EngineMixin
 from .execution.inspection import (
     DEFAULT_INSPECTION_MEMORY_SAFETY_MARGIN,
     InspectionMixin,
+    _release_native_allocators,
 )
 from .execution.function_registry import (
     _values_equal,
@@ -1301,6 +1302,10 @@ class PipelineHolder(
     def _cleanup_block_memory(self, node_name: str) -> None:
         gc.collect()
         self._attempt_allocator_trim()
+        # PyArrow and PyTorch keep freed buffers in their own pools, which
+        # ``malloc_trim`` cannot reach; release them so per-node cleanup can
+        # actually lower memory for dataframe and GPU workloads.
+        _release_native_allocators(gpu=True)
         if self.memory_profile_logging:
             self._log_memory_profile(node_name, phase="after_cleanup")
 

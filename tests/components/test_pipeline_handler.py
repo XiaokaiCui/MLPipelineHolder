@@ -3590,6 +3590,26 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertIn("left", pipeline.para_value_dict)
             self.assertIn("scaled_total", pipeline.para_value_dict)
 
+    def test_memory_saving_cleanup_releases_native_allocator_pools(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            pipeline = PipelineHandler(
+                "memory-native",
+                DemoConfig(base=2, factor=4),
+                tmp_path,
+                memory_saving_mode=True,
+            )
+            setup = pipeline.add_block("setup", 1)
+            setup.register_function(produce_seed, ["seed"])
+
+            with patch(
+                "mlpipelineholder.pipeline_holder._release_native_allocators"
+            ) as release:
+                pipeline.run_all()
+
+            release.assert_called()
+            self.assertTrue(release.call_args.kwargs.get("gpu"))
+
     def test_memory_profile_logging_reports_all_cleanup_phases(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
