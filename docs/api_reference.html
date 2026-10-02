@@ -1139,7 +1139,7 @@ block.register_function(
   overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
 ) -&gt; <span class="ret">ExpressionRegistration | None</span>
 </div>
-<p>Registers a single-statement expression. Must be an assignment (<code>NAME = EXPR</code>) or a print/logger call. No semicolons, imports, <code>eval</code>/<code>exec</code>/<code>__import__</code>, comprehensions, walrus operators, or nested definitions.</p>
+<p>Registers a single-statement expression. Must be an assignment (<code>NAME = EXPR</code>) or a print/logger call. No semicolons, imports, <code>eval</code>/<code>exec</code>/<code>__import__</code>, comprehensions, walrus operators, or nested function/class definitions. Lambdas are allowed as direct positional or keyword arguments to calls, for example <code>result = frame["a"].map(lambda value: value * 2)</code>, <code>frame.assign(total=lambda df: df["a"] + df["b"])</code>, or <code>sorted(items, key=lambda item: item["rank"])</code>. Lambda parameters are local, defaults are evaluated in the surrounding scope, and other referenced names resolve from visible pipeline inputs or the expression runtime. Standalone and immediately invoked lambdas remain unsupported.</p>
 <p><strong>Not a sandbox:</strong> these checks restrict supported syntax only. Registered expressions execute as trusted Python with normal runtime capabilities and builtins. Never register expression source you do not fully trust.</p>
 <div class="field-label">Parameters</div>
 <ul>
