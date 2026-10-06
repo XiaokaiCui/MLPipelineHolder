@@ -5074,7 +5074,7 @@ class StrictModeTests(unittest.TestCase):
             quant = PipelineHandler(
                 "quant_pipeline", {}, tmp / "quant", strict_mode=True
             )
-            quant.add_child_pipeline(dr, dr.execution_priority, forced=True)
+            quant.add_child_pipeline(dr, 10.0, forced=True)
             self.assertEqual(dr.parent_pipeline, quant)
 
     def test_strict_mode_attach_child_manual_vs_parent_declared_output_raises(self) -> None:
@@ -5544,6 +5544,23 @@ class StrictModeTests(unittest.TestCase):
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_memory_only_invalidation_skips_artifact_reference_scan(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("memory-only", DemoConfig(base=2), Path(temp_dir))
+            pipeline.add_block("prepare", 1).register_function(produce_seed, ["seed"])
+            pipeline.run_all()
+            self.assertTrue(pipeline.has_visible_output("seed"))
+
+            with patch.object(
+                pipeline,
+                "_collect_referenced_artifact_paths",
+                side_effect=AssertionError("No artifact candidates need a tree scan"),
+            ):
+                pipeline.remove_block("prepare")
+                pipeline._delete_artifacts_from_outputs({})
+
+            self.assertFalse(pipeline.has_visible_output("seed"))
+
     def test_forged_artifact_record_outside_root_is_not_deleted(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)

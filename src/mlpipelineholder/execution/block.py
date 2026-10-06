@@ -52,7 +52,7 @@ from ..core.models import (
     ResolutionSource,
     ResolvedInspectionCall,
 )
-from ..core.naming import validate_registration_name
+from ..core.naming import validate_execution_priority, validate_registration_name
 from ..state.output_pointers import (
     OutputPointer,
     resolve_pointer_chain,
@@ -80,6 +80,7 @@ class ExecutionBlock:
             registration_name,
             owner_label="block",
         )
+        validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         self.execution_priority = execution_priority
         self.functions: list[FunctionRegistration | ExpressionRegistration] = []
         self.registered_args: dict[str, BlockArgsRegistration] = {}

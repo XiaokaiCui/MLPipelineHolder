@@ -62,15 +62,26 @@ def validate_execution_priority(
     execution_priority: Any,
     *,
     owner_label: str,
+    allow_none: bool = True,
 ) -> None:
-    """Require ``None`` or a finite, non-negative number as a node priority.
+    """Require a finite, non-negative number as an execution priority.
 
-    Negative and non-finite priorities are rejected because priority groups
-    are formed with ``int()``, which truncates toward zero and would merge
+    ``None`` is the standalone-root default and is allowed only where a pipeline
+    declares its own unspecified priority (``allow_none=True``, the default used
+    by root construction). Registered nodes (blocks, child pipelines, and atoms)
+    always sort and compare their priority against numbers, so callers that
+    register a node pass ``allow_none=False`` to reject ``None`` before any state
+    changes. Negative and non-finite priorities are rejected because priority
+    groups are formed with ``int()``, which truncates toward zero and would merge
     negative and non-negative nodes into the same group.
     """
     if execution_priority is None:
-        return
+        if allow_none:
+            return
+        raise RegistrationError(
+            f"{owner_label.capitalize()} execution priority must be a finite "
+            f"non-negative number, got NoneType"
+        )
     if isinstance(execution_priority, bool) or not isinstance(
         execution_priority, numbers.Real
     ):

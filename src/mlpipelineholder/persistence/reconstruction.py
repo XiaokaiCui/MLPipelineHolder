@@ -223,6 +223,7 @@ class ReconstructionMixin:
                 validate_execution_priority(
                     node_payload["execution_priority"],
                     owner_label="pipeline",
+                    allow_none=False,
                 )
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline

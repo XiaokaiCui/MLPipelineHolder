@@ -302,7 +302,7 @@ class RegistrationMixin:
         self: Any, registration_name: str, execution_priority: float, forced: bool = True
     ) -> Any:
         validate_registration_name(registration_name, owner_label="block")
-        validate_execution_priority(execution_priority, owner_label="block")
+        validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         block = self._create_execution_block(registration_name, execution_priority)
         conflicts = self._registration_conflicts(block, execution_priority)
         self._raise_on_priority_conflict_with_different_name(
@@ -338,7 +338,7 @@ class RegistrationMixin:
 
     def _add_block_strict(self: Any, registration_name: str, execution_priority: float):
         validate_registration_name(registration_name, owner_label="block")
-        validate_execution_priority(execution_priority, owner_label="block")
+        validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         block = self._create_execution_block(registration_name, execution_priority)
         self._register_node(block)
         return block
@@ -352,7 +352,7 @@ class RegistrationMixin:
     ) -> Any:
         if child_pipeline is self:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
-        validate_execution_priority(execution_priority, owner_label="pipeline")
+        validate_execution_priority(execution_priority, owner_label="pipeline", allow_none=False)
         was_root = child_pipeline.parent_pipeline is None
         if registration_name is not None:
             validate_registration_name(registration_name, owner_label="pipeline")
