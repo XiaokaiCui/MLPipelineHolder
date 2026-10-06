@@ -110,7 +110,7 @@ from .core.models import (
     RuntimeValueReference,
     TorchStateArtifactRecord,
 )
-from .core.naming import validate_registration_name
+from .core.naming import validate_execution_priority, validate_registration_name
 from .persistence.object_storage import (
     StoredObjectRecord,
     create_record,
@@ -242,6 +242,7 @@ class PipelineHolder(
             registration_name,
             owner_label="pipeline",
         )
+        validate_execution_priority(execution_priority, owner_label="pipeline")
         self._config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHolder | None = None
@@ -321,8 +322,11 @@ class PipelineHolder(
             self._inspection_cache_lock = RLock()
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:
-            if generated_temp_root and self.project_root.exists():
-                shutil.rmtree(self.project_root, ignore_errors=True)
+            if generated_temp_root:
+                try:
+                    self._cleanup_temporary_root_handle()
+                except Exception:
+                    pass
             raise
 
     @property
@@ -1554,6 +1558,7 @@ class PipelineHolder(
         atomic_pickle_dump(self._serialize_config_for_save(self.config), path)
 
     def _attach_to_parent(self, parent: "PipelineHolder", execution_priority: float) -> None:
+        validate_execution_priority(execution_priority, owner_label="pipeline")
         # Registration moves the child's working tree underneath the parent project root.
         # Future execution uses the parent logger, but historical child RESULT display still
         # reads from the child-side historical log path captured here.

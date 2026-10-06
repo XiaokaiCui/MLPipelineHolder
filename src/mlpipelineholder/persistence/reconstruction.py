@@ -14,6 +14,7 @@ from ..core.models import (
     RuntimeValueReference,
 )
 from ..core.base import PipelineBase
+from ..core.naming import validate_execution_priority
 from ..exceptions import PersistenceError, RegistrationError
 from .object_storage import record_from_payload
 from ..execution.atom_registry import atom_pipeline_class
@@ -218,6 +219,10 @@ class ReconstructionMixin:
                     parent=pipeline,
                     verbose=verbose,
                     auto_resolve_placeholders=auto_resolve_placeholders,
+                )
+                validate_execution_priority(
+                    node_payload["execution_priority"],
+                    owner_label="pipeline",
                 )
                 child.execution_priority = node_payload["execution_priority"]
                 child.parent_pipeline = pipeline

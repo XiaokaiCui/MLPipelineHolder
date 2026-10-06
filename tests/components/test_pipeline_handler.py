@@ -1766,6 +1766,29 @@ class PipelineHandlerTests(unittest.TestCase):
             with self.assertRaises(PersistenceError):
                 PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
 
+    def test_load_pipeline_rejects_saved_negative_execution_priority(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("neg-load", DemoConfig(base=2), tmp / "project")
+            setup = pipeline.add_block("setup", 1)
+            assert setup is not None
+            setup.register_function(produce_seed, ["seed"])
+            pipeline.save_pipeline(tmp / "bundle")
+
+            state_path = tmp / "bundle" / "pipeline_state.pkl"
+            with state_path.open("rb") as handle:
+                payload = pickle.load(handle)
+            payload["nodes"][0]["execution_priority"] = -1
+            with state_path.open("wb") as handle:
+                pickle.dump(payload, handle)
+
+            with self.assertRaises(PersistenceError):
+                PipelineHandler.load_pipeline(
+                    tmp / "bundle",
+                    forced_deleting=True,
+                    trust_project=True,
+                )
+
     def test_pipeline_creation_warns_and_reuses_non_empty_root_when_cleanup_cancelled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -5427,6 +5450,97 @@ class StrictModeTests(unittest.TestCase):
             block = pipeline.add_block("b", 1)
             block.register_function(produce_seed, ["out"])
             self.assertIn("unmapped input", (tmp_path / "metadata" / "pipeline.log").read_text(encoding="utf-8"))
+
+    def test_negative_execution_priorities_are_rejected_before_mutation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("neg-priority", {}, tmp / "root")
+
+            with self.assertRaisesRegex(RegistrationError, "non-negative"):
+                root.add_block("negative", -1)
+            self.assertNotIn("negative", root.nodes_by_name)
+
+            with self.assertRaisesRegex(RegistrationError, "non-negative"):
+                root.add_block("not_finite", float("nan"))
+            self.assertNotIn("not_finite", root.nodes_by_name)
+
+            with self.assertRaisesRegex(RegistrationError, "non-negative"):
+                PipelineHandler("negative-root", {}, execution_priority=-1)
+
+            child = PipelineHandler("child", {}, tmp / "child")
+            with self.assertRaisesRegex(RegistrationError, "non-negative"):
+                root.add_child_pipeline(child, -1)
+            self.assertIsNone(child.parent_pipeline)
+            self.assertNotIn("child", root.nodes_by_name)
+
+            zero = root.add_block("zero", 0)
+            self.assertIsNotNone(zero)
+            self.assertEqual(zero.execution_priority, 0)
+
+    def test_negative_atom_priority_is_rejected_without_side_effects(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            pipeline = PipelineHandler("atom-negative", {}, tmp / "root")
+
+            for execution_priority, block_priority in (
+                (-1, 10),
+                (1, -1),
+                (1, float("nan")),
+                (1, float("inf")),
+            ):
+                with self.subTest(
+                    execution_priority=execution_priority,
+                    block_priority=block_priority,
+                ):
+                    with self.assertRaisesRegex(RegistrationError, "non-negative"):
+                        pipeline.create_atom_child_pipeline(
+                            "atom_bad_priority",
+                            execution_priority,
+                            produce_seed,
+                            output_variable_names="seed",
+                            block_priority=block_priority,
+                        )
+
+                    self.assertNotIn("atom_bad_priority", pipeline.nodes_by_name)
+                    self.assertFalse(
+                        (tmp / "root" / "children" / "atom_bad_priority").exists()
+                    )
+
+    def test_failed_construction_cleans_generated_temporary_root(self) -> None:
+        import mlpipelineholder.pipeline_holder as pipeline_holder_module
+
+        created: list[Path] = []
+        real_temporary_directory = pipeline_holder_module.TemporaryDirectory
+
+        def recording_temporary_directory(
+            *,
+            suffix: str | None = None,
+            prefix: str | None = None,
+            dir: str | None = None,
+            ignore_cleanup_errors: bool = False,
+        ) -> TemporaryDirectory[str]:
+            handle = real_temporary_directory(
+                suffix=suffix,
+                prefix=prefix,
+                dir=dir,
+                ignore_cleanup_errors=ignore_cleanup_errors,
+            )
+            created.append(Path(handle.name))
+            return handle
+
+        with patch.object(
+            pipeline_holder_module,
+            "TemporaryDirectory",
+            recording_temporary_directory,
+        ):
+            with self.assertRaises(RegistrationError):
+                PipelineHandler(
+                    "temp-cleanup",
+                    {"bad": build_unserializable_object()},
+                )
+
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
 
 
 class ReviewRegressionTests(unittest.TestCase):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import numbers
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -54,3 +56,30 @@ def validate_registration_name(name: Any, *, owner_label: str) -> str:
             "reserved by Windows"
         )
     return name
+
+
+def validate_execution_priority(
+    execution_priority: Any,
+    *,
+    owner_label: str,
+) -> None:
+    """Require ``None`` or a finite, non-negative number as a node priority.
+
+    Negative and non-finite priorities are rejected because priority groups
+    are formed with ``int()``, which truncates toward zero and would merge
+    negative and non-negative nodes into the same group.
+    """
+    if execution_priority is None:
+        return
+    if isinstance(execution_priority, bool) or not isinstance(
+        execution_priority, numbers.Real
+    ):
+        raise RegistrationError(
+            f"{owner_label.capitalize()} execution priority must be a finite "
+            f"non-negative number, got {type(execution_priority).__name__}"
+        )
+    if not math.isfinite(float(execution_priority)) or execution_priority < 0:
+        raise RegistrationError(
+            f"{owner_label.capitalize()} execution priority must be a finite "
+            f"non-negative number, got {execution_priority!r}"
+        )
