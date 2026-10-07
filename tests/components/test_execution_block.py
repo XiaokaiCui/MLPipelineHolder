@@ -550,6 +550,180 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(registration.input_names, ["value"])
             self.assertEqual(pipeline.get_value("result"), 5)
 
+    def test_expression_assign_lambdas_resolve_only_pipeline_inputs(self) -> None:
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is not installed")
+
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("expr-assign", {}, Path(temp_dir))
+            pipeline.set_constant_value(
+                "output_df",
+                pd.DataFrame(
+                    {
+                        "ticker": ["A"],
+                        "W-FRI": ["2026-10-02"],
+                        "6_0_weekly_return": [0.2],
+                        "12_6_weekly_return": [0.1],
+                        "this_week_return": [0.05],
+                        "2_0_weekly_return": [0.15],
+                    }
+                ),
+            )
+            pipeline.set_constant_value(
+                "info_df",
+                pd.DataFrame(
+                    {"ticker": ["A"], "sector": ["tech"], "industry": ["software"]}
+                ),
+            )
+            pipeline.set_constant_value(
+                "group_metrics_df",
+                pd.DataFrame(
+                    {
+                        "sector": ["tech"],
+                        "W-FRI": ["2026-10-02"],
+                        "sector_ret_252_skip_20": [0.3],
+                        "sector_pct_dist_sma_200": [0.4],
+                    }
+                ),
+            )
+            pipeline.set_constant_value(
+                "industry_metrics_df",
+                pd.DataFrame(
+                    {
+                        "industry": ["software"],
+                        "W-FRI": ["2026-10-02"],
+                        "industry_ret_252_skip_20": [0.5],
+                        "industry_pct_dist_sma_200": [0.6],
+                    }
+                ),
+            )
+            block = pipeline.add_block("assign", 1)
+            registration = block.register_expression(
+                """
+                result = (
+                    output_df
+                    .merge(info_df.loc[info_df["sector"].notna(),
+                                       ["sector", "industry", "ticker"]],
+                           on="ticker", how="left", validate="many_to_one")
+                    .merge(group_metrics_df[["sector", "W-FRI",
+                                             "sector_ret_252_skip_20",
+                                             "sector_pct_dist_sma_200"]],
+                           on=["sector", "W-FRI"], how="left", validate="many_to_one")
+                    .merge(industry_metrics_df[["industry", "W-FRI",
+                                                "industry_ret_252_skip_20",
+                                                "industry_pct_dist_sma_200"]],
+                           on=["industry", "W-FRI"], how="left", validate="many_to_one")
+                    .assign(
+                        mid_term_mon=lambda df: 2 * df["6_0_weekly_return"]
+                                                - df["12_6_weekly_return"],
+                        short_term_mon=lambda df: df["this_week_return"]
+                            * (df["2_0_weekly_return"] - df["this_week_return"]).abs(),
+                    )
+                    .reset_index(drop=True)
+                )
+                """
+            )
+            self.assertIsNotNone(registration)
+            self.assertCountEqual(
+                registration.input_names,
+                ["output_df", "info_df", "group_metrics_df", "industry_metrics_df"],
+            )
+            pipeline.run_all()
+            result = pipeline.get_value("result")
+            self.assertEqual(result.loc[0, "sector_ret_252_skip_20"], 0.3)
+            self.assertEqual(result.loc[0, "industry_ret_252_skip_20"], 0.5)
+            self.assertAlmostEqual(result.loc[0, "mid_term_mon"], 0.3)
+            self.assertAlmostEqual(result.loc[0, "short_term_mon"], 0.005)
+
+    def test_expression_assign_lambda_can_resolve_other_pipeline_inputs(self) -> None:
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is not installed")
+
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("expr-assign-input", {"offset": 9}, Path(temp_dir))
+            pipeline.define_expression_runtime("from math import sqrt")
+            pipeline.set_constant_value("frame", pd.DataFrame({"value": [4]}))
+            block = pipeline.add_block("assign", 1)
+            registration = block.register_expression(
+                'result = frame.assign(adjusted=lambda df: df["value"] + sqrt(offset))'
+            )
+            self.assertIsNotNone(registration)
+            self.assertCountEqual(registration.input_names, ["frame", "offset"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result")["adjusted"].tolist(), [7.0])
+
+    def test_expression_callback_lambdas_support_pandas_methods(self) -> None:
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is not installed")
+
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "expr-callback-pandas", {"factor": 2, "offset": 1}, Path(temp_dir)
+            )
+            pipeline.set_constant_value("frame", pd.DataFrame({"value": [1, 2]}))
+            block = pipeline.add_block("callbacks", 1)
+            registration = block.register_expression(
+                """
+                result = (
+                    frame.assign(
+                        mapped=frame["value"].map(lambda item: item * factor)
+                    ).apply(lambda row: row["mapped"] + offset, axis=1)
+                )
+                """
+            )
+            self.assertIsNotNone(registration)
+            self.assertCountEqual(registration.input_names, ["frame", "factor", "offset"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("result").tolist(), [3, 5])
+
+    def test_expression_callback_lambdas_support_multiple_parameters_and_defaults(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "expr-callback-builtins",
+                {"values": [1, 2, 3], "increment": 2},
+                Path(temp_dir),
+            )
+            pipeline.define_expression_runtime("from functools import reduce")
+            sort_block = pipeline.add_block("sort", 1)
+            sorting = sort_block.register_expression(
+                "ordered = sorted(map(lambda item, step=increment: item + step, values), "
+                "key=lambda item: -item)"
+            )
+            reduce_block = pipeline.add_block("reduce", 2)
+            reducing = reduce_block.register_expression(
+                "total = reduce(lambda left, right: left + right, ordered, 0)"
+            )
+            self.assertIsNotNone(sorting)
+            self.assertIsNotNone(reducing)
+            self.assertCountEqual(sorting.input_names, ["values", "increment"])
+            self.assertEqual(reducing.input_names, ["ordered"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("ordered"), [5, 4, 3])
+            self.assertEqual(pipeline.get_value("total"), 12)
+
+    def test_expression_lambdas_outside_call_arguments_remain_rejected(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("expr-lambda-scope", {}, Path(temp_dir))
+            block = pipeline.add_block("block", 1)
+            for code in (
+                "result = lambda value: value",
+                "result = (lambda value: value)(input_value)",
+                "result = [lambda value: value]",
+            ):
+                with self.subTest(code=code), self.assertRaisesRegex(
+                    RegistrationError, "lambda"
+                ):
+                    block.register_expression(code)
+            self.assertEqual(block.functions, [])
+
     def test_expression_print_only_runs_without_outputs(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -654,6 +828,29 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertIsNotNone(registration)
             self.assertEqual(registration.input_names, [])
             self.assertEqual(pipeline.get_value("result"), [1, 2])
+
+    def test_expression_reserves_special_builtins_namespace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                PipelineHandler("invalid-config", {"__builtins__": {}}, tmp_path / "invalid")
+
+            pipeline = PipelineHandler("expr-special-builtins", {"value": 2}, tmp_path / "valid")
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                pipeline.set_config("__builtins__", {})
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                pipeline.set_constant_value("__builtins__", {})
+
+            block = pipeline.add_block("block", 1)
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                block.register_expression("__builtins__ = value")
+            registration = block.register_expression(
+                "result = list(map(lambda item: str(item), (value,)))"
+            )
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(pipeline.get_value("result"), ["2"])
 
     def test_expression_runtime_supports_imported_helpers(self) -> None:
         with TemporaryDirectory() as temp_dir:

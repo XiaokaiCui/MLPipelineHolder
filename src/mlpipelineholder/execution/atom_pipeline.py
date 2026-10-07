@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.naming import validate_execution_priority
 from ..exceptions import RegistrationError
 from ..pipeline_holder import PipelineHolder
 from .atom_registry import register_atom_pipeline_class
@@ -149,6 +150,8 @@ class AtomPipeline(PipelineHolder):
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         """Create and attach an atom child under ``parent``; identical re-creation is a no-op."""
+        validate_execution_priority(execution_priority, owner_label="pipeline", allow_none=False)
+        validate_execution_priority(block_priority, owner_label="block", allow_none=False)
         if parent._is_atom:
             raise RegistrationError(
                 f"Atom pipeline '{parent.registration_name}' is immutable "

@@ -1834,6 +1834,17 @@ class InspectionMixin:
             values = tuple(
                 entry.value for entry in self._inspection_cache_entries.values()
             )
+            names_by_key: dict[_InspectionCacheKey, list[str]] = {}
+            for name, binding in self._inspection_cache_bindings.items():
+                names_by_key.setdefault(binding.cache_key, []).append(name)
+            # Only weak references are retained here. A strong reference would
+            # prevent the unload itself from releasing a cached copy.
+            copied_refs = tuple(
+                (tuple(names_by_key.get(cache_key, ())), reference)
+                for cache_key, entry in self._inspection_cache_entries.items()
+                if (reference := self._weakref_or_none(entry.value)) is not None
+                and not InspectionCopier._is_known_immutable(entry.value)
+            )
         estimate = self._format_inspection_object_estimate(
             values,
             label="released cached size",
@@ -1857,6 +1868,22 @@ class InspectionMixin:
             )
         except Exception:
             pass
+        still_alive = sorted(
+            {
+                name
+                for names, reference in copied_refs
+                if reference is not None and reference() is not None
+                for name in names
+            }
+        )
+        if still_alive:
+            self.logger.warning(
+                "Inspection cache was cleared, but copied object(s) "
+                f"{', '.join(repr(name) for name in still_alive)} remain alive "
+                "outside this cache. Other references (such as notebook "
+                "variables or retained inspection results) may keep their "
+                "memory resident until those references are released."
+            )
 
     def _inspection_cached_value(
         self,

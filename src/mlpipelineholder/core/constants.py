@@ -11,4 +11,4 @@ _RESERVED_BUILTIN_NAMES = {
     name
     for name in dir(builtins)
     if not name.startswith("_")
-}
+} | {"__builtins__"}

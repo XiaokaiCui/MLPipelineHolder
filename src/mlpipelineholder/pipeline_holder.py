@@ -110,7 +110,7 @@ from .core.models import (
     RuntimeValueReference,
     TorchStateArtifactRecord,
 )
-from .core.naming import validate_registration_name
+from .core.naming import validate_execution_priority, validate_registration_name
 from .persistence.object_storage import (
     StoredObjectRecord,
     create_record,
@@ -242,6 +242,7 @@ class PipelineHolder(
             registration_name,
             owner_label="pipeline",
         )
+        validate_execution_priority(execution_priority, owner_label="pipeline")
         self._config = {} if configuration is None else configuration
         self.execution_priority = execution_priority
         self.parent_pipeline: PipelineHolder | None = None
@@ -321,8 +322,11 @@ class PipelineHolder(
             self._inspection_cache_lock = RLock()
             self.artifact_store = ArtifactStore(self.project_root)
         except Exception:
-            if generated_temp_root and self.project_root.exists():
-                shutil.rmtree(self.project_root, ignore_errors=True)
+            if generated_temp_root:
+                try:
+                    self._cleanup_temporary_root_handle()
+                except Exception:
+                    pass
             raise
 
     @property
@@ -1494,21 +1498,20 @@ class PipelineHolder(
             self._delete_artifacts_from_outputs(outputs)
 
     def _delete_artifacts_from_outputs(self, outputs: dict[str, Any]) -> None:
+        candidates = [value for value in outputs.values() if isinstance(value, ArtifactRecord)]
+        if not candidates:
+            return
         active_artifact_paths = self._collect_referenced_artifact_paths()
-        for value in outputs.values():
-            if isinstance(value, ArtifactRecord):
-                if (
-                    str(Path(value.file_path).resolve())
-                    in active_artifact_paths
-                ):
-                    continue
-                try:
-                    self.artifact_store.delete(value)
-                except (OSError, PersistenceError) as exc:
-                    self.logger.warning(
-                        f"Could not delete obsolete artifact '{value.file_path}': "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+        for value in candidates:
+            if str(Path(value.file_path).resolve()) in active_artifact_paths:
+                continue
+            try:
+                self.artifact_store.delete(value)
+            except (OSError, PersistenceError) as exc:
+                self.logger.warning(
+                    f"Could not delete obsolete artifact '{value.file_path}': "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
     def _cleanup_replaced_artifact(self, previous_value: Any) -> None:
         """Retire a replaced artifact file only after its replacement committed.
@@ -1554,6 +1557,7 @@ class PipelineHolder(
         atomic_pickle_dump(self._serialize_config_for_save(self.config), path)
 
     def _attach_to_parent(self, parent: "PipelineHolder", execution_priority: float) -> None:
+        validate_execution_priority(execution_priority, owner_label="pipeline", allow_none=False)
         # Registration moves the child's working tree underneath the parent project root.
         # Future execution uses the parent logger, but historical child RESULT display still
         # reads from the child-side historical log path captured here.

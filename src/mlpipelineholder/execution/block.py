@@ -4,6 +4,7 @@ import ast
 import builtins
 import inspect
 import math
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from textwrap import dedent
@@ -51,7 +52,7 @@ from ..core.models import (
     ResolutionSource,
     ResolvedInspectionCall,
 )
-from ..core.naming import validate_registration_name
+from ..core.naming import validate_execution_priority, validate_registration_name
 from ..state.output_pointers import (
     OutputPointer,
     resolve_pointer_chain,
@@ -79,6 +80,7 @@ class ExecutionBlock:
             registration_name,
             owner_label="block",
         )
+        validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         self.execution_priority = execution_priority
         self.functions: list[FunctionRegistration | ExpressionRegistration] = []
         self.registered_args: dict[str, BlockArgsRegistration] = {}
@@ -268,6 +270,18 @@ class ExecutionBlock:
             raise RegistrationError(message) from exc
         if len(parsed.body) != 1:
             raise RegistrationError("Expressions must contain exactly one statement")
+        callback_lambdas: set[int] = set()
+        for call in ast.walk(parsed):
+            if not isinstance(call, ast.Call):
+                continue
+            callback_lambdas.update(
+                id(argument) for argument in call.args if isinstance(argument, ast.Lambda)
+            )
+            callback_lambdas.update(
+                id(keyword.value)
+                for keyword in call.keywords
+                if keyword.arg is not None and isinstance(keyword.value, ast.Lambda)
+            )
         for node in ast.walk(parsed):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 raise RegistrationError("Expressions may not contain import statements")
@@ -277,9 +291,11 @@ class ExecutionBlock:
                 raise RegistrationError(
                     "Expressions may not use comprehensions or generator expressions"
                 )
-            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.ClassDef, ast.Lambda)):
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef, ast.ClassDef)):
+                raise RegistrationError("Expressions may not define functions or classes")
+            if isinstance(node, ast.Lambda) and id(node) not in callback_lambdas:
                 raise RegistrationError(
-                    "Expressions may not define functions, classes, or lambdas"
+                    "Expressions only allow lambdas passed directly as call arguments"
                 )
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec", "__import__"}:
                 raise RegistrationError("Expression may not call eval, exec, or __import__")
@@ -313,16 +329,43 @@ class ExecutionBlock:
 
     def _extract_loaded_names(self, node: ast.AST, *, ignored_names: set[str]) -> list[str]:
         names: list[str] = []
-        for child in ast.walk(node):
+        pending: deque[tuple[ast.AST, frozenset[str]]] = deque([(node, frozenset())])
+        while pending:
+            child, local_names = pending.popleft()
+            if isinstance(child, ast.Lambda):
+                arguments = child.args
+                # Defaults are evaluated when the lambda is created, in the
+                # enclosing scope; only its body sees the bound parameters.
+                pending.extend(
+                    (default, local_names)
+                    for default in (*arguments.defaults, *arguments.kw_defaults)
+                    if default is not None
+                )
+                parameter_names = {
+                    argument.arg
+                    for argument in (
+                        *arguments.posonlyargs,
+                        *arguments.args,
+                        *arguments.kwonlyargs,
+                    )
+                }
+                if arguments.vararg is not None:
+                    parameter_names.add(arguments.vararg.arg)
+                if arguments.kwarg is not None:
+                    parameter_names.add(arguments.kwarg.arg)
+                pending.append((child.body, local_names.union(parameter_names)))
+                continue
             if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
                 if (
-                    child.id in {"print", "logger"}
+                    child.id in local_names
+                    or child.id in {"print", "logger"}
                     or child.id in _ALLOWED_EXPRESSION_BUILTIN_NAMES
                     or child.id in ignored_names
                 ):
                     continue
                 if child.id not in names:
                     names.append(child.id)
+            pending.extend((descendant, local_names) for descendant in ast.iter_child_nodes(child))
         return names
 
     def _effective_expression_input_names(
@@ -2332,7 +2375,9 @@ class ExecutionBlock:
 
     @staticmethod
     def _run_expression_code(code: str, namespace: dict[str, Any]) -> None:
-        exec(compile(code, "<pipeline-expression>", "exec"), {}, namespace)
+        # A lambda's free names use the globals mapping, so expose the same
+        # resolved pipeline/runtime inputs there as at the top expression level.
+        exec(compile(code, "<pipeline-expression>", "exec"), namespace, namespace)
 
     @staticmethod
     def _normalize_outputs(registration: FunctionRegistration, result: Any) -> dict[str, Any]:

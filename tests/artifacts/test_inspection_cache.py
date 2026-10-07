@@ -1833,6 +1833,56 @@ class InspectionCacheTests(unittest.TestCase):
             self.assertEqual(released_at_samples, [False, True])
             self.assertIsNone(reference())
 
+    def test_unload_reports_copies_still_referenced_elsewhere(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("held-copy", {}, Path(tmp))
+            original = WeakPayload(128)
+            pipeline.set_constant_value("left", original, copy=False)
+            pipeline.set_constant_value("right", original, copy=False)
+            pipeline.copy_for_inspection(["left", "right"])
+            held: WeakPayload | None = None
+            with pipeline.inspect("left") as resolved:
+                held = resolved.left
+            assert held is not None
+            self.assertIsNot(held, original)
+
+            with mock.patch.object(pipeline.logger, "warning") as warning:
+                pipeline.unload_inspection_objects()
+
+            self.assertEqual(pipeline._inspection_cache_bindings, {})
+            self.assertEqual(pipeline._inspection_cache_entries, {})
+            warning.assert_called_once()
+            message = warning.call_args.args[0]
+            self.assertIn("'left'", message)
+            self.assertIn("'right'", message)
+            self.assertIn("remain alive outside this cache", message)
+            self.assertEqual(held.data, original.data)
+
+    def test_unload_does_not_claim_external_references_without_evidence(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pipeline = PipelineHandler("released-copy", {}, Path(tmp))
+            pipeline.set_constant_value("payload", WeakPayload(128), copy=False)
+            pipeline.copy_for_inspection(["payload"])
+            binding = pipeline._inspection_cache_bindings["payload"]
+            reference = weakref.ref(
+                pipeline._inspection_cache_entries[binding.cache_key].value
+            )
+            with mock.patch.object(pipeline.logger, "warning") as warning:
+                pipeline.unload_inspection_objects()
+            self.assertIsNone(reference())
+            warning.assert_not_called()
+
+            pipeline.set_constant_value("items", [1], copy=False)
+            pipeline.copy_for_inspection(["items"])
+            held_list: list[int] | None = None
+            with pipeline.inspect("items") as resolved:
+                held_list = resolved.items
+            assert held_list is not None
+            with mock.patch.object(pipeline.logger, "warning") as warning:
+                pipeline.unload_inspection_objects()
+            warning.assert_not_called()
+            self.assertEqual(held_list, [1])
+
     def test_retained_estimate_counts_immutables_and_deduplicates_exact_views(
         self,
     ) -> None:
