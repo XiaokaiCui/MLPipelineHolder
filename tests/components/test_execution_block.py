@@ -829,6 +829,29 @@ class ExecutionBlockTests(unittest.TestCase):
             self.assertEqual(registration.input_names, [])
             self.assertEqual(pipeline.get_value("result"), [1, 2])
 
+    def test_expression_reserves_special_builtins_namespace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                PipelineHandler("invalid-config", {"__builtins__": {}}, tmp_path / "invalid")
+
+            pipeline = PipelineHandler("expr-special-builtins", {"value": 2}, tmp_path / "valid")
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                pipeline.set_config("__builtins__", {})
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                pipeline.set_constant_value("__builtins__", {})
+
+            block = pipeline.add_block("block", 1)
+            with self.assertRaisesRegex(RegistrationError, "__builtins__"):
+                block.register_expression("__builtins__ = value")
+            registration = block.register_expression(
+                "result = list(map(lambda item: str(item), (value,)))"
+            )
+            pipeline.run_all()
+
+            self.assertIsNotNone(registration)
+            self.assertEqual(pipeline.get_value("result"), ["2"])
+
     def test_expression_runtime_supports_imported_helpers(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
