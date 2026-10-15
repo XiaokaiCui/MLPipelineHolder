@@ -12,7 +12,6 @@ from tempfile import mkdtemp
 from typing import TYPE_CHECKING, Any
 
 from ..exceptions import PersistenceError, RegistrationError
-from .backup_swap import restore_interrupted_backup
 from .artifacts.store import ArtifactStore
 from .pickle_io import (
     atomic_pickle_dump,
@@ -41,6 +40,37 @@ _UNTRUSTED_PROJECT_MESSAGE = (
     "source, pass trust_project=True. Otherwise, do not load it because loading a "
     "pipeline project may execute harmful code."
 )
+_BACKUP_REQUIRED_FILES = ("pipeline_state.pkl", "config.pkl", "pipeline_meta.pkl")
+
+
+def restore_interrupted_backup(backup_root: Path) -> None:
+    """Restore the last complete copy after an interrupted backup directory swap.
+
+    A backup refresh copies the new tree into a hidden staging directory, moves
+    the previous copy aside, then promotes the staged tree. If the process is
+    interrupted after the previous copy is moved aside but before the promotion,
+    the configured backup path is missing while the previous copy survives in a
+    ``.<name>.staging-*/previous`` directory. Recover it so the next save, load,
+    or backup read does not silently lose the last good backup.
+    """
+    if backup_root.exists() or backup_root.is_symlink() or not backup_root.parent.is_dir():
+        return
+    prefix = f".{backup_root.name}.staging-"
+    candidates = [
+        directory
+        for directory in backup_root.parent.iterdir()
+        if directory.name.startswith(prefix)
+        and directory.is_dir()
+        and all(
+            (directory / "previous" / filename).is_file()
+            for filename in _BACKUP_REQUIRED_FILES
+        )
+    ]
+    if not candidates:
+        return
+    staging_root = max(candidates, key=lambda directory: directory.stat().st_mtime_ns)
+    (staging_root / "previous").rename(backup_root)
+    shutil.rmtree(staging_root, ignore_errors=True)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

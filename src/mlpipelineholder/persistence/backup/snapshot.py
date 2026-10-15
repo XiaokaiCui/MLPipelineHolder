@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Callable, cast
 
 from .recovery import _PipelineProtocol
-from ..backup_swap import restore_interrupted_backup
 from ...exceptions import PersistenceError, ResolutionError
 from ...core.models import ArtifactRecord, TorchStateArtifactRecord
 
@@ -59,6 +58,8 @@ def read_backup_snapshot(root_pipeline: _PipelineProtocol) -> _BackupSnapshot:
     backup_root = root.pipeline_backup_root
     if backup_root is None:
         raise PersistenceError("Root pipeline has no configured backup directory")
+    from ..save_load import restore_interrupted_backup
+
     restore_interrupted_backup(backup_root)
     if not backup_root.exists() or not backup_root.is_dir():
         raise PersistenceError(
