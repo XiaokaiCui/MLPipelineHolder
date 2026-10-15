@@ -23,6 +23,20 @@ class _TeeStdout:
             if callable(flush):
                 flush()
 
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name: str) -> Any:
+        # Preserve the real stream's terminal and encoding capabilities while
+        # continuing to tee writes into the captured buffer. Guard the
+        # backing tuple so attribute lookups before __init__ (for example
+        # during unpickling or copying) raise AttributeError instead of
+        # recursing forever.
+        if name == "streams":
+            raise AttributeError(name)
+        return getattr(self.streams[0], name)
+
 
 class PrintCaptureMixin:
     """Capture prints made by user functions into the pipeline log."""

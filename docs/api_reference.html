@@ -646,11 +646,11 @@ pipeline.refresh_loaded_objects()</pre></div>
 <ul class="param-desc">
   <li><code>child_pipeline</code>: detached or re-attachable pipeline to place under this parent; a pipeline cannot attach itself.</li>
   <li><code>execution_priority</code>: numeric position of the child among this parent's blocks and child pipelines.</li>
-  <li><code>registration_name</code>: optional replacement for the child's current public name before attachment.</li>
+  <li><code>registration_name</code>: optional replacement for the child's current public name before attachment. Renaming a child already attached to this same parent is rejected.</li>
   <li><code>forced</code>: by default, replace a conflicting registered node, remove its previous outputs as applicable, and detach the child from a previous parent when permitted; pass <code>False</code> to skip conflicts.</li>
 </ul>
 <p>Returns the attached child, or <code>None</code> when a non-forced duplicate is skipped.</p>
-<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the child's declared output names conflict with visible configuration fields or pipeline constants anywhere in the tree.</p>
+<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the child's declared output names conflict with visible configuration fields or pipeline constants anywhere in the tree. Validation checks the proposed replacement before removing existing nodes or detaching the child from its previous parent; a rejected validation leaves those registrations, their outputs, and the child's original name intact. After a successful move, the previous parent no longer exposes the child's produced values, and its downstream consumers are invalidated unless cascade invalidation is forbidden.</p>
 
 <div class="field-label">Returns</div><p>The attached child pipeline, or <code>None</code> when a conflict is skipped. The priority must be finite and non-negative (not bool).</p>
 <div class="example"><div class="example-title">Example</div><pre>child = PipelineHolder("analysis", {})
@@ -726,14 +726,14 @@ print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_until">run_until()</h4>
 <div class="sig"><span class="kw">run_until</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes all nodes with priority lower than the target node's priority. Supports nested paths, for example <code>run_until("modeling_pipeline", "predictor_components")</code>.</p>
+<p>Executes the target node and the preceding priority groups, inclusive. Nodes in the target's integer priority group are alternatives: the explicitly named target runs instead of earlier same-group peers. Supports nested paths, for example <code>run_until("modeling_pipeline", "predictor_components")</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path_parts</code>: one immediate node name or a sequence of child-pipeline names ending at the target node.</li>
   <li><code>overrides</code>: optional inputs used only for this run.</li>
 </ul>
 
-<div class="field-label">Returns</div><p>A <code>RunRecord</code> for execution before the target; the target itself is excluded.</p>
+<div class="field-label">Returns</div><p>A <code>RunRecord</code> for execution through the target, inclusive.</p>
 <div class="example"><div class="example-title">Example</div><pre>record = pipeline.run_until("prepare")</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_from">run_from()</h4>
@@ -903,6 +903,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>Raises <a class="anchor" href="#resolutionerror"><code>ResolutionError</code></a> for unknown names and for names owned by pipeline constants (use <code>set_constant_value()</code> instead).</p>
 <p>If the selected slot is an output pointer, <code>set_value()</code> raises <code>ResolutionError</code> without changing state. The message identifies the terminal <code>pipeline.node.output</code> that stores the real object and tells the caller which pipeline should receive <code>set_value()</code> instead.</p>
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produces the name registered it with <code>save_to_disk</code>, the value is saved to disk automatically, otherwise it stays in memory.</p>
+<p>Unless cascade invalidation is forbidden, the update invalidates every downstream consumer starting from the earliest node that actually consumes this output (nodes between the producer and that consumer, which do not read it, are left intact). The new value is written first, so the updated producer itself is preserved.</p>
 
 <div class="field-label">Returns</div><p><code>None</code>. Replaces an existing produced value under the ownership and invalidation rules above.</p>
 <div class="example"><div class="example-title">Example</div><pre>pipeline.set_value("seed", 4)</pre></div>
@@ -918,6 +919,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>verbose</code>: log copy or reference-fallback details.</li>
 </ul>
 <p>Mutable values are stored as a deep copy by default (see <code>set_constant_value()</code>). Disk-backing is inherited from the producing block: if the deepest downstream block that produced the name registered it with <code>save_to_disk</code>, the updated value is saved to disk automatically (a non-serializable value raises <code>PersistenceError</code>), otherwise it stays in memory.</p>
+<p>Unless cascade invalidation is forbidden, the update invalidates every downstream consumer starting from the earliest node that actually consumes this output (nodes in between that do not read it are left intact). The producer’s own value is preserved.</p>
 
 <div class="field-label">Returns</div><p><code>None</code>. Updates the existing produced value and preserves its producing block’s disk-persistence policy.</p>
 <div class="example"><div class="example-title">Example</div><pre>pipeline.update_value("seed", 5)</pre></div>
@@ -1032,7 +1034,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 <p>When Optuna is installed, live <code>optuna.study.Study</code> outputs are persisted eagerly to the owning pipeline tree's lazily created <code>optuna_studies.db</code>; the literal persisted name, exact source-name lineage, owner metadata, and a separately pickled <code>study.sampler</code> are recorded in the artifact. A new output group claims its incoming literal name only when it is free across output, constant, and storage owners in the shared database; otherwise it receives the next suffix appended to that exact name. Nodes that have produced the same Study output name form one group: the latest successful producer is the sole concrete terminal and every surviving peer points directly to it. This automatic Study grouping applies in normal and forbidden-invalidation modes and takes precedence over a user <code>overridden_outputs</code> declaration for that Study output without modifying the declaration. A successful rotation writes an info log describing the output, Study name, terminal, redirected count, invalidation mode, and ignored-override state. Explicitly overwriting a physical Study name can stale external Optuna handles to its former database ID; pipeline getters return a fresh persisted handle. <code>optuna.samplers.BaseSampler</code> values are stored as pickle artifacts and do not create the study database. Pipelines without Optuna values neither import Optuna as a required dependency nor create the database file.</p>
 <p>When a <code>pipeline_backup_directory</code> is configured, an in-place save also refreshes the backup copy.</p>
 <p>Every call also archives a timestamped copy of the current <code>pipeline.log</code> into <code>history_logs/</code> inside the project root (e.g. <code>history_logs/2026-08-18_16-38-14.857.log</code>, UTC, <code>yyyy-mm-dd_hh-mm-ss.mmm</code>), preserving the save-time log snapshot while loading preserves the existing <code>pipeline.log</code> and appends current load messages.</p>
-<p>When a <code>pipeline_backup_directory</code> is configured, the refreshed backup copy also receives the updated <code>history_logs/</code> folder. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
+<p>When a <code>pipeline_backup_directory</code> is configured, the updated <code>history_logs/</code> folder is included in the staged backup copy before it replaces the previous copy. A copy failure preserves the previous backup, and a promotion failure attempts to restore it. If an interruption leaves the configured backup path missing during promotion, the previous complete copy is restored on the next backup load, recovery, or refresh. Loading a saved project restores its <code>history_logs/</code> folder into the project root, so previously archived snapshots remain available after a load.</p>
 <p>With <code>verbose=False</code> (the default) the advisory warnings emitted during saving are suppressed: the callable-reference notice and per-value placeholder warnings for unserialisable or non-importable values. Pass <code>verbose=True</code> to show them. Warnings unrelated to saving (registration, load, logger) are never suppressed.</p>
 
 <div class="field-label">Returns</div><p>The saved project directory as a <code>Path</code>.</p>
@@ -1101,7 +1103,7 @@ loaded = PipelineHolder.load_project(saved_path, trust_project=True)</pre></div>
   <li>If the same name is independently owned by multiple pipelines, one prompt lists every affected pipeline; only <code>yes</code>/<code>y</code> applies the recovery to all of them.</li>
   <li>Disk-backed values are copied into the live project so they remain usable if the backup is later removed.</li>
   <li>Requires <code>pipeline_state.pkl</code>, <code>config.pkl</code>, and <code>pipeline_meta.pkl</code> plus every saved artifact referenced by the backup.</li>
-  <li>Does not rerun or invalidate derived outputs.</li>
+  <li>Does not rerun derived outputs. Recovering a produced output invalidates its downstream consumers from the earliest node that consumes it, unless cascade invalidation is forbidden; restored constants do not cascade.</li>
 </ul>
 
 <div class="field-label">Returns</div><p><code>None</code>. Restores the selected value from the configured backup into its owner.</p>

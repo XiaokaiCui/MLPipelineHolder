@@ -166,11 +166,13 @@ class EngineMixin:
             if self.nodes
             else None
         )
+        target_group = self._priority_group(node.execution_priority)
         selected = [
             candidate
             for candidate in self._sorted_nodes()
-            if candidate.execution_priority <= node.execution_priority
+            if self._priority_group(candidate.execution_priority) < target_group
         ]
+        selected.append(node)
         return self._execute_nodes(
             selected,
             mode=f"run_until:{node.registration_name}",

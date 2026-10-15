@@ -136,6 +136,48 @@ def recover_variable_from_backup(
             f"Failed to recover pipeline value '{name}' from backup"
         ) from exc
     _cleanup_old_artifacts(pipeline, slot_snapshots)
+    _invalidate_recovered_consumers(pipeline, inventory)
+
+
+def _invalidate_recovered_consumers(
+    root: _PipelineProtocol,
+    inventory: _VariableOwnershipInventory,
+) -> None:
+    """Invalidate downstream consumers of a recovered produced output.
+
+    Runs only after the recovery transaction commits, so a failed recovery
+    leaves the tree untouched. Constants and values with no local declaring
+    node have no producer to invalidate from and are skipped.
+    """
+    variable_name = inventory.variable_name
+    for owner in inventory.owners:
+        if owner.owner_kind is OwnerKind.MANUAL:
+            continue
+        target = _find_pipeline_by_path(root, owner.pipeline_path)
+        if target is None:
+            continue
+        if owner.owner_kind is OwnerKind.LATEST_PRODUCER:
+            producer_name = next(
+                (slot.producer_name for slot in owner.update_slots if slot.slot_kind is SlotKind.LATEST_PRODUCER),
+                None,
+            )
+            node = next(
+                (candidate for candidate in target._sorted_nodes() if candidate.registration_name == producer_name),
+                None,
+            )
+        else:
+            node = target._find_declaring_node(variable_name)
+        while node is not None and _is_pipeline_node(node):
+            target = node
+            node = target._find_declaring_node(variable_name)
+        if node is None:
+            continue
+        target._invalidate_downstream_consumers(
+            node.registration_name,
+            node.execution_priority,
+            node.execution_priority,
+            [variable_name],
+        )
 
 
 def recover_config_from_backup(pipeline: _PipelineProtocol, name: str) -> None:

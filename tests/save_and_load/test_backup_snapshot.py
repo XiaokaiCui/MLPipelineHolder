@@ -5,9 +5,11 @@ import hashlib
 from importlib import import_module
 from pathlib import Path
 import pickle
+import shutil
 from tempfile import TemporaryDirectory
-from typing import Callable, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 import unittest
+from unittest.mock import patch
 
 from mlpipelineholder import PersistenceError, PipelineHandler, ResolutionError
 from mlpipelineholder.core.models import ArtifactRecord
@@ -123,6 +125,97 @@ class BackupSnapshotCharacterizationTests(unittest.TestCase):
 
 
 class BackupSnapshotTests(unittest.TestCase):
+    def test_backup_refresh_failure_preserves_previous_copy(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, work_root, backup_root = build_saved_root(temp_dir)
+            original = (backup_root / "pipeline_state.pkl").read_bytes()
+            history = {
+                path.name: path.read_bytes()
+                for path in (backup_root / "history_logs").iterdir()
+            }
+
+            with patch(
+                "mlpipelineholder.persistence.save_load.shutil.copytree",
+                side_effect=OSError("copy failed"),
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    root._refresh_backup_copy(work_root, backup_root)
+            self.assertEqual((backup_root / "pipeline_state.pkl").read_bytes(), original)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in (backup_root / "history_logs").iterdir()},
+                history,
+            )
+
+            rename = Path.rename
+
+            def fail_promotion(path: Path, target: Path) -> Path:
+                if path.name == "next" and target == backup_root:
+                    raise OSError("promotion failed")
+                return rename(path, target)
+
+            with patch.object(Path, "rename", fail_promotion):
+                with self.assertRaisesRegex(OSError, "promotion failed"):
+                    root._refresh_backup_copy(work_root, backup_root)
+            self.assertEqual((backup_root / "pipeline_state.pkl").read_bytes(), original)
+            self.assertEqual(
+                {path.name: path.read_bytes() for path in (backup_root / "history_logs").iterdir()},
+                history,
+            )
+            self.assertEqual(list(backup_root.parent.glob(".backup.staging-*")), [])
+
+    def test_interrupted_backup_swap_recovers_previous_copy_on_read_or_save(self) -> None:
+        for operation in ("snapshot", "load", "refresh"):
+            with self.subTest(operation=operation), TemporaryDirectory() as temp_dir:
+                root, work_root, backup_root = build_saved_root(temp_dir)
+                original = (backup_root / "pipeline_state.pkl").read_bytes()
+                rename = Path.rename
+
+                def interrupt_swap(path: Path, target: Path) -> Path:
+                    if path.name in {"next", "previous"} and target == backup_root:
+                        raise OSError("interrupted swap")
+                    return rename(path, target)
+
+                with patch.object(Path, "rename", interrupt_swap):
+                    with self.assertRaisesRegex(OSError, "interrupted swap"):
+                        root._refresh_backup_copy(work_root, backup_root)
+
+                self.assertFalse(backup_root.exists())
+                self.assertEqual(len(list(backup_root.parent.glob(".backup.staging-*"))), 1)
+                if operation == "snapshot":
+                    read_backup_snapshot(root)
+                elif operation == "load":
+                    loaded = PipelineHandler.load_pipeline(
+                        backup_root, forced_deleting=True, trust_project=True
+                    )
+                    self.assertEqual(loaded.registration_name, "root")
+                else:
+                    root._refresh_backup_copy(work_root, backup_root)
+
+                self.assertEqual((backup_root / "pipeline_state.pkl").read_bytes(), original)
+                self.assertEqual(list(backup_root.parent.glob(".backup.staging-*")), [])
+
+    def test_history_logs_are_part_of_staged_backup_refresh(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, work_root, backup_root = build_saved_root(temp_dir)
+            original_names = {path.name for path in (backup_root / "history_logs").iterdir()}
+            copytree = shutil.copytree
+
+            def reject_separate_history_copy(source: Path, target: Path, *args: Any, **kwargs: Any) -> Path:
+                if Path(source).name == "history_logs" and Path(target) == backup_root / "history_logs":
+                    raise OSError("history copied outside staging")
+                return copytree(source, target, *args, **kwargs)
+
+            with patch(
+                "mlpipelineholder.persistence.save_load.shutil.copytree",
+                side_effect=reject_separate_history_copy,
+            ):
+                root.save_pipeline()
+
+            work_history = {path.name for path in (work_root / "history_logs").iterdir()}
+            backup_history = {path.name for path in (backup_root / "history_logs").iterdir()}
+            self.assertGreater(len(backup_history), len(original_names))
+            self.assertEqual(backup_history, work_history)
+
     def test_read_backup_snapshot_returns_exact_nested_payload_and_preserves_hashes(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root, work_root, backup_root = build_saved_root(temp_dir)

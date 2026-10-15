@@ -354,33 +354,55 @@ class RegistrationMixin:
             raise RegistrationError("A pipeline cannot register itself as a child pipeline")
         validate_execution_priority(execution_priority, owner_label="pipeline", allow_none=False)
         was_root = child_pipeline.parent_pipeline is None
+        original_name = child_pipeline.registration_name
         if registration_name is not None:
             validate_registration_name(registration_name, owner_label="pipeline")
+            if child_pipeline.parent_pipeline is self and registration_name != original_name:
+                raise RegistrationError(
+                    "An already attached child pipeline cannot be renamed with add_child_pipeline"
+                )
             child_pipeline.registration_name = registration_name
-        conflicts = self._registration_conflicts(child_pipeline, execution_priority)
-        self._raise_on_priority_conflict_with_different_name(
-            child_pipeline.registration_name,
-            execution_priority,
-            conflicts,
-        )
-        if conflicts and not forced:
-            self.logger.warning(
-                f"Skipped child pipeline registration '{child_pipeline.registration_name}' at priority {execution_priority}: already exists"
+        try:
+            conflicts = self._registration_conflicts(child_pipeline, execution_priority)
+            self._raise_on_priority_conflict_with_different_name(
+                child_pipeline.registration_name,
+                execution_priority,
+                conflicts,
             )
-            return None
+            if conflicts and not forced:
+                self.logger.warning(
+                    f"Skipped child pipeline registration '{child_pipeline.registration_name}' at priority {execution_priority}: already exists"
+                )
+                child_pipeline.registration_name = original_name
+                return None
+            moving = (
+                forced
+                and child_pipeline.parent_pipeline is not None
+                and child_pipeline.parent_pipeline is not self
+            )
+            self._validate_child_attach_before_replacement(
+                child_pipeline, execution_priority, conflicts if forced else [],
+                simulate_detach=moving,
+            )
+        except BaseException:
+            child_pipeline.registration_name = original_name
+            raise
+        previous_parent: Any = None
+        previous_priority: float | None = None
+        previous_output_names: list[str] = []
+        if moving:
+            previous_parent = child_pipeline.parent_pipeline
+            assert previous_parent is not None
+            previous_priority = child_pipeline.execution_priority
+            previous_output_names = list(previous_parent.producer_outputs.get(original_name, {}))
+            child_pipeline.registration_name = original_name
+            try:
+                previous_parent._remove_registered_node(child_pipeline)
+            finally:
+                child_pipeline.registration_name = registration_name or original_name
+            child_pipeline.parent_pipeline = None
         if conflicts and forced:
             self._replace_conflicting_nodes(conflicts)
-        if (
-            forced
-            and child_pipeline.parent_pipeline is not None
-            and child_pipeline.parent_pipeline is not self
-        ):
-            child_pipeline.parent_pipeline._remove_registered_node(child_pipeline)
-            child_pipeline.parent_pipeline = None
-        self._validate_node_registration(child_pipeline, execution_priority)
-        self._validate_related_pipeline_names(child_pipeline)
-        self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
-        self._validate_strict_attach(child_pipeline, execution_priority)
         child_pipeline._attach_to_parent(self, execution_priority)
         if was_root and child_pipeline._invalidation_forbidden:
             top = self._root_pipeline()
@@ -406,7 +428,66 @@ class RegistrationMixin:
                 child_pipeline._locally_produced_outputs()
             )
             self._rebuild_visible_state(self._incoming_parent_outputs())
+        if moving and previous_parent is not None:
+            # The previous parent no longer owns this child. Drop only its
+            # mirrored output values, not the moved child's artifact files.
+            previous_parent.producer_outputs.pop(original_name, None)
+            previous_parent._rebuild_visible_state(previous_parent._incoming_parent_outputs())
+            previous_parent._resync_mirror_to_parent()
+            previous_parent._invalidate_downstream_consumers(
+                original_name,
+                previous_priority,
+                previous_priority,
+                previous_output_names,
+            )
         return child_pipeline
+
+    def _validate_child_attach_before_replacement(
+        self,
+        child_pipeline: Any,
+        execution_priority: float,
+        conflicts: list[Any],
+        *,
+        simulate_detach: bool = False,
+    ) -> None:
+        """Check the post-attach topology without permanently changing either tree."""
+        nodes, nodes_by_name = self.nodes, self.nodes_by_name
+        blocks, blocks_by_name = self.blocks, self.blocks_by_name
+        previous_parent = child_pipeline.parent_pipeline if simulate_detach else None
+        previous_nodes = previous_parent.nodes if previous_parent is not None else None
+        previous_by_name = previous_parent.nodes_by_name if previous_parent is not None else None
+        if previous_parent is not None and previous_nodes is not None and previous_by_name is not None:
+            previous_parent.nodes = [
+                node for node in previous_nodes if node is not child_pipeline
+            ]
+            previous_parent.nodes_by_name = {
+                name: node
+                for name, node in previous_by_name.items()
+                if node is not child_pipeline
+            }
+            child_pipeline.parent_pipeline = None
+        try:
+            replaced = {id(node) for node in conflicts}
+            if replaced:
+                self.nodes = [node for node in nodes if id(node) not in replaced]
+                self.nodes_by_name = {
+                    name: node for name, node in nodes_by_name.items() if id(node) not in replaced
+                }
+                self.blocks = [block for block in blocks if id(block) not in replaced]
+                self.blocks_by_name = {
+                    name: block for name, block in blocks_by_name.items() if id(block) not in replaced
+                }
+            self._validate_node_registration(child_pipeline, execution_priority)
+            self._validate_related_pipeline_names(child_pipeline)
+            self._validate_output_names_against_config(sorted(child_pipeline.list_declared_outputs()))
+            self._validate_strict_attach(child_pipeline, execution_priority)
+        finally:
+            self.nodes, self.nodes_by_name = nodes, nodes_by_name
+            self.blocks, self.blocks_by_name = blocks, blocks_by_name
+            if previous_parent is not None and previous_nodes is not None and previous_by_name is not None:
+                previous_parent.nodes = previous_nodes
+                previous_parent.nodes_by_name = previous_by_name
+                child_pipeline.parent_pipeline = previous_parent
 
     def create_atom_child_pipeline(
         self,

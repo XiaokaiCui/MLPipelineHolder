@@ -52,7 +52,7 @@ Use these structure rules:
 - Put shared preparation and shared outputs on the parent pipeline.
 - Put workflow-only config, constants, and outputs on the workflow child, using the agreed prefix.
 - Functions inside one `ExecutionBlock` run in parallel, so dependent functions must use separate blocks.
-- Integer priority groups represent alternatives: priorities such as `5.1` and `5.2` are in group `5`, and only one alternative executes.
+- Integer priority groups represent alternatives: priorities such as `5.1` and `5.2` are in group `5`, and only one alternative executes. `run_until("target")` includes the named target, selecting it instead of other alternatives in its group.
 - Use `set_constant_value` for direct notebook inputs and `get_constant_value` to read them. Use `get_value` for produced outputs.
 - Pipeline configuration must be a dict or a fields-only dataclass whose field values are picklable. Put non-picklable direct inputs in constants instead.
 
@@ -71,7 +71,7 @@ For function stages:
 - A parameter named `logger` is injected automatically; do not map or wrap it.
 - Use `register_args` and `register_kwargs` only for real variadic inputs.
 
-Keep expressions short. They support one assignment or one print/logger call. Put imports in `define_expression_runtime`; use a normal function when the step needs imports, comprehensions, lambdas, definitions, unpacking, or multiple statements.
+Keep expressions short. They support one assignment or one print/logger call. Put imports in `define_expression_runtime`; direct callback lambdas passed to a call are supported, but standalone lambdas are not. Use a normal function when the step needs comprehensions, definitions, unpacking, or multiple statements.
 
 Atom children are structurally immutable after creation. Use them only when that constraint matches the intended notebook structure.
 
