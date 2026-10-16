@@ -60,6 +60,15 @@ class _PipelineProtocol(Protocol):
 
     def _inject_recovered_value(self, variable_name: str, value: Any) -> None: ...
 
+    def _invalidate_downstream_consumers(
+        self,
+        node_name: str,
+        old_priority: float | None,
+        new_priority: float | None,
+        old_output_names: list[str],
+        new_output_names: list[str] | None = None,
+    ) -> None: ...
+
 
 def _is_pipeline_node(node: object) -> TypeGuard[_PipelineProtocol]:
     return hasattr(node, "parent_pipeline") and hasattr(node, "para_value_dict")

@@ -8,6 +8,7 @@ import shutil
 import warnings
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import mkdtemp
 from typing import TYPE_CHECKING, Any
 
 from ..exceptions import PersistenceError, RegistrationError
@@ -39,6 +40,37 @@ _UNTRUSTED_PROJECT_MESSAGE = (
     "source, pass trust_project=True. Otherwise, do not load it because loading a "
     "pipeline project may execute harmful code."
 )
+_BACKUP_REQUIRED_FILES = ("pipeline_state.pkl", "config.pkl", "pipeline_meta.pkl")
+
+
+def restore_interrupted_backup(backup_root: Path) -> None:
+    """Restore the last complete copy after an interrupted backup directory swap.
+
+    A backup refresh copies the new tree into a hidden staging directory, moves
+    the previous copy aside, then promotes the staged tree. If the process is
+    interrupted after the previous copy is moved aside but before the promotion,
+    the configured backup path is missing while the previous copy survives in a
+    ``.<name>.staging-*/previous`` directory. Recover it so the next save, load,
+    or backup read does not silently lose the last good backup.
+    """
+    if backup_root.exists() or backup_root.is_symlink() or not backup_root.parent.is_dir():
+        return
+    prefix = f".{backup_root.name}.staging-"
+    candidates = [
+        directory
+        for directory in backup_root.parent.iterdir()
+        if directory.name.startswith(prefix)
+        and directory.is_dir()
+        and all(
+            (directory / "previous" / filename).is_file()
+            for filename in _BACKUP_REQUIRED_FILES
+        )
+    ]
+    if not candidates:
+        return
+    staging_root = max(candidates, key=lambda directory: directory.stat().st_mtime_ns)
+    (staging_root / "previous").rename(backup_root)
+    shutil.rmtree(staging_root, ignore_errors=True)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -166,19 +198,17 @@ class SaveLoadMixin:
             log_target = Path(save_log_to_file)
             log_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.logger.log_file_path, log_target)
-        refresh_backup = self._should_refresh_backup_on_save(target)
-        if refresh_backup:
+        # Include the current log snapshot in the staged backup tree. A later
+        # in-place history copy would otherwise risk deleting the only good
+        # history_logs directory after the new backup was promoted.
+        self._archive_current_log_to_history()
+        if self._should_refresh_backup_on_save(target):
             backup_root = self.pipeline_backup_root
             if backup_root is not None:
                 self._refresh_backup_copy(target, backup_root)
                 self.logger.info(
                     f"Pipeline has been saved to project backup path: {backup_root}"
                 )
-        self._archive_current_log_to_history()
-        if refresh_backup:
-            backup_root = self.pipeline_backup_root
-            if backup_root is not None:
-                self._sync_history_logs_to_backup(backup_root)
         return target
 
     def _cleanup_obsolete_saved_objects(
@@ -375,6 +405,7 @@ class SaveLoadMixin:
         )
         source = Path(path)
         try:
+            restore_interrupted_backup(source)
             with (source / "pipeline_state.pkl").open("rb") as handle:
                 state_bytes = handle.read()
             payload = load_pickle_with_missing_class_fallback(state_bytes)
@@ -445,25 +476,29 @@ class SaveLoadMixin:
     def _refresh_backup_copy(self, source: Path, backup_root: Path) -> None:
         if self._normalized_path(source) == self._normalized_path(backup_root):
             return
-        if backup_root.exists():
-            if backup_root.is_dir():
-                shutil.rmtree(backup_root)
-            else:
-                backup_root.unlink()
-        shutil.copytree(source, backup_root)
-
-    def _sync_history_logs_to_backup(self, backup_root: Path) -> None:
-        """Copy the project history_logs folder into the backup after a save snapshot."""
-        history_root = self.project_root / "history_logs"
-        if not history_root.is_dir():
-            return
-        backup_history = backup_root / "history_logs"
-        if backup_history.exists():
-            if backup_history.is_dir():
-                shutil.rmtree(backup_history)
-            else:
-                backup_history.unlink()
-        shutil.copytree(history_root, backup_history)
+        restore_interrupted_backup(backup_root)
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        staging_root = Path(mkdtemp(prefix=f".{backup_root.name}.staging-", dir=backup_root.parent))
+        staged = staging_root / "next"
+        previous = staging_root / "previous"
+        try:
+            shutil.copytree(source, staged)
+            if backup_root.exists() or backup_root.is_symlink():
+                backup_root.rename(previous)
+            try:
+                staged.rename(backup_root)
+            except BaseException:
+                if previous.exists() or previous.is_symlink():
+                    previous.rename(backup_root)
+                raise
+        finally:
+            # Keep the previous copy available for manual recovery if rollback
+            # itself failed; never delete the only intact backup.
+            if not (
+                (previous.exists() or previous.is_symlink())
+                and not (backup_root.exists() or backup_root.is_symlink())
+            ):
+                shutil.rmtree(staging_root, ignore_errors=True)
 
     def _materialize_project_tree_for_save(self, target: Path) -> None:
         if self._paths_overlap(self.project_root, target):

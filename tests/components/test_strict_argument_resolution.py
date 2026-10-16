@@ -60,6 +60,25 @@ def build_unpicklable(value: str = "function-default") -> UnpicklableResult:
 
 
 class StrictArgumentResolutionTests(unittest.TestCase):
+    def test_explicit_variadic_helper_typos_fail_in_strict_mode(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "strict-helper-typo", {"first": 2, "bonus": 3}, Path(temp_dir), strict_mode=True
+            )
+            block = pipeline.add_block("build", 1)
+            block.register_args("actual_args", ["first"])
+            block.register_kwargs("actual_kwargs", {"bonus": "bonus"})
+            for kwargs, missing in (
+                ({"var_pos_name": "typo_args", "var_kw_name": "actual_kwargs"}, "typo_args"),
+                ({"var_pos_name": "actual_args", "var_kw_name": "typo_kwargs"}, "typo_kwargs"),
+            ):
+                with self.subTest(missing=missing):
+                    with self.assertRaisesRegex(RegistrationError, missing):
+                        block.register_function(
+                            collect_explicit_variadics, ["prefix_result", "total"], **kwargs
+                        )
+                    self.assertEqual(block.functions, [])
+
     def test_unmapped_default_uses_callable_default_without_advisory(self) -> None:
         with TemporaryDirectory() as temp_dir:
             project = Path(temp_dir)

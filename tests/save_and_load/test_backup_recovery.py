@@ -29,6 +29,14 @@ def produce_blob() -> dict[str, int]:
     return {"saved": 7}
 
 
+def consume_blob(blob: dict[str, int]) -> dict[str, int]:
+    return {"consumed": blob["saved"]}
+
+
+def produce_new_blob() -> dict[str, int]:
+    return {"saved": 9}
+
+
 @dataclass
 class RecoveryConfig:
     factor: int
@@ -430,6 +438,57 @@ class BackupRecoveryTests(unittest.TestCase):
             root.save_pipeline()
             root.recover_variable_from_backup(name="unrelated")
             self.assertEqual(root.get_constant_value("unrelated"), "hello")
+
+    def test_recover_produced_value_invalidates_from_first_consumer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.add_block("source", 1).register_function(produce_blob, ["blob"])
+            root.add_block("mid", 2).register_function(recovery_produce_later, ["later"])
+            root.add_block("consumer", 3).register_function(consume_blob, ["blob_out"])
+            root.run_all()
+            root.save_pipeline()
+            self.assertTrue(root.has_visible_output("blob"))
+            self.assertTrue(root.has_visible_output("blob_out"))
+            self.assertTrue(root.has_visible_output("later"))
+
+            root.recover_variable_from_backup(name="blob")
+
+            self.assertTrue(root.has_visible_output("blob"))
+            self.assertFalse(root.has_visible_output("blob_out"))
+            self.assertTrue(root.has_visible_output("later"))
+
+    def test_recover_latest_producer_invalidates_its_consumers(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.add_block("earlier", 1).register_function(produce_blob, ["blob"])
+            root.add_block("latest", 2).register_function(produce_new_blob, ["blob"])
+            root.add_block("consumer", 3).register_function(consume_blob, ["blob_out"])
+            root.run_all()
+            root.save_pipeline()
+
+            root.set_value("blob", {"saved": 99})
+            root.run_block("consumer")
+            self.assertEqual(root.get_value("blob_out"), {"consumed": 99})
+
+            root.recover_variable_from_backup(name="blob")
+
+            self.assertEqual(root.get_value("blob"), {"saved": 9})
+            self.assertEqual(root.get_node_output("earlier", "blob"), {"saved": 7})
+            self.assertFalse(root.has_visible_output("blob_out"))
+
+    def test_recover_produced_value_respects_forbidden_invalidation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root, _, _ = self._saved_root(temp_dir, {})
+            root.add_block("source", 1).register_function(produce_blob, ["blob"])
+            root.add_block("consumer", 3).register_function(consume_blob, ["blob_out"])
+            root.run_all()
+            root.save_pipeline()
+            root.forbid_invalidate_objects()
+
+            root.recover_variable_from_backup(name="blob")
+
+            self.assertTrue(root.has_visible_output("blob"))
+            self.assertTrue(root.has_visible_output("blob_out"))
 
     def test_recover_variable_ignores_missing_artifact_of_other_value(self) -> None:
         with TemporaryDirectory() as temp_dir:

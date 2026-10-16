@@ -183,6 +183,11 @@ def print_then_fail() -> int:
     raise ValueError("failure after print")
 
 
+def stdout_capabilities() -> tuple[bool, str | None]:
+    sys.stdout.writelines(["captured ", "line\n"])
+    return sys.stdout.isatty(), sys.stdout.encoding
+
+
 def debug_and_info_step(seed: int, logger) -> int:
     logger.debug(f"debug-seed={seed}")
     logger.info(f"info-seed={seed}")
@@ -4414,6 +4419,40 @@ class PipelineHandlerTests(unittest.TestCase):
             self.assertEqual(root.get_value("left"), 14)
             self.assertNotIn("right", root.para_value_dict)
 
+    def test_run_until_executes_explicit_same_group_target(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", DemoConfig(base=2), Path(temp_dir))
+            pipeline.add_block("first", 0).register_function(produce_seed, ["first_out"])
+            pipeline.add_block("chosen", 0.5).register_function(produce_seed, ["chosen_out"])
+            pipeline.add_block("later", 1).register_function(produce_seed, ["later_out"])
+
+            record = pipeline.run_until("chosen")
+            self.assertEqual(record.status, "success")
+            self.assertEqual(record.executed_blocks, ["chosen"])
+            self.assertEqual(pipeline.get_value("chosen_out"), 3)
+            self.assertFalse(pipeline.has_visible_output("first_out"))
+            self.assertFalse(pipeline.has_visible_output("later_out"))
+
+            record = pipeline.run_until("later")
+            self.assertEqual(record.executed_blocks, ["first", "later"])
+            self.assertEqual(pipeline.get_value("later_out"), 3)
+
+    def test_nested_run_until_skips_parent_peers_in_child_priority_group(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=2), tmp / "root")
+            root.add_block("peer", 5.1).register_function(produce_seed, ["peer_out"])
+            child = PipelineHandler("child", DemoConfig(base=2), tmp / "child")
+            child.add_block("first", 0).register_function(produce_seed, ["first_out"])
+            child.add_block("chosen", 0.5).register_function(produce_seed, ["chosen_out"])
+            root.add_child_pipeline(child, 5.5)
+
+            record = root.run_until("child", "chosen")
+            self.assertEqual(record.executed_blocks, ["chosen"])
+            self.assertEqual(root.get_value("chosen_out"), 3)
+            self.assertFalse(root.has_visible_output("peer_out"))
+            self.assertFalse(root.has_visible_output("first_out"))
+
     def test_run_block_supports_nested_child_block_path(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -5544,6 +5583,206 @@ class StrictModeTests(unittest.TestCase):
 
 
 class ReviewRegressionTests(unittest.TestCase):
+    def test_tee_stdout_preserves_terminal_capabilities_and_captures_writelines(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("stdout", {}, Path(temp_dir))
+            expected = (sys.stdout.isatty(), sys.stdout.encoding)
+            pipeline.add_block("capture", 1).register_function(
+                stdout_capabilities, ["terminal", "encoding"]
+            )
+            pipeline.run_all()
+            self.assertEqual(
+                (pipeline.get_value("terminal"), pipeline.get_value("encoding")), expected
+            )
+            self.assertIn("captured line", pipeline.logger.log_file_path.read_text())
+
+    def test_array_config_gate_returns_error_verdict(self) -> None:
+        import numpy as np
+
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler(
+                "array-gate", {"flag": np.array([1, 2, 3])}, Path(temp_dir)
+            )
+            gate = pipeline.add_gate_block("flag", expected_value=0)
+            verdict, message = pipeline._evaluate_gate_level(pipeline, gate)
+            self.assertEqual(verdict, "error")
+            assert message is not None
+            self.assertIn("ValueError", message)
+
+    def test_set_value_invalidates_consumers_unless_cascade_is_forbidden(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("manual-update", DemoConfig(base=2, factor=2), Path(temp_dir))
+            pipeline.add_block("prepare", 1).register_function(produce_seed, ["seed"])
+            pipeline.add_block("final", 2).register_function(multiply, ["scaled_total"])
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("scaled_total"), 6)
+
+            pipeline.set_value("seed", 10)
+            self.assertEqual(pipeline.get_value("seed"), 10)
+            self.assertFalse(pipeline.has_visible_output("scaled_total"))
+
+            pipeline.run_block("final")
+            self.assertEqual(pipeline.get_value("scaled_total"), 20)
+            pipeline.forbid_invalidate_objects()
+            pipeline.set_value("seed", 7)
+            self.assertEqual(pipeline.get_value("scaled_total"), 20)
+            pipeline.allow_invalidate_objects()
+            pipeline.set_value("seed", 8)
+            self.assertFalse(pipeline.has_visible_output("scaled_total"))
+
+    def test_set_value_invalidates_from_first_consumer_not_intermediate_node(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            pipeline = PipelineHandler("root", DemoConfig(base=2), Path(temp_dir))
+            pipeline.add_block("source", 1).register_function(produce_seed, ["seed"])
+            pipeline.add_block("mid", 2).register_function(produce_seed, ["other"])
+            pipeline.add_block("consumer", 3).register_expression("doubled = seed * 2")
+            pipeline.run_all()
+            self.assertEqual(pipeline.get_value("doubled"), 6)
+            self.assertEqual(pipeline.get_value("other"), 3)
+
+            pipeline.set_value("seed", 10)
+
+            self.assertEqual(pipeline.get_value("seed"), 10)
+            self.assertFalse(pipeline.has_visible_output("doubled"))
+            self.assertTrue(pipeline.has_visible_output("other"))
+
+    def test_child_value_update_invalidates_ancestor_consumer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=2), tmp / "root")
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("prepare", 1).register_expression("seed = base + 1")
+            root.add_child_pipeline(child, 1)
+            root.add_block("final", 2).register_expression("result = seed * 2")
+            root.run_all()
+            self.assertEqual(root.get_value("result"), 6)
+
+            child.set_value("seed", 10)
+            self.assertEqual(root.get_value("seed"), 10)
+            self.assertFalse(root.has_visible_output("result"))
+
+    def test_failed_forced_child_attach_preserves_replaced_block_and_child(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp / "parent")
+            old = parent.add_block("old", 1)
+            old.register_function(produce_seed, ["out1"])
+            parent.run_all()
+
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("inner", 1).register_expression("base = 1")
+            with self.assertRaisesRegex(RegistrationError, "Output names conflict"):
+                parent.add_child_pipeline(child, 1, registration_name="old", forced=True)
+
+            self.assertIs(parent.get_block("old"), old)
+            self.assertEqual(parent.get_value("out1"), 3)
+            self.assertEqual(child.registration_name, "child")
+            self.assertIsNone(child.parent_pipeline)
+            self.assertTrue(child.project_root.exists())
+
+    def test_failed_reattachment_keeps_old_parent_and_destination_intact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            old_parent = PipelineHandler("old-parent", {}, tmp / "old-parent")
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("inner", 1).register_expression("base = 1")
+            old_parent.add_child_pipeline(child, 1)
+            old_parent.run_all()
+            original_root = child.project_root
+
+            destination = PipelineHandler("destination", DemoConfig(base=2), tmp / "destination")
+            previous = destination.add_block("old", 1)
+            previous.register_function(produce_seed, ["out1"])
+            destination.run_all()
+
+            with self.assertRaisesRegex(RegistrationError, "Output names conflict"):
+                destination.add_child_pipeline(child, 1, registration_name="old", forced=True)
+
+            self.assertIs(child.parent_pipeline, old_parent)
+            self.assertIs(old_parent.get_child_pipeline("child"), child)
+            self.assertEqual(old_parent.get_value("base"), 1)
+            self.assertEqual(child.registration_name, "child")
+            self.assertEqual(child.project_root, original_root)
+            self.assertIs(destination.get_block("old"), previous)
+            self.assertEqual(destination.get_value("out1"), 3)
+
+    def test_reattaching_child_from_descendant_parent_to_root_succeeds(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            root = PipelineHandler("root", DemoConfig(base=2), tmp / "root")
+            middle = PipelineHandler("middle", DemoConfig(base=2), tmp / "middle")
+            root.add_child_pipeline(middle, 2)
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("inner", 1).register_function(produce_seed, ["child_out"])
+            middle.add_child_pipeline(child, 1)
+            middle.run_all()
+            self.assertEqual(child.get_value("child_out"), 3)
+
+            root.add_child_pipeline(child, 3, forced=True)
+
+            self.assertIs(child.parent_pipeline, root)
+            self.assertFalse((root.project_root / "children" / "middle" / "children" / "child").exists())
+            self.assertTrue((root.project_root / "children" / "child").exists())
+
+    def test_renamed_reattachment_removes_original_parent_name_index(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            old_parent = PipelineHandler("old-parent", {}, tmp / "old-parent")
+            child = PipelineHandler("child", {}, tmp / "child")
+            old_parent.add_child_pipeline(child, 1)
+            destination = PipelineHandler("destination", {}, tmp / "destination")
+
+            destination.add_child_pipeline(child, 2, registration_name="renamed")
+
+            self.assertNotIn("child", old_parent.nodes_by_name)
+            self.assertNotIn(child, old_parent.nodes)
+            self.assertIs(destination.get_child_pipeline("renamed"), child)
+            self.assertTrue((destination.project_root / "children" / "renamed").exists())
+
+    def test_renaming_child_under_same_parent_is_rejected_without_mutation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            parent = PipelineHandler("parent", DemoConfig(base=2), tmp / "parent")
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("producer", 1).register_function(produce_seed, ["seed"])
+            parent.add_child_pipeline(child, 1)
+            parent.run_all()
+            original_root = child.project_root
+
+            with self.assertRaisesRegex(RegistrationError, "cannot be renamed"):
+                parent.add_child_pipeline(child, 2, registration_name="renamed", forced=True)
+
+            self.assertEqual(parent.nodes, [child])
+            self.assertEqual(list(parent.nodes_by_name), ["child"])
+            self.assertIs(parent.get_child_pipeline("child"), child)
+            self.assertEqual(child.registration_name, "child")
+            self.assertEqual(child.project_root, original_root)
+            self.assertEqual(parent.get_value("seed"), 3)
+
+    def test_reattachment_removes_old_parent_outputs_and_consumers(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp = Path(temp_dir)
+            old_parent = PipelineHandler("old-parent", DemoConfig(base=2), tmp / "old-parent")
+            child = PipelineHandler("child", {}, tmp / "child")
+            child.add_block("producer", 1).register_function(
+                produce_seed, ["seed"], save_to_disk=["seed"]
+            )
+            old_parent.add_child_pipeline(child, 1)
+            old_parent.add_block("consumer", 2).register_expression(
+                "derived = seed * 2", save_to_disk=True
+            )
+            old_parent.run_all()
+            self.assertEqual(old_parent.get_value("derived"), 6)
+            destination = PipelineHandler("destination", DemoConfig(base=2), tmp / "destination")
+
+            destination.add_child_pipeline(child, 1, registration_name="renamed")
+
+            self.assertNotIn("child", old_parent.producer_outputs)
+            self.assertFalse(old_parent.has_visible_output("seed"))
+            self.assertFalse(old_parent.has_visible_output("derived"))
+            self.assertEqual(destination.get_value("seed"), 3)
+            self.assertTrue(Path(child.producer_outputs["producer"]["seed"].file_path).exists())
+
     def test_memory_only_invalidation_skips_artifact_reference_scan(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("memory-only", DemoConfig(base=2), Path(temp_dir))

@@ -891,6 +891,21 @@ class ExecutionBlock:
         if self.parent._suppress_strict_validation:
             return
         strict = self.parent.strict_mode or force_strict
+        if strict:
+            if (
+                registration.var_pos_name is not None
+                and registration.var_pos_name not in self.registered_args
+            ):
+                raise RegistrationError(
+                    f"Args helper '{registration.var_pos_name}' is not registered in block '{self.registration_name}'"
+                )
+            if (
+                registration.var_kw_name is not None
+                and registration.var_kw_name not in self.registered_kwargs
+            ):
+                raise RegistrationError(
+                    f"Kwargs helper '{registration.var_kw_name}' is not registered in block '{self.registration_name}'"
+                )
         signature = callable_signature(registration.callable_obj)
         explicit_params = {
             parameter.name

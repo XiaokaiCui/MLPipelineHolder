@@ -117,6 +117,19 @@ class InvalidationMixin:
             self._erase_selected_node_outputs(node_name, erase_output_names)
         if self.parent_pipeline is not None:
             self._resync_mirror_to_parent()
+        self._invalidate_downstream_consumers(
+            node_name, old_priority, new_priority, old_output_names, new_output_names
+        )
+
+    def _invalidate_downstream_consumers(
+        self,
+        node_name: str,
+        old_priority: float | None,
+        new_priority: float | None,
+        old_output_names: list[str],
+        new_output_names: list[str] | None = None,
+    ) -> None:
+        """Invalidate consumers while leaving the producer's own output intact."""
         if self._invalidation_forbidden:
             return
         users: list[tuple[Any, Any]] = []

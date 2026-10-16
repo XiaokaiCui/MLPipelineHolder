@@ -56,6 +56,14 @@ class MutationMixin:
         ) -> Any: ...
         def _sync_attached_outputs_to_parent(self) -> None: ...
         def _cleanup_replaced_artifact(self, previous_value: Any) -> None: ...
+        def _invalidate_downstream_consumers(
+            self,
+            node_name: str,
+            old_priority: float | None,
+            new_priority: float | None,
+            old_output_names: list[str],
+            new_output_names: list[str] | None = None,
+        ) -> None: ...
         def _sorted_nodes(self) -> list[Any]: ...
         def _root_pipeline(self) -> Any: ...
         def _incoming_parent_outputs(self) -> dict[str, Any]: ...
@@ -281,6 +289,12 @@ class MutationMixin:
         outputs[variable_name] = replacement
         self._refresh_visible_value(variable_name)
         self._sync_value_to_ancestors_without_invalidation(variable_name)
+        self._invalidate_downstream_consumers(
+            node.registration_name,
+            node.execution_priority,
+            node.execution_priority,
+            [variable_name],
+        )
         self._cleanup_replaced_artifact(previous_value)
 
     def set_value(
@@ -427,6 +441,13 @@ class MutationMixin:
             self.artifact_registry.pop(variable_name, None)
         if self.parent_pipeline is not None:
             self._sync_attached_outputs_to_parent()
+
+        self._invalidate_downstream_consumers(
+            node.registration_name,
+            node.execution_priority,
+            node.execution_priority,
+            [variable_name],
+        )
 
     def _inject_recovered_value(self, variable_name: str, value: Any) -> None:
         pipeline = self._find_declaring_pipeline(variable_name)

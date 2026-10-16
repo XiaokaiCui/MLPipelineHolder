@@ -58,6 +58,9 @@ def read_backup_snapshot(root_pipeline: _PipelineProtocol) -> _BackupSnapshot:
     backup_root = root.pipeline_backup_root
     if backup_root is None:
         raise PersistenceError("Root pipeline has no configured backup directory")
+    from ..save_load import restore_interrupted_backup
+
+    restore_interrupted_backup(backup_root)
     if not backup_root.exists() or not backup_root.is_dir():
         raise PersistenceError(
             f"Configured backup directory does not exist: '{backup_root}'"

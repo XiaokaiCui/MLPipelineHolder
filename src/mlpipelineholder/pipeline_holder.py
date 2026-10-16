@@ -680,11 +680,11 @@ class PipelineHolder(
                         pipeline.list_declared_outputs()
                     ),
                 )
+                if value is None or value == gate.expected_value:
+                    return "pass", None
+                return "block", None
             except Exception as exc:
                 return "error", f"{type(exc).__name__}: {exc}"
-            if value is None or value == gate.expected_value:
-                return "pass", None
-            return "block", None
         try:
             gate_passes = gate.evaluate(
                 {},
@@ -1148,7 +1148,8 @@ class PipelineHolder(
         selected = [
             candidate
             for candidate in self._sorted_nodes()
-            if candidate.execution_priority < child_priority
+            if self._priority_group(candidate.execution_priority)
+            < self._priority_group(child_priority)
         ]
         if selected:
             self._execute_nodes(
@@ -1235,7 +1236,8 @@ class PipelineHolder(
         selected = [
             candidate
             for candidate in self._sorted_nodes()
-            if candidate.execution_priority < child_priority
+            if self._priority_group(candidate.execution_priority)
+            < self._priority_group(child_priority)
         ]
         if selected:
             self._execute_nodes(
