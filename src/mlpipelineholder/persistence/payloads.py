@@ -533,6 +533,7 @@ class PayloadMixin:
             "kind": "block",
             "registration_name": node.registration_name,
             "execution_priority": node.execution_priority,
+            "exclude_self_outputs": sorted(node.exclude_self_outputs),
             "functions": functions,
             "registered_args": [
                 {"name": registration.name, "ordered_items": registration.ordered_items}

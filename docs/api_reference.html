@@ -209,7 +209,7 @@ mark { background: #ffedb5; color: #382b00; border-radius: 2px; }
   <div class="eyebrow">Public API · Developer reference</div>
   <h1>MLPipelineHolder</h1>
   <p>Build, inspect, and evolve your experiments.<br>Every class, method, and model, organised around the way you work.</p>
-  <div class="hero-meta"><span class="badge">v0.4.5</span><span class="badge">Python &ge; 3.11</span><span class="badge">Offline-ready reference</span></div>
+  <div class="hero-meta"><span class="badge">v0.4.6</span><span class="badge">Python &ge; 3.11</span><span class="badge">Offline-ready reference</span></div>
 </header>
 
 <div class="app-bar">
@@ -626,18 +626,23 @@ pipeline.refresh_loaded_objects()</pre></div>
 <section class="reference-page" data-section="pipelineholder" data-label="Blocks &amp; child pipelines" aria-labelledby="pipeline-registration">
 <h2 class="section" id="pipeline-registration">Blocks &amp; child pipelines</h2>
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
-<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">ExecutionBlock | None</span></div>
+<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True, *, exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>registration_name</code>: unique public name used for lookup, path targeting, logs, and persistence.</li>
   <li><code>execution_priority</code>: numeric position in this pipeline. Priorities with the same integer part form an alternative group.</li>
   <li><code>forced</code>: replace a conflicting node by default; pass <code>False</code> to log a warning and return <code>None</code> instead. Replacement may remove the prior node's outputs and invalidate dependent outputs.</li>
+  <li><code>exclude_self_outputs</code>: output names whose previous committed values this block must not reuse as inputs during targeted reruns or inspection. An earlier node's same-named output remains visible; other inputs retain normal resolution precedence. Default: empty.</li>
 </ul>
 <p>Returns the new <code>ExecutionBlock</code>, an identical existing expression block during a forced re-registration, or <code>None</code> when non-strict registration is skipped. Invalid names and strict-mode conflicts raise <code>RegistrationError</code>.</p>
 
 <div class="field-label">Returns</div><p>The registered <code>ExecutionBlock</code>, an existing equivalent expression block, or <code>None</code> when registration is skipped. Invalid priorities raise <code>RegistrationError</code> before mutation; priorities must be finite, non-negative real numbers, excluding bool.</p>
-<div class="example"><div class="example-title">Example</div><pre>training = pipeline.add_block("training", 2)</pre></div>
+<div class="example"><div class="example-title">Example</div><pre>def transform(value):
+    return value + 1
+
+training = pipeline.add_block("training", 2, exclude_self_outputs={"value"})
+training.register_function(transform, ["value"], param_mapping={"value": "value"})</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.add_child_pipeline">add_child_pipeline()</h4>
 <div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHolder</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder | None</span></div>
@@ -672,7 +677,8 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
   block_priority: <span class="arg">float</span> = 10.0,
   *,
   param_mapping: <span class="arg">dict[str, str | None] | None</span> = None,
-  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
+  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None,
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
@@ -692,6 +698,7 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
   <li><code>block_priority</code>: priority of the atom's internal implementation block.</li>
   <li><code>param_mapping</code>: preferred keyword-only parameter-to-pipeline-name mapping.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
+  <li><code>exclude_self_outputs</code>: names of the atom's previous outputs to ignore as its own inputs during targeted reruns or inspection; upstream values with those names remain available.</li>
 </ul>
 <p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. Atom creation always reuses its framework-managed child directory and never prompts for or controls directory cleanup. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
@@ -699,7 +706,7 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
 <p>The reserved output marker <code>"_"</code> discards the returned value at that position. It still counts when validating the callable's return annotation and returned tuple/list length, but it is never declared, made visible, persisted, or included in run results. Repeated markers are allowed, for example <code>["_", "o2e_root", "_", "bce"]</code>, and <code>["_"]</code> discards a single return value. Including <code>"_"</code> in <code>save_to_disk_lst</code> raises <code>RegistrationError</code>.</p>
 <p>If the target function cannot be registered, atom creation raises <code>RegistrationError</code> instead of attaching an atom without an executable function. An existing atom with the same name and its outputs remain unchanged.</p>
-<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
+<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers, and <code>exclude_self_outputs</code>). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
 <div class="field-label">Returns</div><p><code>None</code>. Creates or replaces a sealed atom; retrieve it with <code>get_child_pipeline(child_name)</code>. Both <code>execution_priority</code> and <code>block_priority</code> must be finite, non-negative real numbers (not bool), validated before directories are created.</p>
@@ -738,7 +745,7 @@ print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_from">run_from()</h4>
 <div class="sig"><span class="kw">run_from</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes the target node and everything after it. Outputs produced strictly before the target remain visible, the target may consume its own previous output, and outputs from later nodes are hidden until those nodes rerun. These rules apply recursively to nested paths such as <code>run_from("modeling_pipeline", "predictor_training_pipeline")</code>. Previous pointer-backed and disk-backed target inputs are materialized before invalidation, so nested restarts do not leave dangling pointers or delete an upstream artifact that the target still needs.</p>
+<p>Executes the target node and everything after it. Outputs produced strictly before the target remain visible, the target may consume its own previous output unless its <code>exclude_self_outputs</code> setting excludes that name, and outputs from later nodes are hidden until those nodes rerun. These rules apply recursively to nested paths such as <code>run_from("modeling_pipeline", "predictor_training_pipeline")</code>. Previous pointer-backed and disk-backed target inputs are materialized before invalidation, so nested restarts do not leave dangling pointers or delete an upstream artifact that the target still needs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path_parts</code>: one immediate target name or a nested path ending at the block or child pipeline where rerunning starts.</li>
@@ -750,7 +757,7 @@ print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_block">run_block()</h4>
 <div class="sig"><span class="kw">run_block</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Invalidates from the target's priority but executes only the selected block or child pipeline. Earlier outputs remain available; the target's previous outputs are materialized when needed.</p>
+<p>Invalidates from the target's priority but executes only the selected block or child pipeline. Earlier outputs remain available; the target's previous outputs are materialized when needed, except names configured in <code>exclude_self_outputs</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path_parts</code>: one immediate target name or a nested path ending at the single node to execute.</li>
@@ -1474,7 +1481,9 @@ print(atom.inspect())</pre></div>
 <span class="kw">class</span> mlpipelineholder.ExecutionBlock(
   parent: <span class="arg">PipelineHolder</span>,
   registration_name: <span class="arg">str</span>,
-  execution_priority: <span class="arg">float</span>
+  execution_priority: <span class="arg">float</span>,
+  *,
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Constructed via <a class="anchor" href="#PipelineHolder.add_block"><code>PipelineHolder.add_block()</code></a>; you rarely instantiate it directly.</p>
@@ -1483,6 +1492,7 @@ print(atom.inspect())</pre></div>
   <li><code>parent</code>: owning <code>PipelineHolder</code> that supplies config, visible values, artifacts, and logging.</li>
   <li><code>registration_name</code>: unique block name within the parent.</li>
   <li><code>execution_priority</code>: numeric position among the parent's immediate nodes. Must be a finite, non-negative real number (not bool).</li>
+  <li><code>exclude_self_outputs</code>: optional names of previous block outputs to skip when resolving inputs in targeted runs and inspection.</li>
 </ul>
 <div class="field-label">Returns</div><p>A new <code>ExecutionBlock</code>; registering it is normally done through <code>add_block()</code>.</p>
 <div class="example"><div class="example-title">Example</div><pre>from mlpipelineholder import ExecutionBlock
@@ -1490,7 +1500,7 @@ block = ExecutionBlock(pipeline, "prepare", 1)</pre></div>
 
 <h4 class="method-name" id="ExecutionBlock.inspect">inspect()</h4>
 <div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
-<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
+<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node except names in <code>exclude_self_outputs</code>. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
 <p>Inspection selects one registration, not the whole block. Other functions registered at the same priority are not run, so inspecting one registration is not equivalent to concurrently executing a multi-function block. Same-block dependency validation still applies, except that an original-parameter-name override fully replaces that parameter's dependency and removes it from the check.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">

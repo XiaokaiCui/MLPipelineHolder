@@ -132,11 +132,13 @@ class ReconstructionMixin:
                 block = pipeline.add_block(
                     node_payload["registration_name"],
                     node_payload["execution_priority"],
+                    exclude_self_outputs=node_payload.get("exclude_self_outputs", []),
                 )
                 if block is None:
                     block = pipeline._add_block_strict(
                         node_payload["registration_name"],
                         node_payload["execution_priority"],
+                        exclude_self_outputs=node_payload.get("exclude_self_outputs", []),
                     )
                 for args_payload in node_payload.get("registered_args", []):
                     block.register_args(

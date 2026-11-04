@@ -148,6 +148,13 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
                 raise PersistenceError(
                     f"Saved block '{node_payload['registration_name']}' has a non-list 'functions' entry"
                 )
+            excluded = node_payload.get("exclude_self_outputs", [])
+            if not isinstance(excluded, list) or any(
+                not isinstance(name, str) or not name or name == "_" for name in excluded
+            ):
+                raise PersistenceError(
+                    f"Saved block '{node_payload['registration_name']}' has invalid exclude_self_outputs"
+                )
             for args_payload in node_payload.get("registered_args", []):
                 if not isinstance(args_payload, dict):
                     raise PersistenceError("Saved pipeline payload has an invalid args entry")
