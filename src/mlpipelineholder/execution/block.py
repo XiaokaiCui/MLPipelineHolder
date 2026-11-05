@@ -74,7 +74,7 @@ class ExecutionBlock:
 
     def __init__(
         self, parent: PipelineHolder, registration_name: str, execution_priority: float,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> None:
         self.parent = parent
         self.registration_name = validate_registration_name(
@@ -84,7 +84,7 @@ class ExecutionBlock:
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         self.execution_priority = execution_priority
         if exclude_self_outputs is not None and (
-            not isinstance(exclude_self_outputs, (list, tuple, set))
+            not isinstance(exclude_self_outputs, (list, tuple, set, frozenset))
             or any(
                 not isinstance(name, str) or not name or name == "_"
                 for name in exclude_self_outputs

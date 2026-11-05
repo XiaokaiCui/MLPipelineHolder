@@ -290,8 +290,8 @@ class PipelineHolder(
             self._seed: int | None = None
             self._deterministic_torch = False
             self._clean_config_baseline = self._copy_definition_config(self._config)
-            self._clean_constant_baseline: dict[str, bytes] | None = None
-            self._clean_constant_disk_names: set[str] = set()
+            self._clean_constant_baseline: dict[str, dict[str, Any]] | None = None
+            self._clean_baseline_error: str | None = None
             self.strict_mode = bool(strict_mode)
             self._suppress_strict_validation = False
             self._invalidation_forbidden = False
@@ -390,7 +390,7 @@ class PipelineHolder(
 
     def _create_execution_block(
         self, registration_name: str, execution_priority: float,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         from .execution.block import ExecutionBlock
 
@@ -1308,7 +1308,11 @@ class PipelineHolder(
     ) -> dict[str, Any]:
         if isinstance(node, PipelineBase):
             atom = cast(Any, node)
-            excluded = atom.nodes[0].exclude_self_outputs if atom._is_atom else frozenset()
+            excluded = (
+                atom.nodes[0].exclude_self_outputs
+                if atom._is_atom and atom.nodes
+                else frozenset()
+            )
         else:
             excluded = node.exclude_self_outputs
         materialized = {

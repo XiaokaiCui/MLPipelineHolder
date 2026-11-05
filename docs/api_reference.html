@@ -626,7 +626,7 @@ pipeline.refresh_loaded_objects()</pre></div>
 <section class="reference-page" data-section="pipelineholder" data-label="Blocks &amp; child pipelines" aria-labelledby="pipeline-registration">
 <h2 class="section" id="pipeline-registration">Blocks &amp; child pipelines</h2>
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
-<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True, *, exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None) -&gt; <span class="ret">ExecutionBlock | None</span></div>
+<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True, *, exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
@@ -678,7 +678,7 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
   *,
   param_mapping: <span class="arg">dict[str, str | None] | None</span> = None,
   overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None,
-  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
@@ -723,7 +723,7 @@ atom = pipeline.get_child_pipeline("double")</pre></div>
 <h2 class="section" id="pipeline-execution">Execution</h2>
 <h4 class="method-name" id="PipelineHolder.run_all">run_all()</h4>
 <div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None, *, clean_start: <span class="arg">bool</span> = False) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes every node in the selected pipeline in ascending priority order. Before the first execution entry anywhere in an attached tree, snapshots constant names and values across the whole tree. When a root seed is configured, each direct <code>run_all()</code> seeds Python, NumPy, and installed PyTorch global RNGs once before evaluating the gate; nested nodes never reseed. With no seed configured, random behaviour is unchanged.</p>
+<p>Executes every node in the selected pipeline in ascending priority order. Before the first execution entry anywhere in an attached tree, attempts to snapshot constant names and values across the whole tree into independent files. An automatic snapshot failure warns but does not block ordinary runs; <code>clean_start=True</code> requires a valid snapshot or raises before changing execution state. Restoration stages artifact copies before clearing outputs and rolls back the active state if the restore commit fails. When a root seed is configured, each direct <code>run_all()</code> seeds Python, NumPy, and installed PyTorch global RNGs once before evaluating the gate; nested nodes never reseed. With no seed configured, random behaviour is unchanged.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li><li><code>clean_start</code>: restore definition-time configuration and snapshotted constant names and values, clear produced outputs and inspection caches in this subtree, then evaluate gates and run. The default <code>False</code> preserves ordinary execution semantics. A child clean start does not reset ancestor configuration or siblings. Stored objects, run history, and logs are retained. Requires object invalidation to be allowed.</li></ul>
 
@@ -886,8 +886,8 @@ print(pipeline.list_visible_constant())</pre></div>
   <li><code>verbose</code>: log when a mutable value is copied or falls back to reference storage.</li>
   <li><code>to_disk</code>: serialize the constant into the managed artifact tree instead of retaining it in memory.</li>
 </ul>
-<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name is a declared output or an existing produced value anywhere in the pipeline tree, conflicts with visible or definition-time configuration, is a reserved builtin name, or the value cannot be independently snapshotted.</p>
-<p>Constant registration first verifies that the value can be independently serialized and restored for the clean-start baseline. Unrestorable values raise <code>RegistrationError</code> before replacing the current constant. By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference during ordinary runs; the baseline is always independent. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; unsupported artifact serialization may raise <code>PersistenceError</code> after baseline validation); clean starts recreate disk-backed baseline constants and retire their old artifact generations.</p>
+<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name conflicts with visible configuration, a declared output, an existing produced value, or a reserved builtin name.</p>
+<p>By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference; values that cannot be deep-copied fall back to a reference with a warning. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; unsupported serialization raises <code>PersistenceError</code>); clean starts restore disk-backed baseline constants as independent artifact copies.</p>
 <p>Optuna <code>Study</code> constants are always persisted eagerly. A clean baseline captures detached trials, attributes and sampler state rather than a reference to the working Study database. A new constant owns an independent exact-suffix copy; resetting the same constant key overwrites and retains that owner's physical Study name. A Study handle proven to belong to another managed constant or storage record cannot create a second owner; use <code>set_constant_value()</code> or <code>update_storage()</code> on the existing owner. Textual name equality alone does not imply ownership, so unrelated external Studies remain valid independent sources.</p>
 <div class="example">
   <div class="example-title">Example</div>
@@ -900,7 +900,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 
 <h4 class="method-name" id="PipelineHolder.snapshot_constants">snapshot_constants()</h4>
 <div class="sig"><span class="kw">snapshot_constants</span>() -&gt; <span class="ret">None</span></div>
-<p>On the root pipeline only, capture current constant names and independently restorable values across all attached descendants. This manually replaces the automatic constant snapshot taken before the first execution entry anywhere in the tree. Definition-time configuration baselines are not changed. The snapshot persists with the saved pipeline; a failed snapshot preserves the previous baseline. Capturing a disk-backed or lazy constant may load or compute its value so the baseline remains independent of obsolete managed artifacts. Legacy saved placeholder constants cannot be restored by a clean start; replace them with valid values, then take a fresh snapshot.</p>
+<p>On the root pipeline only, capture current constant names and independently restorable values across all attached descendants. This manually replaces the automatic constant snapshot taken before the first execution entry anywhere in the tree. Definition-time configuration baselines are not changed. Baselines live in managed files copied with saved pipeline bundles, while the pipeline state stores only a small manifest. A disk-backed artifact is copied without loading it, including directory artifacts; an in-memory constant is pickled directly to its baseline file. In-memory Dask DataFrames with external dependencies are written as independent partitioned Parquet baselines. SQLite-backed Optuna Studies capture detached trials and sampler state. An explicit snapshot failure preserves the previous baseline. Legacy saved placeholder constants cannot be restored by a clean start; replace them with valid values, then take a fresh snapshot.</p>
 <div class="field-label">Parameters</div><p>None.</p>
 <div class="field-label">Returns</div><p><code>None</code>; call <code>run_all(clean_start=True)</code> to restore this snapshot.</p>
 <div class="example"><div class="example-title">Example</div><pre>pipeline.snapshot_constants()</pre></div>
@@ -1498,7 +1498,7 @@ print(atom.inspect())</pre></div>
   registration_name: <span class="arg">str</span>,
   execution_priority: <span class="arg">float</span>,
   *,
-  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | None</span> = None
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Constructed via <a class="anchor" href="#PipelineHolder.add_block"><code>PipelineHolder.add_block()</code></a>; you rarely instantiate it directly.</p>

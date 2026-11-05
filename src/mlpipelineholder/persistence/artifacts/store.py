@@ -139,6 +139,46 @@ class ArtifactStore:
                 f"'{artifact.file_path}': {type(exc).__name__}: {exc}"
             ) from exc
 
+    def copy_artifact_file(
+        self,
+        source: str | Path,
+        variable_name: str,
+        *,
+        block_name: str = "clean_baseline",
+        function_name: str = "constant",
+    ) -> Path:
+        """Copy an external artifact file/directory into the managed tree.
+
+        The source is never loaded, which keeps clean-start restoration of
+        disk-backed constants independent of their previous generation without
+        materializing them in memory.
+        """
+        source_path = Path(source)
+        if not source_path.exists():
+            raise PersistenceError(f"Cannot copy missing artifact: {source_path}")
+        safe_block = block_name.replace("/", "_")
+        safe_function = function_name.replace("/", "_")
+        safe_variable = variable_name.replace("/", "_")
+        suffix = source_path.suffix if source_path.is_file() else ""
+        destination_dir = self.artifact_root / safe_block
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = (
+            destination_dir
+            / f"{safe_function}__{safe_variable}__baseline__{uuid4().hex}{suffix}"
+        )
+        try:
+            if source_path.is_dir():
+                shutil.copytree(source_path, destination)
+            else:
+                shutil.copy2(source_path, destination)
+        except BaseException:
+            if destination.is_dir():
+                shutil.rmtree(destination, ignore_errors=True)
+            elif destination.exists():
+                destination.unlink()
+            raise
+        return destination
+
     def _assert_managed_artifact_path(self, path: Path) -> Path:
         resolved = path.resolve()
         artifact_root = self.artifact_root.resolve()

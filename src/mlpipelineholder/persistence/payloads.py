@@ -65,8 +65,8 @@ class PayloadMixin:
         memory_profile_logging: bool = False
         logger: Any = None
         _clean_config_baseline: Any = None
-        _clean_constant_baseline: dict[str, bytes] | None = None
-        _clean_constant_disk_names: set[str] = set()
+        _clean_constant_baseline: dict[str, dict[str, Any]] | None = None
+        _clean_baseline_error: str | None = None
         _seed: int | None = None
         _deterministic_torch: bool = False
 
@@ -430,7 +430,7 @@ class PayloadMixin:
             "config": self._serialize_config_for_save(self.config),
             "definition_config": self._serialize_config_for_save(self._clean_config_baseline),
             "clean_constant_baseline": self._clean_constant_baseline,
-            "clean_constant_disk_names": sorted(self._clean_constant_disk_names),
+            "clean_baseline_error": self._clean_baseline_error,
             "seed": self._seed,
             "deterministic_torch": self._deterministic_torch,
             "execution_priority": self.execution_priority,
@@ -620,7 +620,7 @@ class PayloadMixin:
                 {} if self._is_atom else self._serialize_config_for_save(self._clean_config_baseline)
             ),
             "clean_constant_baseline": self._clean_constant_baseline,
-            "clean_constant_disk_names": sorted(self._clean_constant_disk_names),
+            "clean_baseline_error": self._clean_baseline_error,
             "seed": self._seed,
             "deterministic_torch": self._deterministic_torch,
             "execution_priority": self.execution_priority,

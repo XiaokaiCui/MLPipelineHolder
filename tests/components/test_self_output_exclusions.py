@@ -26,6 +26,16 @@ def increment_pair(value: int, counter: int = 0) -> tuple[int, int]:
 
 
 class SelfOutputExclusionTests(unittest.TestCase):
+    def test_frozenset_exclusion_is_accepted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHandler("root", {}, Path(tmp) / "root")
+            root.add_block("upstream", 1).register_function(seed, ["value"])
+            block = root.add_block("target", 2, exclude_self_outputs=frozenset({"value"}))
+            block.register_function(increment, ["value"], param_mapping={"value": "value"})
+            root.run_all()
+            root.run_block("target")
+            self.assertEqual(root.get_value("value"), 4)
+
     def test_targeted_reruns_use_upstream_instead_of_previous_self_output(self) -> None:
         with TemporaryDirectory() as tmp:
             root = PipelineHandler("root", {}, Path(tmp) / "root")

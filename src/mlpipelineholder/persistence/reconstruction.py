@@ -110,8 +110,11 @@ class ReconstructionMixin:
             verbose=verbose,
             warn=reconstruction_warnings.append,
         )
-        pipeline._clean_constant_baseline = payload.get("clean_constant_baseline")
-        pipeline._clean_constant_disk_names = set(payload.get("clean_constant_disk_names", []))
+        saved_baseline = payload.get("clean_constant_baseline")
+        # Keep legacy in-memory baselines for an explicit clean-start error.
+        # Silently recapturing current values would replace their original baseline.
+        pipeline._clean_constant_baseline = saved_baseline
+        pipeline._clean_baseline_error = payload.get("clean_baseline_error")
         pipeline._seed = payload.get("seed") if parent is None else None
         pipeline._deterministic_torch = payload.get("deterministic_torch", False) if parent is None else False
         for message in reconstruction_warnings:

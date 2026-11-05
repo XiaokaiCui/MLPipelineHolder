@@ -54,10 +54,6 @@ class MutationMixin:
         def _snapshot_value(
             self, variable_name: str, value: Any, *, verbose: bool
         ) -> Any: ...
-        def _constant_baseline_bytes(
-            self, name: str, value: Any, *, materialize_artifacts: bool = True,
-        ) -> bytes: ...
-        def _validate_clean_constant_name(self, name: str) -> None: ...
         def _sync_attached_outputs_to_parent(self) -> None: ...
         def _cleanup_replaced_artifact(self, previous_value: Any) -> None: ...
         def _invalidate_downstream_consumers(
@@ -123,7 +119,6 @@ class MutationMixin:
         to_disk: bool = False,
     ) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline constant")
-        self._validate_clean_constant_name(variable_name)
         if variable_name in self._visible_config_names():
             raise RegistrationError(
                 f"Constant name '{variable_name}' conflicts with a visible configuration field"
@@ -143,7 +138,6 @@ class MutationMixin:
             permitted_owner=("constant", owner_key),
             permitted_owner_kinds=frozenset({"output", "storage"}),
         )
-        self._constant_baseline_bytes(variable_name, value, materialize_artifacts=False)
         study_value = self._optuna_study_value(value)
         if study_value is not None:
             source_owner = self._managed_study_owner(value)

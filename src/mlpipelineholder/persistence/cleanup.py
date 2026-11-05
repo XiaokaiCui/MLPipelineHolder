@@ -13,7 +13,13 @@ from ..integrations.optuna.support import OPTUNA_STUDIES_DB_NAME
 _SAVED_GENERATION_RE = re.compile(
     r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
 )
-_MANAGED_CHILD_DIR_NAMES = ("artifacts", "children", "metadata", "history_logs")
+_MANAGED_CHILD_DIR_NAMES = (
+    "artifacts",
+    "children",
+    "clean_baseline",
+    "metadata",
+    "history_logs",
+)
 _MANAGED_CHILD_FILE_NAMES = (
     "pipeline_state.pkl",
     "config.pkl",
@@ -85,6 +91,41 @@ def _collect_obsolete_artifact_entries(
             live_paths,
             obsolete,
         )
+
+
+def _collect_obsolete_baseline_entries(
+    payload: dict[str, Any], target_root: Path, obsolete: list[Path],
+) -> None:
+    """Find stale baseline files without touching unrelated export artifacts."""
+    baseline_dir = target_root / "clean_baseline"
+    if not baseline_dir.is_symlink() and baseline_dir.is_dir():
+        manifest = payload.get("clean_constant_baseline")
+        live_names = (
+            {
+                entry["file"]
+                for entry in manifest.values()
+                if isinstance(entry, dict) and isinstance(entry.get("file"), str)
+            }
+            if isinstance(manifest, dict) else set()
+        )
+        for entry in baseline_dir.iterdir():
+            if entry.is_symlink() or re.fullmatch(
+                r"constant_\d+(?:\.[a-z0-9]+)?", entry.name
+            ) is None:
+                continue
+            if entry.name not in live_names:
+                obsolete.append(entry)
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("kind") != "pipeline":
+            continue
+        name, child_payload = node.get("registration_name"), node.get("payload")
+        if isinstance(name, str) and isinstance(child_payload, dict):
+            _collect_obsolete_baseline_entries(
+                child_payload, target_root / "children" / name, obsolete,
+            )
 
 
 def _collect_obsolete_child_dirs(

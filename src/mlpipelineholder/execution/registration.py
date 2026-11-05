@@ -296,14 +296,14 @@ class RegistrationMixin:
         def _node_declared_outputs(self, node: Any) -> set[str]: ...
         def _create_execution_block(
             self, registration_name: str, execution_priority: float,
-            *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+            *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
         ) -> Any: ...
         @staticmethod
         def _is_execution_block(node: Any) -> bool: ...
 
     def add_block(
         self: Any, registration_name: str, execution_priority: float, forced: bool = True,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         validate_registration_name(registration_name, owner_label="block")
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
@@ -345,7 +345,7 @@ class RegistrationMixin:
 
     def _add_block_strict(
         self: Any, registration_name: str, execution_priority: float,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ):
         validate_registration_name(registration_name, owner_label="block")
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
@@ -521,7 +521,7 @@ class RegistrationMixin:
         *,
         param_mapping: dict[str, str | None] | None = None,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
-        exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> None:
         atom_cls: Any = atom_pipeline_class()
         atom_cls.create(

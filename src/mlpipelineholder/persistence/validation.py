@@ -104,17 +104,49 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
         raise PersistenceError("Saved pipeline has an invalid root seed")
     if not isinstance(payload.get("deterministic_torch", False), bool):
         raise PersistenceError("Saved pipeline has an invalid deterministic_torch flag")
+    baseline_error = payload.get("clean_baseline_error")
+    if baseline_error is not None and not isinstance(baseline_error, str):
+        raise PersistenceError("Saved pipeline has an invalid clean baseline error")
     baseline = payload.get("clean_constant_baseline")
-    if baseline is not None and (
-        not isinstance(baseline, dict)
-        or any(not isinstance(name, str) or not isinstance(blob, bytes) for name, blob in baseline.items())
-    ):
-        raise PersistenceError("Saved pipeline has an invalid constant baseline")
-    disk_names = payload.get("clean_constant_disk_names", [])
-    if not isinstance(disk_names, list) or any(not isinstance(name, str) for name in disk_names):
-        raise PersistenceError("Saved pipeline has invalid clean constant backing information")
-    if disk_names and (baseline is None or not set(disk_names).issubset(baseline)):
-        raise PersistenceError("Saved pipeline has disk-backed constants missing from its baseline")
+    if baseline is not None:
+        if not isinstance(baseline, dict):
+            raise PersistenceError("Saved pipeline has an invalid constant baseline")
+        for name, entry in baseline.items():
+            if not isinstance(name, str):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline name"
+                )
+            if isinstance(entry, bytes):
+                # Legacy in-memory baseline from a development save; it is
+                # discarded and recaptured on the next execution entry.
+                continue
+            if not isinstance(entry, dict):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline entry"
+                )
+            if entry.get("kind") not in {"artifact", "torch_state", "dask", "pickle"}:
+                raise PersistenceError(
+                    "Saved pipeline has an unknown constant baseline kind"
+                )
+            if not isinstance(entry.get("file"), str) or not entry["file"]:
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline file"
+                )
+            if entry["kind"] == "artifact" and (
+                not isinstance(entry.get("serializer"), str)
+                or not isinstance(entry.get("torch_load_weights_only", False), bool)
+            ):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline serializer"
+                )
+            if entry["kind"] == "torch_state" and not isinstance(
+                entry.get("object_kind"), str
+            ):
+                raise PersistenceError("Saved pipeline has an invalid torch state baseline")
+            if entry["kind"] in {"artifact", "torch_state"} and not isinstance(
+                entry.get("metadata", {}), dict
+            ):
+                raise PersistenceError("Saved pipeline has invalid baseline metadata")
     for mapping_key in (
         "manual_values",
         "producer_outputs",

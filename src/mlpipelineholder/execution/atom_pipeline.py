@@ -80,7 +80,7 @@ class AtomPipeline(PipelineHolder):
 
     def add_block(
         self, registration_name: str, execution_priority: float, forced: bool = True,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         self._assert_mutable("accept new blocks")
         return super().add_block(
@@ -90,7 +90,7 @@ class AtomPipeline(PipelineHolder):
 
     def _add_block_strict(
         self, registration_name: str, execution_priority: float,
-        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         self._assert_mutable("accept new blocks")
         return super()._add_block_strict(
@@ -160,7 +160,7 @@ class AtomPipeline(PipelineHolder):
         *,
         param_mapping: dict[str, str | None] | None = None,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
-        exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | None = None,
+        exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> None:
         """Create and attach an atom child under ``parent``; identical re-creation is a no-op."""
         validate_execution_priority(execution_priority, owner_label="pipeline", allow_none=False)

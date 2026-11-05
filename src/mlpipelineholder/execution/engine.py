@@ -24,6 +24,8 @@ class EngineMixin:
     """Public run entry points shared by the PipelineHolder facade."""
 
     if TYPE_CHECKING:
+        from ..core.reproducibility import _PreparedCleanStart
+
         nodes: list[Any] = []
 
         def _gate_skip_without_cleanup(
@@ -128,9 +130,9 @@ class EngineMixin:
         def _resync_mirror_to_parent(self) -> None: ...
         def _refresh_pointer_visible_state(self) -> None: ...
         def _cleanup_replaced_artifact(self, previous_value: Any) -> None: ...
-        def _ensure_constant_baselines(self) -> None: ...
-        def _prepare_clean_start(self) -> list[tuple[Any, Any, dict[str, Any]]]: ...
-        def _restore_clean_start(self, prepared: list[tuple[Any, Any, dict[str, Any]]]) -> None: ...
+        def _ensure_constant_baselines(self, *, required: bool = False) -> None: ...
+        def _prepare_clean_start(self) -> _PreparedCleanStart: ...
+        def _restore_clean_start(self, prepared: _PreparedCleanStart) -> None: ...
         def _seed_run_all(self) -> None: ...
         def _preflight_seed_runtime(self) -> None: ...
         def _iter_attached_pipelines(self) -> list[Any]: ...
@@ -147,22 +149,22 @@ class EngineMixin:
     def _run_all_impl(
         self, overrides: dict[str, Any] | None, *, clean_start: bool,
     ) -> RunRecord:
-        if clean_start:
-            prepared = self._prepare_clean_start()
-            self._restore_clean_start(prepared)
-        else:
-            self._ensure_constant_baselines()
-        self._seed_run_all()
-        if not clean_start and self._gate_skip_without_cleanup(
-            "run_all",
-            overrides,
-            self._incoming_parent_outputs(),
-            self._ancestor_config_values(),
-        ):
-            return self._build_skipped_run_record("run_all")
-        if not clean_start and self.nodes:
-            self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
         try:
+            if clean_start:
+                prepared = self._prepare_clean_start()
+                self._restore_clean_start(prepared)
+            else:
+                self._ensure_constant_baselines()
+            self._seed_run_all()
+            if not clean_start and self._gate_skip_without_cleanup(
+                "run_all",
+                overrides,
+                self._incoming_parent_outputs(),
+                self._ancestor_config_values(),
+            ):
+                return self._build_skipped_run_record("run_all")
+            if not clean_start and self.nodes:
+                self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             record = self._execute_nodes(
                 self._sorted_nodes(),
                 mode="run_all",

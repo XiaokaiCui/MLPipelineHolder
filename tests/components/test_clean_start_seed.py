@@ -102,12 +102,20 @@ class CleanStartSeedTests(unittest.TestCase):
             with self.assertRaises(RegistrationError):
                 child.snapshot_constants()
 
-    def test_reject_unrestorable_constant_before_mutation(self) -> None:
+    def test_unrestorable_constant_does_not_block_ordinary_runs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = PipelineHolder("root", {}, Path(tmp) / "root")
-            with self.assertRaisesRegex(RegistrationError, "cannot be independently snapshotted"):
-                root.set_constant_value("bad", Lock(), copy=False)
-            self.assertNotIn("bad", root.manual_values)
+            root.set_constant_value("bad", Lock(), copy=False)
+            root.add_block("draw", 1).register_function(optional_draw, ["result"])
+            root.run_all()
+            self.assertIsNotNone(root.get_value("result"))
+            self.assertIsNotNone(root._clean_baseline_error)
+            with self.assertRaisesRegex(RegistrationError, "Clean baseline unavailable"):
+                root.run_all(clean_start=True)
+            root.set_constant_value("bad", [1])
+            root.snapshot_constants()
+            root.run_all(clean_start=True)
+            self.assertEqual(root.get_constant_value("bad"), [1])
 
     def test_clean_start_rejects_invalidation_forbidden_before_mutation(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -499,13 +507,14 @@ class CleanStartTorchModuleTests(unittest.TestCase):
 
 
 class CleanStartConstantNameTests(unittest.TestCase):
-    def test_constant_name_cannot_conflict_with_original_config_after_config_edit(self) -> None:
+    def test_snapshot_rejects_name_conflicting_with_original_config(self) -> None:
         with TemporaryDirectory() as tmp:
             root = PipelineHolder("root", {"value": 1}, Path(tmp) / "root")
             root.config.pop("value")
-            with self.assertRaisesRegex(RegistrationError, "definition-time configuration"):
-                root.set_constant_value("value", 2)
-            self.assertNotIn("value", root.manual_values)
+            root.set_constant_value("value", 2)
+            with self.assertRaisesRegex(RegistrationError, "conflicts with current registration"):
+                root.snapshot_constants()
+            self.assertEqual(root.get_constant_value("value"), 2)
 
 
 class CleanStartLegacyBaselineTests(unittest.TestCase):
@@ -514,7 +523,7 @@ class CleanStartLegacyBaselineTests(unittest.TestCase):
             root = PipelineHolder("root", {}, Path(tmp) / "root")
             placeholder = RuntimeValueReference("Lock", "<lock>", "cannot restore")
             root.manual_values["legacy"] = placeholder
-            root._clean_constant_baseline = {"legacy": pickle.dumps(placeholder)}
+            root._clean_constant_baseline = {"legacy": pickle.dumps(placeholder)}  # pyright: ignore[reportAttributeAccessIssue]
             with self.assertRaisesRegex(RegistrationError, "unrestorable legacy baseline"):
                 root.run_all(clean_start=True)
             self.assertIs(root.manual_values["legacy"], placeholder)
@@ -522,3 +531,322 @@ class CleanStartLegacyBaselineTests(unittest.TestCase):
             root.snapshot_constants()
             root.run_all(clean_start=True)
             self.assertEqual(root.manual_values["legacy"], [1])
+
+
+class PickleOnlyConfigValue:
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+    def __deepcopy__(self, memo: dict[int, object]) -> PickleOnlyConfigValue:
+        raise TypeError("deepcopy unsupported")
+
+    def __reduce__(self) -> tuple[object, tuple[int]]:
+        return (PickleOnlyConfigValue, (self.value,))
+
+
+class CleanBaselineDiskTests(unittest.TestCase):
+    def test_pickle_only_config_preserves_constructor_compatibility(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"item": PickleOnlyConfigValue(1)}, Path(tmp) / "root")
+            root.config["item"] = PickleOnlyConfigValue(5)
+            root.run_all(clean_start=True)
+            self.assertEqual(root.config["item"].value, 1)
+
+    def test_disk_backed_snapshot_copies_artifact_without_loading(self) -> None:
+        from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("data", b"x" * 2_000_000, to_disk=True)
+            root.add_block("draw", 1).register_function(optional_draw, ["result"])
+            with patch.object(ArtifactStore, "load", side_effect=AssertionError("loaded baseline")):
+                root.run_all()
+            entry = (root._clean_constant_baseline or {})["data"]
+            self.assertEqual(entry["kind"], "artifact")
+            baseline = root.project_root / "clean_baseline" / entry["file"]
+            self.assertTrue(baseline.is_file())
+            self.assertEqual(baseline.stat().st_size, Path(root.manual_values["data"].file_path).stat().st_size)
+            self.assertLess(len(pickle.dumps(root._serialize_payload())), 100_000)
+
+    def test_staged_copy_failure_leaves_active_state_and_cleans_staging(self) -> None:
+        from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"value": 1}, Path(tmp) / "root")
+            root.set_constant_value("a", [1], to_disk=True)
+            root.set_constant_value("b", [2], to_disk=True)
+            root.add_block("draw", 1).register_function(optional_draw, ["result"])
+            root.run_all()
+            before = root.get_value("result")
+            before_a = root.manual_values["a"]
+            root.set_config("value", 9)
+            copy_method = root.artifact_store.copy_artifact_file
+            calls = 0
+
+            def fail_second(*args: object, **kwargs: object) -> Path:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("copy failed")
+                return copy_method(*args, **kwargs)  # type: ignore[arg-type]
+
+            with patch.object(ArtifactStore, "copy_artifact_file", side_effect=fail_second):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    root.run_all(clean_start=True)
+            self.assertEqual(root.get_value("result"), before)
+            self.assertIs(root.manual_values["a"], before_a)
+            self.assertEqual(root.get_config_value("value"), 9)
+            self.assertFalse(list((root.project_root / "artifacts" / "clean_baseline").glob("*")))
+            self.assertIsNone(root._gate_cleanup_predecided)
+
+    def test_failed_manual_tree_snapshot_keeps_every_previous_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            root.set_constant_value("base", [1])
+            child.set_constant_value("child_base", [2])
+            root.add_child_pipeline(child, 1)
+            root.snapshot_constants()
+            before_root = dict(root._clean_constant_baseline or {})
+            before_child = dict(child._clean_constant_baseline or {})
+            root_file = root.project_root / "clean_baseline" / before_root["base"]["file"]
+            child_file = child.project_root / "clean_baseline" / before_child["child_base"]["file"]
+            original_root_bytes, original_child_bytes = root_file.read_bytes(), child_file.read_bytes()
+            root.set_constant_value("base", [9])
+            child.set_constant_value("child_base", [8])
+            with patch.object(child, "_write_baseline_entry", side_effect=OSError("later child failed")):
+                with self.assertRaisesRegex(RegistrationError, "later child failed"):
+                    root.snapshot_constants()
+            self.assertEqual(root._clean_constant_baseline, before_root)
+            self.assertEqual(child._clean_constant_baseline, before_child)
+            self.assertEqual(root_file.read_bytes(), original_root_bytes)
+            self.assertEqual(child_file.read_bytes(), original_child_bytes)
+            root.run_all(clean_start=True)
+            self.assertEqual(root.get_constant_value("base"), [1])
+            self.assertEqual(child.get_constant_value("child_base"), [2])
+
+    def test_commit_failure_restores_outputs_config_and_artifact(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"marker": 1}, Path(tmp) / "root")
+            root.set_constant_value("items", [1], to_disk=True)
+            block = root.add_block("count", 1)
+            block.register_function(read_items, ["count"], save_to_disk=["count"])
+            root.run_all()
+            output_record = root.producer_outputs["count"]["count"]
+            output_file = Path(output_record.file_path)
+            root.set_config("marker", 9)
+            original_invalidate = root._invalidate_all_outputs
+
+            def fail_after_invalidation() -> None:
+                original_invalidate()
+                raise RuntimeError("commit failed")
+
+            with patch.object(root, "_invalidate_all_outputs", side_effect=fail_after_invalidation):
+                with self.assertRaisesRegex(RuntimeError, "commit failed"):
+                    root.run_all(clean_start=True)
+            self.assertTrue(output_file.exists())
+            self.assertIs(root.producer_outputs["count"]["count"], output_record)
+            self.assertEqual(root.get_value("count"), 1)
+            self.assertEqual(root.get_config_value("marker"), 9)
+            self.assertEqual(root.get_constant_value("items"), [1])
+            self.assertIsNone(root._gate_cleanup_predecided)
+
+
+class CleanBaselineLifecycleTests(unittest.TestCase):
+    def test_publish_failure_rolls_back_all_pipeline_baselines(self) -> None:
+        import os
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            root.set_constant_value("base", [1])
+            child.set_constant_value("child_base", [2])
+            root.add_child_pipeline(child, 1)
+            root.snapshot_constants()
+            root_entry = (root._clean_constant_baseline or {})["base"]
+            child_entry = (child._clean_constant_baseline or {})["child_base"]
+            root_file = root.project_root / "clean_baseline" / root_entry["file"]
+            child_file = child.project_root / "clean_baseline" / child_entry["file"]
+            previous_root, previous_child = root_file.read_bytes(), child_file.read_bytes()
+            root.set_constant_value("base", [9])
+            child.set_constant_value("child_base", [8])
+            original_replace = os.replace
+
+            def fail_child_publish(source: Path, destination: Path) -> None:
+                if source.parent == child.metadata_root and source.name.startswith(".clean-baseline-stage-") and destination == child._clean_baseline_root:
+                    raise OSError("promotion failed")
+                original_replace(source, destination)
+
+            with patch("mlpipelineholder.core.reproducibility.os.replace", side_effect=fail_child_publish):
+                with self.assertRaisesRegex(OSError, "promotion failed"):
+                    root.snapshot_constants()
+            self.assertEqual(root_file.read_bytes(), previous_root)
+            self.assertEqual(child_file.read_bytes(), previous_child)
+            root.run_all(clean_start=True)
+            self.assertEqual(root.manual_values["base"], [1])
+            self.assertEqual(child.manual_values["child_base"], [2])
+
+    def test_saved_baseline_files_relocate_and_outdated_bundle_files_clean_up(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("first", [1], to_disk=True)
+            root.set_constant_value("second", [2])
+            root.run_all()
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+            old_file = bundle / "clean_baseline" / (root._clean_constant_baseline or {})["second"]["file"]
+            self.assertTrue(old_file.exists())
+            root.manual_values.pop("second")
+            root.snapshot_constants()
+            root.save_pipeline(bundle, cleanup="auto")
+            self.assertFalse(old_file.exists())
+            loaded = PipelineHolder.load_pipeline(bundle, forced_deleting=True, trust_project=True)
+            loaded.set_constant_value("first", [9], to_disk=True)
+            loaded.run_all(clean_start=True)
+            self.assertEqual(loaded.get_constant_value("first"), [1])
+            self.assertIsInstance(loaded.manual_values["first"], ArtifactRecord)
+
+    def test_prior_torch_warn_only_setting_survives_seeded_run(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("PyTorch not installed")
+        previous_mode = torch.are_deterministic_algorithms_enabled()
+        previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            with TemporaryDirectory() as tmp:
+                root = PipelineHolder("root", {}, Path(tmp) / "root")
+                root.add_block("draw", 1).register_function(torch_draw, ["value"])
+                root.set_seed(7, deterministic_torch=True)
+                root.run_all(clean_start=True)
+                self.assertTrue(torch.are_deterministic_algorithms_enabled())
+                self.assertTrue(torch.is_deterministic_algorithms_warn_only_enabled())
+        finally:
+            torch.use_deterministic_algorithms(previous_mode, warn_only=previous_warn_only)
+
+    def test_optuna_sampler_resumes_at_identical_next_trial(self) -> None:
+        try:
+            import optuna
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            study = optuna.create_study(study_name="sampler_baseline", sampler=optuna.samplers.RandomSampler(seed=17))
+            objective = lambda trial: trial.suggest_float("x", 0, 1)
+            study.optimize(objective, n_trials=1)
+            root.set_constant_value("study", study)
+            root.run_all()
+            current = root.get_constant_value("study")
+            current.optimize(objective, n_trials=1)
+            expected = current.trials[1].params["x"]
+            root.run_all(clean_start=True)
+            restored = root.get_constant_value("study")
+            restored.optimize(objective, n_trials=1)
+            self.assertEqual(restored.trials[1].params["x"], expected)
+
+
+class CleanBaselineFailureTests(unittest.TestCase):
+    def test_sibling_capture_failure_keeps_ordinary_run_usable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            root.set_constant_value("valid", [1])
+            child.set_constant_value("unrestorable", Lock(), copy=False)
+            root.add_block("draw", 1).register_function(optional_draw, ["value"])
+            root.add_child_pipeline(child, 2)
+            root.run_all()
+            self.assertIsNotNone(root.get_value("value"))
+            self.assertIsNone(root._clean_constant_baseline)
+            self.assertIsNone(child._clean_constant_baseline)
+            self.assertFalse(list(root.metadata_root.glob(".clean-baseline-stage-*")))
+            with self.assertRaisesRegex(RegistrationError, "Clean baseline unavailable"):
+                root.run_all(clean_start=True)
+            child.set_constant_value("unrestorable", [2])
+            root.snapshot_constants()
+            root.run_all(clean_start=True)
+            self.assertEqual(child.get_constant_value("unrestorable"), [2])
+
+    def test_child_commit_failure_restores_parent_mirror_and_sibling(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            sibling = PipelineHolder("sibling", {}, Path(tmp) / "sibling")
+            child.set_constant_value("items", [1])
+            child.add_block("count", 1).register_function(read_items, ["child_result"])
+            sibling.add_block("draw", 1).register_function(optional_draw, ["sibling_result"])
+            root.add_child_pipeline(child, 1)
+            root.add_child_pipeline(sibling, 2)
+            root.run_all()
+            prior_child = child.get_value("child_result")
+            prior_sibling = sibling.get_value("sibling_result")
+            prior_mirror = dict(root.producer_outputs.get("child", {}))
+            real_invalidate = child._invalidate_all_outputs
+
+            def fail_after_clear() -> None:
+                real_invalidate()
+                raise RuntimeError("child clear failed")
+
+            with patch.object(child, "_invalidate_all_outputs", side_effect=fail_after_clear):
+                with self.assertRaisesRegex(RuntimeError, "child clear failed"):
+                    child.run_all(clean_start=True)
+            self.assertEqual(child.get_value("child_result"), prior_child)
+            self.assertEqual(sibling.get_value("sibling_result"), prior_sibling)
+            self.assertEqual(root.producer_outputs.get("child", {}), prior_mirror)
+            self.assertIsNone(child._gate_cleanup_predecided)
+
+    def test_loaded_legacy_byte_baseline_does_not_silently_recapture(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("items", [1])
+            root.run_all()
+            root._clean_constant_baseline = {"items": pickle.dumps([1])}  # pyright: ignore[reportAttributeAccessIssue]
+            root.set_constant_value("items", [9])
+            root.save_pipeline(Path(tmp) / "bundle")
+            loaded = PipelineHolder.load_pipeline(Path(tmp) / "bundle", forced_deleting=True, trust_project=True)
+            with self.assertRaisesRegex(RegistrationError, "unrestorable legacy baseline"):
+                loaded.run_all(clean_start=True)
+            self.assertEqual(loaded.get_constant_value("items"), [9])
+
+
+class CleanBaselineLazyInputTests(unittest.TestCase):
+    def test_in_memory_dask_graph_snapshots_underlying_external_files(self) -> None:
+        import shutil
+        try:
+            import dask.dataframe as dd
+            import pandas as pd
+        except ImportError:
+            self.skipTest("Dask DataFrame and pandas not installed")
+        with TemporaryDirectory() as tmp:
+            source_path = Path(tmp) / "external"
+            dd.from_pandas(pd.DataFrame({"score": [1, 2, 3]}), npartitions=2).to_parquet(source_path)
+            lazy = dd.read_parquet(source_path)
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("frame", lazy, copy=False)
+            root.snapshot_constants()
+            manifest = (root._clean_constant_baseline or {})["frame"]
+            self.assertEqual(manifest["kind"], "dask")
+            shutil.rmtree(source_path)
+            root.run_all(clean_start=True)
+            restored = root.get_constant_value("frame")
+            self.assertIsInstance(restored, dd.DataFrame)
+            self.assertEqual(restored.compute()["score"].tolist(), [1, 2, 3])
+
+
+class CleanBaselineChildIsolationTests(unittest.TestCase):
+    def test_child_clean_run_ignores_unavailable_parent_baseline(self) -> None:
+        with TemporaryDirectory() as tmp:
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            child.set_constant_value("items", [1])
+            child.add_block("count", 1).register_function(read_items, ["child_result"])
+            child.snapshot_constants()
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("uncopyable", Lock(), copy=False)
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            self.assertIsNotNone(root._clean_baseline_error)
+            child.set_constant_value("items", [9])
+            child.run_all(clean_start=True)
+            self.assertEqual(child.get_value("child_result"), 1)
+            self.assertEqual(child.get_constant_value("items"), [1])
+            self.assertIsNotNone(root._clean_baseline_error)

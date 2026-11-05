@@ -937,7 +937,7 @@ class InspectionCacheTests(unittest.TestCase):
                     self.assertEqual(cached.payload, [1, 2])
         finally:
             copyreg.dispatch_table.pop(RegisteredValue, None)
-        self.assertEqual(len(calls), 3)  # Constant registration now verifies a restorable baseline.
+        self.assertEqual(len(calls), 2)
 
     def test_reduce_ex_receives_deepcopy_protocol(self) -> None:
         with TemporaryDirectory() as tmp:
