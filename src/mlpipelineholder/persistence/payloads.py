@@ -64,6 +64,11 @@ class PayloadMixin:
         memory_saving_mode: bool = False
         memory_profile_logging: bool = False
         logger: Any = None
+        _clean_config_baseline: Any = None
+        _clean_constant_baseline: dict[str, bytes] | None = None
+        _clean_constant_disk_names: set[str] = set()
+        _seed: int | None = None
+        _deterministic_torch: bool = False
 
         def qualified_node_name(self, node_name: str) -> str: ...
         def _sorted_nodes(self) -> list[Any]: ...
@@ -423,6 +428,11 @@ class PayloadMixin:
         return {
             "registration_name": self.registration_name,
             "config": self._serialize_config_for_save(self.config),
+            "definition_config": self._serialize_config_for_save(self._clean_config_baseline),
+            "clean_constant_baseline": self._clean_constant_baseline,
+            "clean_constant_disk_names": sorted(self._clean_constant_disk_names),
+            "seed": self._seed,
+            "deterministic_torch": self._deterministic_torch,
             "execution_priority": self.execution_priority,
             "is_atom": self._is_atom,
             "expression_runtime_code": self.expression_runtime_code,
@@ -606,6 +616,13 @@ class PayloadMixin:
                 if self._is_atom
                 else self._serialize_config_for_save(self.config)
             ),
+            "definition_config": (
+                {} if self._is_atom else self._serialize_config_for_save(self._clean_config_baseline)
+            ),
+            "clean_constant_baseline": self._clean_constant_baseline,
+            "clean_constant_disk_names": sorted(self._clean_constant_disk_names),
+            "seed": self._seed,
+            "deterministic_torch": self._deterministic_torch,
             "execution_priority": self.execution_priority,
             "is_atom": self._is_atom,
             "saved_project_root": str(self.project_root),

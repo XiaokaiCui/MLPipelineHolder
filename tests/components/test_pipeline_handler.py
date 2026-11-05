@@ -2272,7 +2272,7 @@ class PipelineHandlerTests(unittest.TestCase):
             old_path = Path(old_record.file_path)
             self.assertTrue(old_path.exists())
 
-            with self.assertRaises(PersistenceError):
+            with self.assertRaises(RegistrationError):
                 pipeline.set_constant_value(
                     "big", build_unserializable_object(), to_disk=True
                 )
@@ -5226,7 +5226,7 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("todisk-fail", {}, tmp / "project")
-            with self.assertRaises(PersistenceError):
+            with self.assertRaises(RegistrationError):
                 pipeline.set_constant_value(
                     "bad", lambda x: x, to_disk=True
                 )
@@ -5262,22 +5262,17 @@ class StrictModeTests(unittest.TestCase):
             )
             self.assertIn("deeply copied", log_text)
 
-    def test_set_constant_value_copy_fallback_warns(self) -> None:
+    def test_set_constant_value_rejects_unrestorable_object(self) -> None:
         with TemporaryDirectory() as temp_dir:
-            tmp = Path(temp_dir)
-            pipeline = PipelineHandler("copy-warn", {}, tmp / "project")
+            pipeline = PipelineHandler("copy-warn", {}, Path(temp_dir) / "project")
 
             class Uncopyable:
                 def __deepcopy__(self, memo):
                     raise TypeError("cannot copy")
 
-            obj = Uncopyable()
-            pipeline.set_constant_value("u", obj)
-            log_text = (tmp / "project" / "metadata" / "pipeline.log").read_text(
-                encoding="utf-8"
-            )
-            self.assertIn("stored by reference", log_text)
-            self.assertIs(pipeline.get_constant_value("u"), obj)
+            with self.assertRaisesRegex(RegistrationError, "cannot be independently snapshotted"):
+                pipeline.set_constant_value("u", Uncopyable())
+            self.assertNotIn("u", pipeline.manual_values)
 
     def test_set_value_deep_copies_mutable_object(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5338,7 +5333,9 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("ph", {}, tmp / "project")
-            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            # A legacy constant can still be loaded as a placeholder.
+            pipeline.manual_values["bad_const"] = build_unserializable_object()
+            pipeline.para_value_dict["bad_const"] = pipeline.manual_values["bad_const"]
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(
                 tmp / "bundle", forced_deleting=True, verbose=True, trust_project=True
@@ -5352,7 +5349,8 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("ph", {}, tmp / "project")
-            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.manual_values["bad_const"] = build_unserializable_object()
+            pipeline.para_value_dict["bad_const"] = pipeline.manual_values["bad_const"]
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(
                 tmp / "bundle", forced_deleting=True, trust_project=True
@@ -5366,7 +5364,8 @@ class StrictModeTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("ph", {}, tmp / "project")
-            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.manual_values["bad_const"] = build_unserializable_object()
+            pipeline.para_value_dict["bad_const"] = pipeline.manual_values["bad_const"]
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             with self.assertRaises(ResolutionError):
@@ -5378,7 +5377,8 @@ class StrictModeTests(unittest.TestCase):
             pipeline = PipelineHandler("ph", {}, tmp / "project")
             block = pipeline.add_block("b", 1)
             block.register_function(use_constant_input, ["out"], param_mapping={"x": "bad_const"})
-            pipeline.set_constant_value("bad_const", build_unserializable_object())
+            pipeline.manual_values["bad_const"] = build_unserializable_object()
+            pipeline.para_value_dict["bad_const"] = pipeline.manual_values["bad_const"]
             pipeline.save_pipeline(tmp / "bundle")
             loaded = PipelineHandler.load_pipeline(tmp / "bundle", forced_deleting=True, trust_project=True)
             with self.assertRaises(ResolutionError):
@@ -5469,11 +5469,12 @@ class StrictModeTests(unittest.TestCase):
                     Path(temp_dir),
                 )
 
-    def test_set_constant_value_still_allows_unpicklable(self) -> None:
+    def test_set_constant_value_rejects_unpicklable(self) -> None:
         with TemporaryDirectory() as temp_dir:
             pipeline = PipelineHandler("const", {}, Path(temp_dir))
-            pipeline.set_constant_value("bad", build_unserializable_object())
-            self.assertIsNotNone(pipeline.get_constant_value("bad"))
+            with self.assertRaisesRegex(RegistrationError, "cannot be independently snapshotted"):
+                pipeline.set_constant_value("bad", build_unserializable_object())
+            self.assertNotIn("bad", pipeline.manual_values)
 
     def test_set_constant_value_raises_on_visible_config_collision(self) -> None:
         with TemporaryDirectory() as temp_dir:

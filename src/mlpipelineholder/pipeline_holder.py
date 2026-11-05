@@ -93,6 +93,7 @@ from .presentation.description import DescriptionMixin
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
 from .core.runtime_controls import RuntimeControlsMixin
+from .core.reproducibility import ReproducibilityMixin
 from .core.base import PipelineBase
 from .core.constants import (
     _IMMUTABLE_TYPES,
@@ -161,6 +162,7 @@ class PipelineHolder(
     PrintCaptureMixin,
     ConfigurationMixin,
     RuntimeControlsMixin,
+    ReproducibilityMixin,
     ReconstructionMixin,
     PlaceholderRecoveryMixin,
     ExpressionRuntimeMixin,
@@ -285,6 +287,11 @@ class PipelineHolder(
             self.memory_saving_mode = memory_saving_mode
             self.memory_profile_logging = memory_profile_logging
             self.torch_load_weights_only = bool(torch_load_weights_only)
+            self._seed: int | None = None
+            self._deterministic_torch = False
+            self._clean_config_baseline = self._copy_definition_config(self._config)
+            self._clean_constant_baseline: dict[str, bytes] | None = None
+            self._clean_constant_disk_names: set[str] = set()
             self.strict_mode = bool(strict_mode)
             self._suppress_strict_validation = False
             self._invalidation_forbidden = False

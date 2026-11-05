@@ -276,7 +276,9 @@ class ExecutionInspectionTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             value = Uncopyable()
             pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
-            pipeline.set_constant_value("value", value, copy=False)
+            # Legacy uncopyable constant: new registrations reject this value.
+            pipeline.manual_values["value"] = value
+            pipeline.para_value_dict["value"] = value
             block = pipeline.add_block("use", 1)
             block.register_function(return_uncopyable, ["result"])
 
@@ -807,7 +809,8 @@ class ExecutionInspectionTests(unittest.TestCase):
                 {"value": 1},
                 Path(tmp) / "failing",
             )
-            failing.set_constant_value("callback", uncopyable, copy=False)
+            failing.manual_values["callback"] = uncopyable
+            failing.para_value_dict["callback"] = uncopyable
             failing_block = failing.add_block("callable", 1)
             failing_block.register_function(invoke_callable, ["result"])
             with self.assertRaisesRegex(InspectionCopyError, "Cannot isolate"):

@@ -937,7 +937,7 @@ class InspectionCacheTests(unittest.TestCase):
                     self.assertEqual(cached.payload, [1, 2])
         finally:
             copyreg.dispatch_table.pop(RegisteredValue, None)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)  # Constant registration now verifies a restorable baseline.
 
     def test_reduce_ex_receives_deepcopy_protocol(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1248,7 +1248,9 @@ class InspectionCacheTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             uncopyable = UncopyableBothWays()
-            pipeline.set_constant_value("lock", uncopyable)
+            # Emulate an older pipeline with a constant that the new setter rejects.
+            pipeline.manual_values["lock"] = uncopyable
+            pipeline.para_value_dict["lock"] = uncopyable
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 pipeline.copy_for_inspection(["lock"])
@@ -1292,7 +1294,8 @@ class InspectionCacheTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             original = UncopyableBothWays()
-            pipeline.set_constant_value("lock", original)
+            pipeline.manual_values["lock"] = original
+            pipeline.para_value_dict["lock"] = original
 
             with (
                 mock.patch.object(pipeline.logger, "warning") as warning,
@@ -1322,7 +1325,8 @@ class InspectionCacheTests(unittest.TestCase):
                 before = resolved.first
 
             binding_before = pipeline._inspection_cache_bindings["first"]
-            pipeline.set_constant_value("first", UncopyableBothWays())
+            pipeline.manual_values["first"] = UncopyableBothWays()
+            pipeline.para_value_dict["first"] = pipeline.manual_values["first"]
             with self.assertRaisesRegex(InspectionCopyError, "Could not refresh"):
                 pipeline.refresh_copied_objects()
 
@@ -1457,7 +1461,8 @@ class InspectionCacheTests(unittest.TestCase):
     def test_skipped_object_does_not_repeat_copy_nudge(self) -> None:
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
-            pipeline.set_constant_value("lock", UncopyableBothWays())
+            pipeline.manual_values["lock"] = UncopyableBothWays()
+            pipeline.para_value_dict["lock"] = pipeline.manual_values["lock"]
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
                 pipeline.copy_for_inspection(["lock"])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from ..core.models import ArtifactRecord, RunRecord
@@ -128,32 +128,63 @@ class EngineMixin:
         def _resync_mirror_to_parent(self) -> None: ...
         def _refresh_pointer_visible_state(self) -> None: ...
         def _cleanup_replaced_artifact(self, previous_value: Any) -> None: ...
+        def _ensure_constant_baselines(self) -> None: ...
+        def _prepare_clean_start(self) -> list[tuple[Any, Any, dict[str, Any]]]: ...
+        def _restore_clean_start(self, prepared: list[tuple[Any, Any, dict[str, Any]]]) -> None: ...
+        def _seed_run_all(self) -> None: ...
+        def _preflight_seed_runtime(self) -> None: ...
+        def _iter_attached_pipelines(self) -> list[Any]: ...
 
-    def run_all(self, overrides: dict[str, Any] | None = None) -> RunRecord:
-        if self._gate_skip_without_cleanup(
+    def run_all(
+        self, overrides: dict[str, Any] | None = None, *, clean_start: bool = False,
+    ) -> RunRecord:
+        if not isinstance(clean_start, bool):
+            raise TypeError("clean_start must be a boolean")
+        self._preflight_seed_runtime()
+        with cast(Any, self)._torch_deterministic_scope():
+            return self._run_all_impl(overrides, clean_start=clean_start)
+
+    def _run_all_impl(
+        self, overrides: dict[str, Any] | None, *, clean_start: bool,
+    ) -> RunRecord:
+        if clean_start:
+            prepared = self._prepare_clean_start()
+            self._restore_clean_start(prepared)
+        else:
+            self._ensure_constant_baselines()
+        self._seed_run_all()
+        if not clean_start and self._gate_skip_without_cleanup(
             "run_all",
             overrides,
             self._incoming_parent_outputs(),
             self._ancestor_config_values(),
         ):
             return self._build_skipped_run_record("run_all")
-        (
+        if not clean_start and self.nodes:
             self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
-            if self.nodes
-            else None
-        )
-        return self._execute_nodes(
-            self._sorted_nodes(),
-            mode="run_all",
-            overrides=overrides,
-            upstream_outputs=self._incoming_parent_outputs(),
-            parent_config=self._ancestor_config_values(),
-        )[0]
+        try:
+            record = self._execute_nodes(
+                self._sorted_nodes(),
+                mode="run_all",
+                overrides=overrides,
+                upstream_outputs=self._incoming_parent_outputs(),
+                parent_config=self._ancestor_config_values(),
+            )[0]
+            if clean_start and record.status == "skipped":
+                self._rebuild_visible_state(self._incoming_parent_outputs())
+                if self.parent_pipeline is not None:
+                    self._sync_attached_outputs_to_parent()
+            return record
+        finally:
+            if clean_start:
+                for pipeline in self._iter_attached_pipelines():
+                    pipeline._gate_cleanup_predecided = None
 
     def run_until(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        pipeline, node = self._resolve_target_path(path_parts)
+        self._ensure_constant_baselines()
         if len(path_parts) > 1:
             return self._run_nested_until_path(path_parts, overrides=overrides)
-        pipeline, node = self._resolve_target_path(path_parts)
         if self._gate_skip_without_cleanup(
             f"run_until:{node.registration_name}",
             overrides,
@@ -182,9 +213,10 @@ class EngineMixin:
         )[0]
 
     def run_from(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        pipeline, node = self._resolve_target_path(path_parts)
+        self._ensure_constant_baselines()
         if len(path_parts) > 1:
             return self._run_nested_from_path(path_parts, overrides=overrides)
-        pipeline, node = self._resolve_target_path(path_parts)
         if self._gate_skip_without_cleanup(
             f"run_from:{node.registration_name}",
             overrides,
@@ -214,9 +246,10 @@ class EngineMixin:
         )[0]
 
     def run_block(self, *path_parts: str, overrides: dict[str, Any] | None = None) -> RunRecord:
+        pipeline, node = self._resolve_target_path(path_parts)
+        self._ensure_constant_baselines()
         if len(path_parts) > 1:
             return self._run_nested_block_path(path_parts, overrides=overrides)
-        pipeline, node = self._resolve_target_path(path_parts)
         if self._gate_skip_without_cleanup(
             f"run_block:{node.registration_name}",
             overrides,

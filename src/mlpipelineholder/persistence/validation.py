@@ -99,6 +99,22 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
     )
     if not isinstance(payload["nodes"], list):
         raise PersistenceError("Saved pipeline payload has a non-list 'nodes' entry")
+    seed = payload.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32):
+        raise PersistenceError("Saved pipeline has an invalid root seed")
+    if not isinstance(payload.get("deterministic_torch", False), bool):
+        raise PersistenceError("Saved pipeline has an invalid deterministic_torch flag")
+    baseline = payload.get("clean_constant_baseline")
+    if baseline is not None and (
+        not isinstance(baseline, dict)
+        or any(not isinstance(name, str) or not isinstance(blob, bytes) for name, blob in baseline.items())
+    ):
+        raise PersistenceError("Saved pipeline has an invalid constant baseline")
+    disk_names = payload.get("clean_constant_disk_names", [])
+    if not isinstance(disk_names, list) or any(not isinstance(name, str) for name in disk_names):
+        raise PersistenceError("Saved pipeline has invalid clean constant backing information")
+    if disk_names and (baseline is None or not set(disk_names).issubset(baseline)):
+        raise PersistenceError("Saved pipeline has disk-backed constants missing from its baseline")
     for mapping_key in (
         "manual_values",
         "producer_outputs",
@@ -313,7 +329,7 @@ def contains_missing_placeholder_outside_config(
             if contains_missing_placeholder_outside_config(
                 cls,
                 item,
-                inside_config=inside_config or key == "config",
+                inside_config=inside_config or key in {"config", "definition_config"},
             ):
                 return True
         return False

@@ -722,13 +722,14 @@ atom = pipeline.get_child_pipeline("double")</pre></div>
 <section class="reference-page" data-section="pipelineholder" data-label="Execution" aria-labelledby="pipeline-execution">
 <h2 class="section" id="pipeline-execution">Execution</h2>
 <h4 class="method-name" id="PipelineHolder.run_all">run_all()</h4>
-<div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes every node in the pipeline tree in ascending priority order. Returns a <a class="anchor" href="#runrecord"><code>RunRecord</code></a> summarising the run.</p>
+<div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None, *, clean_start: <span class="arg">bool</span> = False) -&gt; <span class="ret">RunRecord</span></div>
+<p>Executes every node in the selected pipeline in ascending priority order. Before the first execution entry anywhere in an attached tree, snapshots constant names and values across the whole tree. When a root seed is configured, each direct <code>run_all()</code> seeds Python, NumPy, and installed PyTorch global RNGs once before evaluating the gate; nested nodes never reseed. With no seed configured, random behaviour is unchanged.</p>
 <div class="field-label">Parameters</div>
-<ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li></ul>
+<ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li><li><code>clean_start</code>: restore definition-time configuration and snapshotted constant names and values, clear produced outputs and inspection caches in this subtree, then evaluate gates and run. The default <code>False</code> preserves ordinary execution semantics. A child clean start does not reset ancestor configuration or siblings. Stored objects, run history, and logs are retained. Requires object invalidation to be allowed.</li></ul>
 
 <div class="field-label">Returns</div><p>A <code>RunRecord</code> describing the run, including executed block names, status, and produced output names.</p>
-<div class="example"><div class="example-title">Example</div><pre>record = pipeline.run_all()
+<div class="example"><div class="example-title">Example</div><pre>pipeline.set_seed(42)
+record = pipeline.run_all(clean_start=True)
 print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_until">run_until()</h4>
@@ -885,9 +886,9 @@ print(pipeline.list_visible_constant())</pre></div>
   <li><code>verbose</code>: log when a mutable value is copied or falls back to reference storage.</li>
   <li><code>to_disk</code>: serialize the constant into the managed artifact tree instead of retaining it in memory.</li>
 </ul>
-<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name is a declared output or an existing produced value anywhere in the pipeline tree, and for reserved builtin names.</p>
-<p>By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference; values that cannot be deep-copied fall back to a reference with a warning. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; a non-serializable value raises <code>PersistenceError</code>); replacing a disk-backed constant deletes the previous artifact file.</p>
-<p>Optuna <code>Study</code> constants are always persisted eagerly. A new constant owns an independent exact-suffix copy; resetting the same constant key overwrites and retains that owner's physical Study name. A Study handle proven to belong to another managed constant or storage record cannot create a second owner; use <code>set_constant_value()</code> or <code>update_storage()</code> on the existing owner. Textual name equality alone does not imply ownership, so unrelated external Studies remain valid independent sources.</p>
+<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name is a declared output or an existing produced value anywhere in the pipeline tree, conflicts with visible or definition-time configuration, is a reserved builtin name, or the value cannot be independently snapshotted.</p>
+<p>Constant registration first verifies that the value can be independently serialized and restored for the clean-start baseline. Unrestorable values raise <code>RegistrationError</code> before replacing the current constant. By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference during ordinary runs; the baseline is always independent. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; unsupported artifact serialization may raise <code>PersistenceError</code> after baseline validation); clean starts recreate disk-backed baseline constants and retire their old artifact generations.</p>
+<p>Optuna <code>Study</code> constants are always persisted eagerly. A clean baseline captures detached trials, attributes and sampler state rather than a reference to the working Study database. A new constant owns an independent exact-suffix copy; resetting the same constant key overwrites and retains that owner's physical Study name. A Study handle proven to belong to another managed constant or storage record cannot create a second owner; use <code>set_constant_value()</code> or <code>update_storage()</code> on the existing owner. Textual name equality alone does not imply ownership, so unrelated external Studies remain valid independent sources.</p>
 <div class="example">
   <div class="example-title">Example</div>
 <pre>pipeline.set_constant_value("learning_rate", 0.01)
@@ -896,6 +897,13 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 </div>
 
 <div class="field-label">Returns</div><p><code>None</code>. Stores a visible constant, copying mutable values by default and optionally persisting it immediately.</p>
+
+<h4 class="method-name" id="PipelineHolder.snapshot_constants">snapshot_constants()</h4>
+<div class="sig"><span class="kw">snapshot_constants</span>() -&gt; <span class="ret">None</span></div>
+<p>On the root pipeline only, capture current constant names and independently restorable values across all attached descendants. This manually replaces the automatic constant snapshot taken before the first execution entry anywhere in the tree. Definition-time configuration baselines are not changed. The snapshot persists with the saved pipeline; a failed snapshot preserves the previous baseline. Capturing a disk-backed or lazy constant may load or compute its value so the baseline remains independent of obsolete managed artifacts. Legacy saved placeholder constants cannot be restored by a clean start; replace them with valid values, then take a fresh snapshot.</p>
+<div class="field-label">Parameters</div><p>None.</p>
+<div class="field-label">Returns</div><p><code>None</code>; call <code>run_all(clean_start=True)</code> to restore this snapshot.</p>
+<div class="example"><div class="example-title">Example</div><pre>pipeline.snapshot_constants()</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.set_value">set_value()</h4>
 <div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -1314,6 +1322,13 @@ child = pipeline.get_child_pipeline("analysis")</pre></div>
 
 <div class="field-label">Returns</div><p><code>None</code>. Changes the policy stamped on future torch artifacts.</p>
 <div class="example"><div class="example-title">Example</div><pre>pipeline.set_torch_load_weights_only(True)</pre></div>
+
+<h4 class="method-name" id="PipelineHolder.set_seed">set_seed()</h4>
+<div class="sig"><span class="kw">set_seed</span>(seed: <span class="arg">int | None</span>, *, deterministic_torch: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
+<p>Set an optional root-only global seed for direct <code>run_all()</code> calls, including calls on attached children. A top-level call resets Python <code>random</code>, NumPy's global RNG and PyTorch's RNG when available, once before gates and nodes run. User code may reseed; global RNG state remains advanced after the run. Reseeding from system entropy or time within user code can still change results. <code>None</code> disables managed seeding. An independently created <code>np.random.default_rng()</code> or a retained external generator is not controlled by this setting; a Generator stored as a pipeline constant is restored from its baseline by <code>clean_start=True</code>. Parallel functions keep running concurrently and log a warning when configured under a seed: shared global RNG draws may interleave differently. PyTorch does not guarantee identical results across platforms or releases.</p>
+<div class="field-label">Parameters</div><ul class="param-desc"><li><code>seed</code>: integer in <code>[0, 2**32)</code>, excluding bool, or <code>None</code>.</li><li><code>deterministic_torch</code>: optionally enable PyTorch deterministic algorithms and disable cuDNN benchmarking during the run, restoring those flags afterwards; requires PyTorch. Some CUDA operations also require <code>CUBLAS_WORKSPACE_CONFIG</code> to be set before CUDA initializes.</li></ul>
+<div class="field-label">Returns</div><p><code>None</code>. The setting is persisted with the root pipeline.</p>
+<div class="example"><div class="example-title">Example</div><pre>pipeline.set_seed(42)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.set_strict_mode">set_strict_mode()</h4>
 <div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>

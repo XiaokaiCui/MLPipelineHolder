@@ -60,6 +60,7 @@ MLPipelineHolder organises workflows into explicit execution blocks and nested c
 - Reduce RAM usage by storing large artifacts on disk without sacrificing pipeline usability. Enable `memory_saving_mode` to release objects that are no longer needed (more effective when used together with `save_to_disk`).
 - Store arbitrary experiment objects in pipeline-managed storage, with logs and results recorded through the built-in logger and persisted alongside the pipeline.
 - Run a registered function or expression with temporary input overrides, inspect its resolved arguments, and explore alternative scenarios without committing the results or invalidating the pipeline.
+- Set an optional root seed and repeat a full run from definition-time configuration and snapshotted constant values with `pipeline.run_all(clean_start=True)`. Parallel functions and nondeterministic GPU operations may still differ.
 
 ### Example notebook
 

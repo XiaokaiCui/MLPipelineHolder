@@ -206,7 +206,10 @@ class AutoResolvePlaceholderTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp = Path(temp_dir)
             pipeline = PipelineHandler("ar", {}, tmp / "project")
-            pipeline.set_constant_value("bad_const", Lock())
+            # Exercise loading a legacy constant that new registrations reject.
+            pipeline.manual_values["bad_const"] = Lock()
+            pipeline.para_value_dict["bad_const"] = pipeline.manual_values["bad_const"]
+            pipeline._clean_constant_baseline = {}
             block = pipeline.add_block("consumer", 1)
             block.register_function(
                 consume_lock_and_produce,

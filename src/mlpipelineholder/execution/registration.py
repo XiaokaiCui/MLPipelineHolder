@@ -435,6 +435,9 @@ class RegistrationMixin:
             child_pipeline._invalidation_forbidden = self._invalidation_forbidden
             child_pipeline._sync_invalidation_flag()
         self._register_node(child_pipeline)
+        self._root_pipeline()._warn_seeded_parallel_blocks(
+            child_pipeline._iter_attached_pipelines()
+        )
         if child_pipeline.para_value_dict:
             self.producer_outputs[child_pipeline.registration_name] = (
                 child_pipeline._locally_produced_outputs()

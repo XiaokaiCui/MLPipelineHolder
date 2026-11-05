@@ -105,6 +105,15 @@ class ReconstructionMixin:
             ),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
         )
+        pipeline._clean_config_baseline = cls._deserialize_saved_config(
+            payload.get("definition_config", payload["config"]),
+            verbose=verbose,
+            warn=reconstruction_warnings.append,
+        )
+        pipeline._clean_constant_baseline = payload.get("clean_constant_baseline")
+        pipeline._clean_constant_disk_names = set(payload.get("clean_constant_disk_names", []))
+        pipeline._seed = payload.get("seed") if parent is None else None
+        pipeline._deterministic_torch = payload.get("deterministic_torch", False) if parent is None else False
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)
         if parent is not None:

@@ -770,6 +770,10 @@ class ExecutionBlock:
         if commit:
             self.functions.append(registration)
             self.parent._register_node(self)
+            if len(self.functions) == 2:
+                self.parent._root_pipeline()._warn_seeded_parallel_blocks(
+                    [self.parent], only_block=self
+                )
         return registration
 
     def _warn_on_unmapped_resolvable_inputs(
