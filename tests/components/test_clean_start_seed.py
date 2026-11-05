@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +30,14 @@ def always_true() -> bool:
 
 def optional_draw() -> float:
     return random.random()
+
+
+def produce_scoped_x() -> int:
+    return 3
+
+
+def consume_scoped_x(x: int) -> int:
+    return x + 1
 
 
 class CleanStartSeedTests(unittest.TestCase):
@@ -159,6 +168,188 @@ class CleanStartSeedTests(unittest.TestCase):
             self.assertEqual(loaded.get_value("np"), expected)
             self.assertEqual(loaded.get_config_value("scale"), 2)
             self.assertEqual(loaded.manual_values["items"], [1, 10])
+
+
+class CleanStartScopeTests(unittest.TestCase):
+    def test_sibling_only_output_name_allows_capture_and_clean_start(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            sibling_a = PipelineHolder("a", {}, Path(tmp) / "a")
+            sibling_a.add_block("produce", 1).register_function(
+                produce_scoped_x, ["x"]
+            )
+            sibling_b = PipelineHolder("b", {}, Path(tmp) / "b")
+            sibling_b.set_constant_value("x", 5)
+            sibling_b.add_block("consume", 1).register_function(
+                consume_scoped_x, ["y"], param_mapping={"x": "x"}
+            )
+            root.add_child_pipeline(sibling_a, 1)
+            root.add_child_pipeline(sibling_b, 2)
+
+            root.run_all()
+            self.assertIsNotNone(root._clean_constant_baseline)
+            self.assertIsNotNone(sibling_b._clean_constant_baseline)
+            self.assertEqual(sibling_b.get_constant_value("x"), 5)
+            self.assertEqual(root.get_value("y"), 6)
+
+            sibling_b.set_constant_value("x", 9)
+            root.run_all(clean_start=True)
+            self.assertEqual(sibling_b.get_constant_value("x"), 5)
+            self.assertEqual(root.get_value("y"), 6)
+            sibling_b.run_all(clean_start=True)
+            self.assertEqual(sibling_b.get_constant_value("x"), 5)
+            self.assertEqual(sibling_b.get_value("y"), 6)
+
+    def test_reverse_registration_order_uses_the_same_scope_rules(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            sibling_a = PipelineHolder("a", {}, Path(tmp) / "a")
+            sibling_a.add_block("produce", 1).register_function(
+                produce_scoped_x, ["x"]
+            )
+            sibling_b = PipelineHolder("b", {}, Path(tmp) / "b")
+            sibling_b.add_block("consume", 1).register_function(
+                consume_scoped_x, ["y"], param_mapping={"x": "x"}
+            )
+            root.add_child_pipeline(sibling_a, 1)
+            root.add_child_pipeline(sibling_b, 2)
+            sibling_b.set_constant_value("x", 5)
+
+            root.run_all()
+            self.assertEqual(sibling_b.get_constant_value("x"), 5)
+            sibling_b.set_constant_value("x", 9)
+            root.run_all(clean_start=True)
+            self.assertEqual(sibling_b.get_constant_value("x"), 5)
+
+    def test_constant_conflicting_with_own_scope_output_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            child.add_block("produce", 1).register_function(produce_scoped_x, ["x"])
+            root.add_child_pipeline(child, 1)
+
+            with self.assertRaisesRegex(RegistrationError, "declared output"):
+                child.set_constant_value("x", 5)
+
+            child.manual_values["x"] = 5
+            child.para_value_dict["x"] = 5
+            with self.assertRaisesRegex(
+                RegistrationError, "conflicts with current registration"
+            ):
+                root.snapshot_constants()
+
+    def test_constant_conflicting_with_ancestor_definition_config_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"shared": 1}, Path(tmp) / "root")
+            root.config.pop("shared")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            child.set_constant_value("shared", 3)
+            root.add_child_pipeline(child, 1)
+
+            with self.assertRaisesRegex(
+                RegistrationError, "conflicts with current registration"
+            ):
+                root.snapshot_constants()
+            with self.assertRaisesRegex(
+                RegistrationError, "conflicts with current registration"
+            ):
+                root.run_all(clean_start=True)
+
+
+class CleanStartCaptureScopeTests(unittest.TestCase):
+    def test_child_clean_start_ignores_unrelated_root_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_cfg": 1}, Path(tmp) / "root")
+            root.set_constant_value("bad", Lock(), copy=False)
+            child = PipelineHolder("child", {"child_cfg": 2}, Path(tmp) / "child")
+            child.set_constant_value("items", [1])
+            child.add_block("count", 1).register_function(read_items, ["count"])
+            root.add_child_pipeline(child, 1)
+
+            child.run_all(clean_start=True)
+
+            self.assertEqual(child.get_value("count"), 1)
+            self.assertEqual(child.get_constant_value("items"), [1])
+            self.assertIsNotNone(child._clean_constant_baseline)
+            self.assertIsNone(root._clean_constant_baseline)
+            self.assertIsNone(root._clean_baseline_error)
+
+    def test_child_clean_start_leaves_root_siblings_and_errors_untouched(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_cfg": 1}, Path(tmp) / "root")
+            root.set_constant_value("root_value", "keep")
+            sibling = PipelineHolder("sibling", {"sib_cfg": 3}, Path(tmp) / "sibling")
+            sibling.set_constant_value("sibling_value", "keep")
+            child = PipelineHolder("child", {"child_cfg": 2}, Path(tmp) / "child")
+            child.set_constant_value("items", [1])
+            child.add_block("count", 1).register_function(read_items, ["count"])
+            root.add_child_pipeline(sibling, 1)
+            root.add_child_pipeline(child, 2)
+            root.run_all()
+            sibling._clean_baseline_error = "pre-existing sibling failure"
+            root.set_config("root_cfg", 8)
+            sibling.set_config("sib_cfg", 7)
+            child.set_constant_value("items", [9])
+            sibling.set_constant_value("sibling_value", "changed")
+
+            child.run_all(clean_start=True)
+
+            self.assertEqual(child.get_constant_value("items"), [1])
+            self.assertEqual(root.get_config_value("root_cfg"), 8)
+            self.assertEqual(sibling.get_config_value("sib_cfg"), 7)
+            self.assertEqual(sibling.get_constant_value("sibling_value"), "changed")
+            self.assertIsNotNone(root._clean_constant_baseline)
+            self.assertEqual(sibling._clean_baseline_error, "pre-existing sibling failure")
+
+    def test_child_unpicklable_constant_fails_before_mutation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_cfg": 1}, Path(tmp) / "root")
+            child = PipelineHolder("child", {"child_cfg": 2}, Path(tmp) / "child")
+            bad = Lock()
+            child.set_constant_value("bad", bad, copy=False)
+            child.add_block("count", 1).register_function(read_items, ["count"])
+            root.add_child_pipeline(child, 1)
+            child.set_config("child_cfg", 9)
+
+            with self.assertRaisesRegex(RegistrationError, "cannot be independently snapshotted"):
+                child.run_all(clean_start=True)
+
+            self.assertIs(child.get_constant_value("bad"), bad)
+            self.assertEqual(child.get_config_value("child_cfg"), 9)
+            self.assertIsNone(child._clean_constant_baseline)
+            self.assertIsNotNone(child._clean_baseline_error)
+
+    def test_failed_root_automatic_capture_does_not_poison_child_clean_start(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_cfg": 1}, Path(tmp) / "root")
+            root.set_constant_value("bad", Lock(), copy=False)
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            child.set_constant_value("items", [1])
+            child.add_block("count", 1).register_function(read_items, ["count"])
+            root.add_child_pipeline(child, 1)
+
+            root.run_all()
+            self.assertIsNotNone(root._clean_baseline_error)
+
+            child.run_all(clean_start=True)
+            self.assertEqual(child.get_value("count"), 1)
+            self.assertIsNotNone(root._clean_baseline_error)
+            self.assertIsNotNone(child._clean_constant_baseline)
+
+    def test_root_snapshot_still_reports_genuine_failures(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            child.set_constant_value("bad", Lock(), copy=False)
+            root.add_child_pipeline(child, 1)
+
+            with self.assertRaisesRegex(RegistrationError, "cannot be independently snapshotted"):
+                root.snapshot_constants()
+            child.set_constant_value("bad", [1])
+            root.snapshot_constants()
+            self.assertIsNotNone(root._clean_constant_baseline)
+            self.assertIsNotNone(child._clean_constant_baseline)
+            self.assertEqual(child.get_constant_value("bad"), [1])
 
 
 def reseed_user() -> float:
@@ -463,6 +654,174 @@ class CleanStartStudyPersistenceTests(unittest.TestCase):
             )
             loaded.run_all(clean_start=True)
             self.assertEqual(len(loaded.get_constant_value("study").trials), 1)
+
+
+class ManagedStudyIdentityTests(unittest.TestCase):
+    def _study(self, name: str, trials: int = 1):
+        import optuna
+
+        study = optuna.create_study(study_name=name)
+        for _ in range(trials):
+            study.optimize(lambda trial: trial.suggest_float("x", 0, 1), n_trials=1)
+        return study
+
+    def test_clean_start_keeps_managed_artifact_identity(self) -> None:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("study", self._study("baseline"))
+            root.run_all()
+
+            root.run_all(clean_start=True)
+            record = root.manual_values["study"]
+            self.assertIsInstance(record, ArtifactRecord)
+            self.assertEqual(record.serializer, "optuna-study")
+            self.assertEqual(len(root.get_constant_value("study").trials), 1)
+
+    def test_repeated_clean_starts_preserve_physical_name_and_ownership(self) -> None:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("study", self._study("baseline"))
+            root.run_all()
+            original = dict(root.manual_values["study"].metadata)
+
+            for _ in range(3):
+                root.run_all(clean_start=True)
+                record = root.manual_values["study"]
+                self.assertIsInstance(record, ArtifactRecord)
+                self.assertEqual(record.metadata["study_name"], original["study_name"])
+                self.assertEqual(
+                    record.metadata["original_study_name"],
+                    original["original_study_name"],
+                )
+                self.assertEqual(
+                    record.metadata["study_owner_kind"], "constant"
+                )
+                self.assertEqual(record.metadata["study_owner_key"], "root.study")
+                self.assertEqual(len(root.get_constant_value("study").trials), 1)
+
+    def test_reassign_after_clean_start_reuses_physical_study_name(self) -> None:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("study", self._study("baseline"))
+            root.run_all()
+            root.run_all(clean_start=True)
+            physical = root.manual_values["study"].metadata["study_name"]
+
+            root.set_constant_value("study", root.get_constant_value("study"))
+            record = root.manual_values["study"]
+            self.assertEqual(record.metadata["study_name"], physical)
+            self.assertIsInstance(record, ArtifactRecord)
+            self.assertEqual(record.serializer, "optuna-study")
+
+    def test_trials_added_after_clean_start_survive_save_and_load(self) -> None:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("study", self._study("baseline"))
+            root.run_all()
+            root.run_all(clean_start=True)
+            root.get_constant_value("study").optimize(
+                lambda trial: trial.suggest_float("x", 0, 1), n_trials=1
+            )
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+            restored = loaded.get_constant_value("study")
+            self.assertEqual(len(restored.trials), 2)
+            self.assertIsInstance(loaded.manual_values["study"], ArtifactRecord)
+
+    def test_shared_database_keeps_unrelated_studies(self) -> None:
+        try:
+            import optuna
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("first", self._study("first_study"))
+            root.set_constant_value("second", self._study("second_study"))
+            root.run_all()
+            db_path = root.project_root / "optuna_studies.db"
+            storage = f"sqlite:///{db_path}"
+            external = optuna.create_study(study_name="external", storage=storage)
+            external.optimize(lambda trial: trial.suggest_float("x", 0, 1), n_trials=1)
+            before_first = list(root.manual_values["first"].metadata.items())
+            before_second = list(root.manual_values["second"].metadata.items())
+
+            root.run_all(clean_start=True)
+
+            self.assertEqual(
+                list(root.manual_values["first"].metadata.items()), before_first
+            )
+            self.assertEqual(
+                list(root.manual_values["second"].metadata.items()), before_second
+            )
+            external_after = optuna.load_study(
+                study_name="external", storage=storage
+            )
+            self.assertEqual(len(external_after.trials), 1)
+
+    def test_failed_managed_restore_rolls_back_sqlite_and_sidecar(self) -> None:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            self.skipTest("Optuna not installed")
+        from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("study", self._study("baseline"))
+            root.run_all()
+            before_record = root.manual_values["study"]
+            before_metadata = dict(before_record.metadata)
+            before_trials = len(root.get_constant_value("study").trials)
+            generation_dir = root.project_root / "artifacts" / "clean_baseline"
+
+            real_save = ArtifactStore.save
+
+            def fail_after_save(store: ArtifactStore, *args: Any, **kwargs: Any) -> Any:
+                record = real_save(store, *args, **kwargs)
+                if kwargs.get("variable_name") == "study":
+                    raise RuntimeError("managed study commit failed")
+                return record
+
+            with patch.object(ArtifactStore, "save", fail_after_save):
+                with self.assertRaisesRegex(RuntimeError, "managed study commit failed"):
+                    root.run_all(clean_start=True)
+
+            self.assertIs(root.manual_values["study"], before_record)
+            self.assertEqual(
+                dict(root.manual_values["study"].metadata), before_metadata
+            )
+            self.assertEqual(
+                len(root.get_constant_value("study").trials), before_trials
+            )
+            self.assertTrue(Path(before_record.file_path).exists())
+            self.assertFalse(
+                list(generation_dir.glob("*")) if generation_dir.is_dir() else []
+            )
+            root.set_constant_value("study", root.get_constant_value("study"))
+            self.assertEqual(
+                root.manual_values["study"].metadata["study_name"],
+                before_metadata["study_name"],
+            )
 
 
 class CleanStartInvalidCallTests(unittest.TestCase):
@@ -831,6 +1190,294 @@ class CleanBaselineLazyInputTests(unittest.TestCase):
             restored = root.get_constant_value("frame")
             self.assertIsInstance(restored, dd.DataFrame)
             self.assertEqual(restored.compute()["score"].tolist(), [1, 2, 3])
+
+
+class CleanBaselineDaskLifetimeTests(unittest.TestCase):
+    def _frame(self, values: list[int]):
+        import dask.dataframe as dd
+        import pandas as pd
+
+        return dd.from_pandas(pd.DataFrame({"score": values}), npartitions=max(1, len(values)))
+
+    def test_restored_dask_graph_survives_baseline_replacement(self) -> None:
+        try:
+            import dask.dataframe as dd
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("frame", self._frame([1, 2, 3]), copy=False)
+            root.run_all()
+            root.run_all(clean_start=True)
+            live = root.get_constant_value("frame")
+            self.assertIsInstance(live, dd.DataFrame)
+
+            root.snapshot_constants()
+            root.snapshot_constants()
+
+            self.assertEqual(live.compute()["score"].tolist(), [1, 2, 3])
+            self.assertEqual(
+                root.get_constant_value("frame").compute()["score"].tolist(), [1, 2, 3]
+            )
+
+    def test_restored_dask_graph_is_independent_of_baseline_order_and_reuse(self) -> None:
+        try:
+            import dask.dataframe as dd
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("first", [1])
+            root.set_constant_value("frame", self._frame([1, 2, 3]), copy=False)
+            root.run_all()
+            root.run_all(clean_start=True)
+            live = root.get_constant_value("frame")
+
+            root.manual_values.pop("first")
+            root.snapshot_constants()
+            root.set_constant_value("other", self._frame([9]), copy=False)
+            root.snapshot_constants()
+
+            self.assertIsInstance(live, dd.DataFrame)
+            self.assertEqual(live.compute()["score"].tolist(), [1, 2, 3])
+            self.assertEqual(
+                root.get_constant_value("frame").compute()["score"].tolist(), [1, 2, 3]
+            )
+            self.assertEqual(
+                root.get_constant_value("other").compute()["score"].tolist(), [9]
+            )
+
+    def test_dask_generation_survives_save_load_and_clean_start(self) -> None:
+        try:
+            import dask.dataframe as dd
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("frame", self._frame([1, 2, 3]), copy=False)
+            root.run_all()
+            root.run_all(clean_start=True)
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+            self.assertEqual(
+                loaded.get_constant_value("frame").compute()["score"].tolist(),
+                [1, 2, 3],
+            )
+            loaded.run_all(clean_start=True)
+            restored = loaded.get_constant_value("frame")
+            self.assertIsInstance(restored, dd.DataFrame)
+            self.assertEqual(restored.compute()["score"].tolist(), [1, 2, 3])
+
+    def test_orphaned_restored_dask_generation_is_cleaned_on_save(self) -> None:
+        try:
+            import dask.dataframe as dd  # noqa: F401
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("frame", self._frame([1, 2, 3]), copy=False)
+            root.run_all()
+            root.run_all(clean_start=True)
+            record = root.manual_values.pop("frame")
+            root.para_value_dict.pop("frame", None)
+            root.artifact_registry.pop("frame", None)
+            generation = Path(record.file_path)
+            self.assertTrue(generation.is_dir())
+
+            root.save_pipeline(cleanup="auto")
+
+            self.assertFalse(generation.exists())
+
+    def test_failed_dask_generation_copy_preserves_live_value(self) -> None:
+        try:
+            import dask.dataframe as dd
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        from mlpipelineholder.persistence.artifacts.store import ArtifactStore
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("frame", self._frame([1, 2, 3]), copy=False)
+            root.run_all()
+            root.set_constant_value("frame", self._frame([9]), copy=False)
+            previous = root.get_constant_value("frame")
+            with patch.object(
+                ArtifactStore, "copy_artifact_file", side_effect=OSError("copy failed")
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    root.run_all(clean_start=True)
+
+            self.assertEqual(previous.compute()["score"].tolist(), [9])
+            self.assertEqual(
+                root.get_constant_value("frame").compute()["score"].tolist(), [9]
+            )
+            self.assertFalse(
+                list((root.project_root / "artifacts" / "clean_baseline").glob("*"))
+            )
+
+
+class CleanBaselineSafetyTests(unittest.TestCase):
+    def _root_with_baseline(self, tmp: str) -> PipelineHolder:
+        root = PipelineHolder("root", {}, Path(tmp) / "root")
+        root.set_constant_value("items", [1])
+        root.add_block("count", 1).register_function(read_items, ["count"])
+        root.run_all()
+        return root
+
+    def test_symlinked_baseline_root_is_rejected(self) -> None:
+        import shutil
+
+        with TemporaryDirectory() as tmp:
+            root = self._root_with_baseline(tmp)
+            baseline_root = root.project_root / "clean_baseline"
+            external = Path(tmp) / "external"
+            shutil.move(str(baseline_root), str(external))
+            baseline_root.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaisesRegex(RegistrationError, "symlink"):
+                root.run_all(clean_start=True)
+            self.assertEqual(root.get_constant_value("items"), [1])
+
+    def test_traversal_baseline_filename_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = self._root_with_baseline(tmp)
+            root._clean_constant_baseline = {  # pyright: ignore[reportAttributeAccessIssue]
+                "items": {"kind": "pickle", "file": "../escape.bin"}
+            }
+            with self.assertRaisesRegex(RegistrationError, "unsafe baseline file name"):
+                root.run_all(clean_start=True)
+
+    def test_symlinked_baseline_file_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = self._root_with_baseline(tmp)
+            entry = (root._clean_constant_baseline or {})["items"]
+            source = root.project_root / "clean_baseline" / entry["file"]
+            external = Path(tmp) / "external.bin"
+            external.write_bytes(b"payload")
+            source.unlink()
+            source.symlink_to(external)
+
+            with self.assertRaisesRegex(RegistrationError, "symlink"):
+                root.run_all(clean_start=True)
+
+    def test_symlink_inside_dataset_baseline_is_rejected(self) -> None:
+        try:
+            import dask.dataframe as dd
+            import pandas as pd
+        except ImportError:
+            self.skipTest("Dask DataFrame not installed")
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value(
+                "frame",
+                dd.from_pandas(pd.DataFrame({"score": [1, 2, 3]}), npartitions=1),
+                copy=False,
+            )
+            root.run_all()
+            entry = (root._clean_constant_baseline or {})["frame"]
+            dataset = root.project_root / "clean_baseline" / entry["file"]
+            (dataset / "linked.parquet").symlink_to(Path(tmp) / "outside")
+
+            with self.assertRaisesRegex(RegistrationError, "contains a symlink"):
+                root.run_all(clean_start=True)
+
+    def test_load_reconciles_interrupted_publication(self) -> None:
+        import os
+
+        with TemporaryDirectory() as tmp:
+            root = self._root_with_baseline(tmp)
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+            baseline_root = bundle / "clean_baseline"
+            backup = bundle / "metadata" / ".clean-baseline-previous"
+            os.replace(baseline_root, backup)
+            baseline_root.mkdir()
+            (baseline_root / "partial.bin").write_bytes(b"partial")
+
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+
+            self.assertEqual(loaded.get_constant_value("items"), [1])
+            loaded.run_all(clean_start=True)
+            self.assertEqual(loaded.get_value("count"), 1)
+
+    def test_interrupted_publication_restores_previous_baseline(self) -> None:
+        import os
+
+        with TemporaryDirectory() as tmp:
+            root = self._root_with_baseline(tmp)
+            baseline_root = root.project_root / "clean_baseline"
+            backup = root.metadata_root / ".clean-baseline-previous"
+            os.replace(baseline_root, backup)
+            baseline_root.mkdir()
+            (baseline_root / "uncommitted.bin").write_bytes(b"partial")
+            staging = root.metadata_root / ".clean-baseline-stage-orphan"
+            staging.mkdir()
+            (staging / "orphan.bin").write_bytes(b"orphan")
+
+            root.run_all(clean_start=True)
+
+            self.assertEqual(root.get_constant_value("items"), [1])
+            self.assertTrue((baseline_root / (root._clean_constant_baseline or {})["items"]["file"]).exists())
+            self.assertFalse(backup.exists())
+            self.assertFalse(staging.exists())
+
+
+class CleanBaselineRollbackErrorTests(unittest.TestCase):
+    def test_output_restore_failure_still_restores_runtime_state(self) -> None:
+        import shutil as shutil_module
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"marker": 1}, Path(tmp) / "root")
+            root.set_constant_value("items", [1], to_disk=True)
+            block = root.add_block("count", 1)
+            block.register_function(read_items, ["count"], save_to_disk=["count"])
+            root.run_all()
+            before_record = root.producer_outputs["count"]["count"]
+            root.set_config("marker", 9)
+
+            real_invalidate = root._invalidate_all_outputs
+
+            def fail_after_clear() -> None:
+                real_invalidate()
+                raise RuntimeError("commit failed")
+
+            real_copy2 = shutil_module.copy2
+
+            def fail_backup_copy(source, destination, *args, **kwargs):
+                if Path(source).name.startswith("output_"):
+                    raise OSError("rollback copy failed")
+                return real_copy2(source, destination, *args, **kwargs)
+
+            with (
+                patch.object(
+                    root, "_invalidate_all_outputs", side_effect=fail_after_clear
+                ),
+                patch(
+                    "mlpipelineholder.core.reproducibility.shutil.copy2",
+                    side_effect=fail_backup_copy,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "commit failed") as raised:
+                    root.run_all(clean_start=True)
+
+            self.assertIs(root.producer_outputs["count"]["count"], before_record)
+            self.assertEqual(root.get_config_value("marker"), 9)
+            self.assertIsNone(root._gate_cleanup_predecided)
+            notes = getattr(raised.exception, "__notes__", [])
+            self.assertTrue(any("rollback copy failed" in note for note in notes))
+            self.assertTrue(
+                list(
+                    (root.project_root / "artifacts").rglob(
+                        ".*.rollback-*"
+                    )
+                )
+            )
 
 
 class CleanBaselineChildIsolationTests(unittest.TestCase):

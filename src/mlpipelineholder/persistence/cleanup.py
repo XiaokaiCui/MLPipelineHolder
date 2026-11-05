@@ -11,7 +11,7 @@ from ..core.models import ArtifactRecord, TorchStateArtifactRecord
 from ..integrations.optuna.support import OPTUNA_STUDIES_DB_NAME
 
 _SAVED_GENERATION_RE = re.compile(
-    r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
+    r"^.+__.+__.+__[0-9a-f]{32}(?:\.(?:json|npy|pkl|pt|feather|parquet|bin))?$"
 )
 _MANAGED_CHILD_DIR_NAMES = (
     "artifacts",
@@ -110,7 +110,7 @@ def _collect_obsolete_baseline_entries(
         )
         for entry in baseline_dir.iterdir():
             if entry.is_symlink() or re.fullmatch(
-                r"constant_\d+(?:\.[a-z0-9]+)?", entry.name
+                r"constant_\d+(?:\.[A-Za-z0-9_-]+)*", entry.name
             ) is None:
                 continue
             if entry.name not in live_names:

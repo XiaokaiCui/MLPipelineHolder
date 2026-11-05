@@ -42,6 +42,9 @@ class MutationMixin:
         def _tree_declared_output_names(self) -> set[str]: ...
         def _tree_produced_value_names(self) -> set[str]: ...
         def _tree_constant_names(self) -> set[str]: ...
+        def _constant_conflict_names(
+            self, configs: dict[int, Any] | None = None,
+        ) -> set[str]: ...
         def _reject_managed_study_reuse(
             self,
             value: Any,
@@ -119,17 +122,13 @@ class MutationMixin:
         to_disk: bool = False,
     ) -> None:
         self._validate_builtin_name_conflict(variable_name, owner_label="pipeline constant")
-        if variable_name in self._visible_config_names():
+        if variable_name in self._constant_conflict_names():
+            if variable_name in self.list_declared_outputs():
+                raise RegistrationError(
+                    f"Constant name '{variable_name}' conflicts with a declared output name in this pipeline scope"
+                )
             raise RegistrationError(
                 f"Constant name '{variable_name}' conflicts with a visible configuration field"
-            )
-        if variable_name in self._tree_declared_output_names():
-            raise RegistrationError(
-                f"Constant name '{variable_name}' conflicts with a declared output name in the pipeline tree"
-            )
-        if variable_name in self._tree_produced_value_names():
-            raise RegistrationError(
-                f"Constant name '{variable_name}' conflicts with an existing produced value name in the pipeline tree"
             )
         previous_value = self.manual_values.get(variable_name)
         owner_key = f"{self.registration_name}.{variable_name}"

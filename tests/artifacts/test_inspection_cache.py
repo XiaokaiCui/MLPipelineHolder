@@ -1248,7 +1248,7 @@ class InspectionCacheTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             pipeline = self._pipeline(Path(tmp))
             uncopyable = UncopyableBothWays()
-            # Emulate an older pipeline with a constant that the new setter rejects.
+            # Emulate an older pipeline whose constant was stored by reference.
             pipeline.manual_values["lock"] = uncopyable
             pipeline.para_value_dict["lock"] = uncopyable
             with warnings.catch_warnings():

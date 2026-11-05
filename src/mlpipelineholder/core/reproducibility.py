@@ -26,12 +26,21 @@ from .models import (
     TorchStateArtifactRecord,
 )
 from ..exceptions import RegistrationError
-from ..integrations.dataframe import dump_dataframe, load_dataframe
+from ..integrations.dataframe import dump_dataframe
+from ..integrations.optuna.api import StudyArtifactOptions
 from ..integrations.optuna.support import (
     OPTUNA_STUDY_SERIALIZER,
     is_optuna_study,
 )
 from ..state.output_pointers import OutputPointer
+
+
+class _BaselineCaptureError(RegistrationError):
+    """A baseline publication failure attributed to one pipeline."""
+
+    def __init__(self, pipeline: Any, message: str) -> None:
+        super().__init__(message)
+        self.pipeline = pipeline
 
 
 @dataclass(frozen=True)
@@ -46,12 +55,28 @@ class _StudyBaseline:
     sampler: Any
 
 
+@dataclass(frozen=True)
+class _PendingStudyRestore:
+    """Managed Optuna state that is persisted only at commit time."""
+
+    pipeline: Any
+    variable_name: str
+    baseline: _StudyBaseline
+    physical_name: str
+    original_name: str
+    owner_kind: str
+    owner_key: str
+    db_path: Path
+
+
 @dataclass
 class _PreparedCleanStart:
     states: list[tuple[Any, Any, dict[str, Any]]]
     staged_artifacts: list[tuple[Any, ArtifactRecord | TorchStateArtifactRecord]]
     rollback_dir: Path
     output_backups: list[tuple[Path, Path]]
+    pending_studies: list[_PendingStudyRestore]
+    sqlite_backups: list[tuple[Path, Path, bool]]
 
 
 class ReproducibilityMixin:
@@ -79,8 +104,9 @@ class ReproducibilityMixin:
 
         def _root_pipeline(self) -> Any: ...
         def _iter_attached_pipelines(self) -> list[Any]: ...
-        def _tree_declared_output_names(self) -> set[str]: ...
-        def _visible_config_names(self) -> set[str]: ...
+        def _constant_conflict_names(
+            self, configs: dict[int, Any] | None = None,
+        ) -> set[str]: ...
         def _invalidate_all_outputs(self) -> None: ...
         def _invalidate_from_priority(self, priority: float) -> None: ...
         def _sorted_nodes(self) -> list[Any]: ...
@@ -90,6 +116,7 @@ class ReproducibilityMixin:
         def _resync_mirror_to_parent(self) -> None: ...
         def _unload_from_memory(self, object_names: Any = None) -> None: ...
         def _materialize_stored_value(self, value: Any, placeholder_error: str) -> Any: ...
+        def _optuna_studies_db_path_for_storage(self) -> Any: ...
         def config_as_dict(self) -> dict[str, Any]: ...
         @staticmethod
         def _config_name_mapping(config_obj: Any) -> dict[str, Any]: ...
@@ -219,9 +246,32 @@ class ReproducibilityMixin:
         if isinstance(value, ArtifactRecord):
             if value.serializer == OPTUNA_STUDY_SERIALIZER:
                 study = self._materialize_stored_value(value, "")
-                return self._write_pickle_baseline(
+                entry = self._write_pickle_baseline(
                     directory, index, self._study_baseline(study),
                 )
+                metadata = value.metadata if isinstance(value.metadata, dict) else {}
+                physical_name = metadata.get("study_name")
+                if not isinstance(physical_name, str) or not physical_name:
+                    physical_name = study.study_name
+                original_name = metadata.get("original_study_name")
+                if not isinstance(original_name, str) or not original_name:
+                    original_name = physical_name
+                owner_kind = metadata.get("study_owner_kind")
+                if not isinstance(owner_kind, str) or not owner_kind:
+                    owner_kind = "constant"
+                owner_key = metadata.get("study_owner_key")
+                if not isinstance(owner_key, str) or not owner_key:
+                    owner_key = f"{self.registration_name}.{name}"
+                entry.update(
+                    {
+                        "kind": "optuna",
+                        "study_name": physical_name,
+                        "original_study_name": original_name,
+                        "study_owner_kind": owner_kind,
+                        "study_owner_key": owner_key,
+                    }
+                )
+                return entry
             source = Path(value.file_path)
             target = directory / f"constant_{index}{source.suffix if source.is_file() else ''}"
             if source.is_dir():
@@ -266,13 +316,55 @@ class ReproducibilityMixin:
             raise
         return manifest, staging
 
+    def _recover_baseline_publication(self, pipeline: Any) -> None:
+        """Reconcile an interrupted baseline directory swap.
+
+        Publication moves the previous generation to a deterministic backup,
+        promotes the staged generation, then records the new manifest. A crash
+        can therefore leave a backup next to a promoted (but uncommitted)
+        generation. Keep the promoted generation only when the recorded
+        manifest is fully present; otherwise restore the previous generation.
+        """
+        metadata_root = Path(pipeline.metadata_root)
+        backup = metadata_root / ".clean-baseline-previous"
+        directory = pipeline._clean_baseline_root
+        if backup.exists() or backup.is_symlink():
+            manifest = pipeline._clean_constant_baseline
+            manifest_files: set[str] = set()
+            if isinstance(manifest, dict):
+                for entry in manifest.values():
+                    if isinstance(entry, dict) and isinstance(entry.get("file"), str):
+                        manifest_files.add(entry["file"])
+            committed = manifest is not None and all(
+                (directory / file_name).exists() for file_name in manifest_files
+            )
+            if committed:
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                if directory.exists() or directory.is_symlink():
+                    shutil.rmtree(directory, ignore_errors=True)
+                os.replace(backup, directory)
+        for staging in metadata_root.glob(".clean-baseline-stage-*"):
+            shutil.rmtree(staging, ignore_errors=True)
+
     def _capture_constant_baselines(self, pipelines: list[Any]) -> None:
         """Stage the entire tree first; publish all manifests or roll them back."""
+        for pipeline in pipelines:
+            self._recover_baseline_publication(pipeline)
         staged: list[tuple[Any, dict[str, dict[str, Any]], Path]] = []
         published: list[tuple[Any, dict[str, dict[str, Any]] | None, Path | None]] = []
         try:
             for pipeline in pipelines:
-                manifest, staging = pipeline._stage_constant_baseline()
+                try:
+                    manifest, staging = pipeline._stage_constant_baseline()
+                except Exception as exc:
+                    if isinstance(exc, _BaselineCaptureError):
+                        raise
+                    raise _BaselineCaptureError(
+                        pipeline,
+                        f"Constant baseline for '{pipeline.registration_name}' could not be "
+                        f"captured: {type(exc).__name__}: {exc}",
+                    ) from exc
                 staged.append((pipeline, manifest, staging))
             self._validate_constant_snapshot_names(
                 [(pipeline, manifest) for pipeline, manifest, _ in staged]
@@ -280,8 +372,16 @@ class ReproducibilityMixin:
             for pipeline, manifest, staging in staged:
                 directory = pipeline._clean_baseline_root
                 if directory.is_symlink():
-                    raise RegistrationError(f"Refusing to replace symlinked clean baseline: {directory}")
-                backup = Path(pipeline.metadata_root) / f".clean-baseline-old-{uuid4().hex}"
+                    raise _BaselineCaptureError(
+                        pipeline,
+                        f"Refusing to replace symlinked clean baseline: {directory}",
+                    )
+                backup = Path(pipeline.metadata_root) / ".clean-baseline-previous"
+                if backup.exists() or backup.is_symlink():
+                    raise _BaselineCaptureError(
+                        pipeline,
+                        f"Refusing to replace a baseline with an unresolved backup: {backup}",
+                    )
                 old_manifest = pipeline._clean_constant_baseline
                 had_baseline = directory.exists()
                 if had_baseline:
@@ -314,25 +414,46 @@ class ReproducibilityMixin:
     def _validate_constant_snapshot_names(
         self, snapshots: list[tuple[Any, dict[str, dict[str, Any]]]],
     ) -> None:
-        declared = self._root_pipeline()._tree_declared_output_names()
+        root = self._root_pipeline()
+        definition_configs = {
+            id(pipeline): pipeline._clean_config_baseline
+            for pipeline in root._iter_attached_pipelines()
+        }
         for pipeline, snapshot in snapshots:
-            visible_config: set[str] = set()
-            ancestor = pipeline
-            while ancestor is not None:
-                visible_config.update(ancestor._config_name_mapping(ancestor._clean_config_baseline))
-                ancestor = ancestor.parent_pipeline
-            conflicts = set(snapshot) & (visible_config | declared)
+            conflicts = set(snapshot) & pipeline._constant_conflict_names(
+                definition_configs
+            )
             if conflicts:
-                raise RegistrationError(
+                raise _BaselineCaptureError(
+                    pipeline,
                     f"Clean baseline for '{pipeline.registration_name}' conflicts with current registration: "
-                    f"{sorted(conflicts)}"
+                    f"{sorted(conflicts)}",
                 )
 
     def _ensure_constant_baselines(self, *, required: bool = False) -> None:
-        """Attempt automatic capture once; ordinary runs survive capture failures."""
+        """Capture missing baselines for the requested scope.
+
+        Ordinary execution keeps the first-execution contract: the first
+        execution entry anywhere in the attached tree attempts a root-wide
+        capture. A clean start only depends on the state in the pipeline it was
+        called on, so a required capture on a child is restricted to that
+        subtree and never stages, validates, or marks unrelated pipelines.
+        """
         root = self._root_pipeline()
-        pipelines = root._iter_attached_pipelines()
         selected = self._iter_attached_pipelines()
+        capture_scope = selected if required else root._iter_attached_pipelines()
+        for pipeline in capture_scope:
+            try:
+                self._recover_baseline_publication(pipeline)
+            except Exception as exc:
+                message = (
+                    f"Could not recover interrupted baseline publication for "
+                    f"'{pipeline.registration_name}': {type(exc).__name__}: {exc}"
+                )
+                pipeline._clean_baseline_error = message
+                if required and pipeline in selected:
+                    raise RegistrationError(message) from exc
+                self.logger.warning(message)
         failed = [pipeline for pipeline in selected if pipeline._clean_baseline_error]
         if failed and required:
             raise RegistrationError(
@@ -340,21 +461,33 @@ class ReproducibilityMixin:
                 f"{failed[0]._clean_baseline_error}; call snapshot_constants() after repairing constants"
             )
         pending = [
-            pipeline for pipeline in pipelines
+            pipeline for pipeline in capture_scope
             if pipeline._clean_constant_baseline is None and pipeline._clean_baseline_error is None
         ]
         if not pending:
             return
         try:
             root._capture_constant_baselines(pending)
+        except _BaselineCaptureError as exc:
+            exc.pipeline._clean_baseline_error = str(exc)
+            if required and exc.pipeline in selected:
+                raise RegistrationError(
+                    f"Clean baseline unavailable for '{exc.pipeline.registration_name}': "
+                    f"{exc}; call snapshot_constants() after repairing constants"
+                ) from exc
+            self.logger.warning(
+                "Automatic constant baseline unavailable; ordinary execution continues. "
+                f"Call snapshot_constants() after repairing constants. {exc}"
+            )
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
-            for pipeline in pending:
-                pipeline._clean_baseline_error = message
-            if required and any(pipeline in selected for pipeline in pending):
-                raise RegistrationError(f"Clean baseline unavailable: {message}") from exc
+            if required and self in selected:
+                self._clean_baseline_error = message
+                raise RegistrationError(
+                    f"Clean baseline unavailable: {message}"
+                ) from exc
             self.logger.warning(
-                f"Automatic constant baseline unavailable; ordinary execution continues. "
+                "Automatic constant baseline unavailable; ordinary execution continues. "
                 f"Call snapshot_constants() after repairing constants. {message}"
             )
         else:
@@ -389,12 +522,48 @@ class ReproducibilityMixin:
 
     def _baseline_source(self, name: str, entry: dict[str, Any]) -> Path:
         file_name = entry.get("file")
-        if not isinstance(file_name, str) or Path(file_name).name != file_name:
+        if not isinstance(file_name, str) or not file_name:
             raise RegistrationError(f"Constant '{name}' has an invalid baseline file name")
-        source = self._clean_baseline_root / file_name
-        if source.is_symlink() or not source.exists():
-            raise RegistrationError(f"Constant '{name}' baseline file is missing or unsafe: {source}")
-        return source
+        candidate = Path(file_name)
+        if (
+            candidate.is_absolute()
+            or len(candidate.parts) != 1
+            or candidate.name in {"", ".", ".."}
+            or candidate.name != file_name
+        ):
+            raise RegistrationError(f"Constant '{name}' has an unsafe baseline file name")
+        root = self._clean_baseline_root
+        if root.is_symlink():
+            raise RegistrationError(
+                f"Constant '{name}' baseline root is a symlink: {root}"
+            )
+        source = root / candidate
+        if source.is_symlink():
+            raise RegistrationError(
+                f"Constant '{name}' baseline file is a symlink: {source}"
+            )
+        try:
+            root_resolved = root.resolve(strict=True)
+            source_resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RegistrationError(
+                f"Constant '{name}' baseline file is missing or unsafe: {source}"
+            ) from exc
+        if root_resolved not in source_resolved.parents:
+            raise RegistrationError(
+                f"Constant '{name}' baseline path escapes the trusted baseline root: {source}"
+            )
+        if source_resolved.is_dir():
+            for current, dirnames, filenames in os.walk(
+                source_resolved, followlinks=False,
+            ):
+                for child in (*dirnames, *filenames):
+                    child_path = Path(current) / child
+                    if child_path.is_symlink():
+                        raise RegistrationError(
+                            f"Constant '{name}' baseline directory contains a symlink: {child_path}"
+                        )
+        return source_resolved
 
     def _load_baseline_entry(self, name: str, entry: dict[str, Any]) -> Any:
         kind = entry.get("kind")
@@ -431,26 +600,204 @@ class ReproducibilityMixin:
                 object_kind=entry["object_kind"],
                 metadata=dict(metadata),
             )
+        if kind == "optuna":
+            physical_name = entry.get("study_name")
+            original_name = entry.get("original_study_name")
+            owner_kind = entry.get("study_owner_kind")
+            owner_key = entry.get("study_owner_key")
+            if not (
+                isinstance(physical_name, str)
+                and physical_name
+                and isinstance(original_name, str)
+                and original_name
+                and isinstance(owner_kind, str)
+                and owner_kind
+                and isinstance(owner_key, str)
+                and owner_key
+            ):
+                raise RegistrationError(
+                    f"Constant '{name}' has invalid Optuna baseline metadata"
+                )
+            with source.open("rb") as handle:
+                baseline = pickle.load(handle)
+            if not isinstance(baseline, _StudyBaseline):
+                raise RegistrationError(
+                    f"Constant '{name}' has an invalid Optuna baseline payload"
+                )
+            return _PendingStudyRestore(
+                pipeline=self,
+                variable_name=name,
+                baseline=baseline,
+                physical_name=physical_name,
+                original_name=original_name,
+                owner_kind=owner_kind,
+                owner_key=owner_key,
+                db_path=Path(self._optuna_studies_db_path_for_storage()),
+            )
         if kind == "dask":
-            return load_dataframe("parquet", source)
+            # Restore into an independent managed generation. A lazy Dask graph
+            # must never reference the replaceable baseline directory itself:
+            # later snapshots (and their cleanup) may replace it while the
+            # restored constant is still live.
+            destination = self.artifact_store.copy_artifact_file(
+                source, name, function_name="constant_dask",
+            )
+            return ArtifactRecord(
+                variable_name=name,
+                serializer="parquet",
+                file_path=str(destination),
+                produced_by_block="clean_baseline",
+                produced_by_function="constant",
+                run_id="clean_baseline",
+                torch_load_weights_only=False,
+                metadata={
+                    "python_type": "dask.dataframe.core.DataFrame",
+                    "clean_baseline_generation": "dask",
+                },
+            )
         if kind == "pickle":
             with source.open("rb") as handle:
                 value = pickle.load(handle)
             if isinstance(value, _StudyBaseline):
-                return self._rebuild_study(value)
+                return _PendingStudyRestore(
+                    pipeline=self,
+                    variable_name=name,
+                    baseline=value,
+                    physical_name=value.name,
+                    original_name=value.name,
+                    owner_kind="constant",
+                    owner_key=f"{self.registration_name}.{name}",
+                    db_path=Path(self._optuna_studies_db_path_for_storage()),
+                )
             return value
         raise RegistrationError(
             f"Constant '{name}' has an unrestorable legacy baseline; "
             "replace the constant and call snapshot_constants()"
         )
 
-    def _discard_prepared_artifacts(self, prepared: _PreparedCleanStart) -> None:
+    def _backup_sqlite_database(
+        self, prepared: _PreparedCleanStart, db_path: Path,
+    ) -> None:
+        """Snapshot one shared SQLite database before a managed restore writes it."""
+        resolved = Path(db_path).expanduser()
+        key = resolved.resolve() if resolved.exists() else resolved.absolute()
+        if any(existing == key for existing, _, _ in prepared.sqlite_backups):
+            return
+        backup = prepared.rollback_dir / f"sqlite_{uuid4().hex}.db"
+        if not resolved.exists():
+            prepared.sqlite_backups.append((resolved, backup, False))
+            return
+        import sqlite3
+
+        source = sqlite3.connect(resolved, timeout=30)
+        target = sqlite3.connect(backup, timeout=30)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+        prepared.sqlite_backups.append((resolved.resolve(), backup, True))
+
+    def _materialize_pending_studies(self, prepared: _PreparedCleanStart) -> None:
+        """Persist managed Optuna baselines at commit time and collect their records."""
+        constants_by_pipeline = {
+            id(pipeline): constants for pipeline, _, constants in prepared.states
+        }
+        for pending in prepared.pending_studies:
+            self._backup_sqlite_database(prepared, pending.db_path)
+            study = self._rebuild_study(pending.baseline)
+            generation_dir = (
+                pending.pipeline.artifact_store.artifact_root / "clean_baseline"
+            )
+            before = (
+                {entry.name for entry in generation_dir.iterdir()}
+                if generation_dir.is_dir()
+                else set()
+            )
+            try:
+                record = pending.pipeline.artifact_store.save(
+                    variable_name=pending.variable_name,
+                    value=study,
+                    block_name="clean_baseline",
+                    function_name="constant",
+                    run_id="clean_baseline",
+                    optuna_db_path=pending.db_path,
+                    optuna_options=StudyArtifactOptions(
+                        independent_copy=False,
+                        study_name=pending.physical_name,
+                        original_study_name=pending.original_name,
+                        owner_kind=pending.owner_kind,
+                        owner_key=pending.owner_key,
+                        preserve_system_attrs=True,
+                    ),
+                )
+            except BaseException:
+                if generation_dir.is_dir():
+                    for entry in generation_dir.iterdir():
+                        if entry.name in before:
+                            continue
+                        if entry.is_dir():
+                            shutil.rmtree(entry, ignore_errors=True)
+                        else:
+                            entry.unlink(missing_ok=True)
+                raise
+            prepared.staged_artifacts.append((pending.pipeline, record))
+            constants_by_pipeline[id(pending.pipeline)][pending.variable_name] = record
+
+    def _restore_sqlite_backups(self, prepared: _PreparedCleanStart) -> None:
+        """Revert databases modified by managed-study restoration."""
+        import sqlite3
+
+        for db_path, backup, existed in reversed(prepared.sqlite_backups):
+            try:
+                if not existed:
+                    for suffix in ("-wal", "-shm"):
+                        sidecar = Path(f"{db_path}{suffix}")
+                        if sidecar.exists():
+                            sidecar.unlink()
+                    if db_path.exists():
+                        db_path.unlink()
+                    continue
+                if not backup.exists():
+                    raise FileNotFoundError(
+                        f"SQLite rollback backup is missing: {backup}"
+                    )
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(f"{db_path}{suffix}")
+                    if sidecar.exists():
+                        sidecar.unlink()
+                source = sqlite3.connect(backup, timeout=30)
+                target = sqlite3.connect(db_path)
+                try:
+                    source.backup(target)
+                finally:
+                    target.close()
+                    source.close()
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not roll back Optuna database '{db_path}': "
+                    f"{type(exc).__name__}: {exc}. A recovery copy is retained."
+                )
+                recovery = db_path.with_name(
+                    f"{db_path.name}.rollback-{uuid4().hex}.bak"
+                )
+                try:
+                    if backup.exists():
+                        shutil.copy2(backup, recovery)
+                except OSError:
+                    pass
+
+    def _discard_prepared_artifacts(
+        self, prepared: _PreparedCleanStart, *, keep_rollback_dir: bool = False,
+    ) -> None:
+        self._restore_sqlite_backups(prepared)
         for pipeline, record in prepared.staged_artifacts:
             try:
                 pipeline.artifact_store.delete(record)
             except OSError as exc:
                 self.logger.warning(f"Could not remove staged clean artifact '{record.file_path}': {exc}")
-        shutil.rmtree(prepared.rollback_dir, ignore_errors=True)
+        if not keep_rollback_dir:
+            shutil.rmtree(prepared.rollback_dir, ignore_errors=True)
 
     def _prepare_clean_start(self) -> _PreparedCleanStart:
         if self._root_pipeline()._invalidation_forbidden:
@@ -476,22 +823,15 @@ class ReproducibilityMixin:
                 ) from exc
             manifests.append((pipeline, config, manifest))
         configs = {id(pipeline): config for pipeline, config, _ in manifests}
-        declared = self._tree_declared_output_names()
         for pipeline, _, constants in manifests:
-            visible_config_names: set[str] = set()
-            ancestor = pipeline
-            while ancestor is not None:
-                config = configs.get(id(ancestor), ancestor._config)
-                visible_config_names.update(ancestor._config_name_mapping(config))
-                ancestor = ancestor.parent_pipeline
-            conflicts = set(constants) & (visible_config_names | declared)
+            conflicts = set(constants) & pipeline._constant_conflict_names(configs)
             if conflicts:
                 raise RegistrationError(
                     f"Clean baseline for '{pipeline.registration_name}' conflicts with current registration: "
                     f"{sorted(conflicts)}"
                 )
         rollback_dir = Path(tempfile.mkdtemp(prefix=".clean-start-rollback-", dir=self.metadata_root))
-        prepared = _PreparedCleanStart([], [], rollback_dir, [])
+        prepared = _PreparedCleanStart([], [], rollback_dir, [], [], [])
         try:
             for pipeline, config, manifest in manifests:
                 constants: dict[str, Any] = {}
@@ -499,6 +839,8 @@ class ReproducibilityMixin:
                     value = pipeline._load_baseline_entry(name, entry)
                     if isinstance(value, (ArtifactRecord, TorchStateArtifactRecord)):
                         prepared.staged_artifacts.append((pipeline, value))
+                    elif isinstance(value, _PendingStudyRestore):
+                        prepared.pending_studies.append(value)
                     if isinstance(value, (OutputPointer, RuntimeValueReference, DataclassValueReference)):
                         raise RegistrationError(
                             f"Constant '{name}' has an unrestorable legacy baseline; "
@@ -506,6 +848,12 @@ class ReproducibilityMixin:
                         )
                     constants[name] = value
                 prepared.states.append((pipeline, config, constants))
+            # Deferred optimization: these copies guarantee rollback safety but
+            # temporarily require disk space proportional to the selected
+            # subtree's disk-backed outputs. A staged-deletion design would
+            # avoid the copy at the cost of more complex pointer/shared-file
+            # handling; the current requirement is documented in the API
+            # reference.
             seen: set[Path] = set()
             for pipeline in self._iter_attached_pipelines():
                 for outputs in pipeline.producer_outputs.values():
@@ -552,6 +900,7 @@ class ReproducibilityMixin:
                 "clean_start=True restores definition-time configurations and saved constant "
                 "values, discarding later configuration and constant changes"
             )
+            self._materialize_pending_studies(prepared)
             if self.nodes:
                 self._invalidate_from_priority(self._sorted_nodes()[0].execution_priority)
             self._invalidate_all_outputs()
@@ -560,34 +909,81 @@ class ReproducibilityMixin:
                     pipeline._config = config
                 pipeline.manual_values = constants
                 pipeline._unload_from_memory()
+                pipeline._inspection_copy_skipped.clear()
                 pipeline._expression_runtime_namespace_cache = None
                 pipeline._gate_cleanup_predecided = True
             for pipeline, _, _ in reversed(prepared.states):
                 pipeline._rebuild_visible_state(pipeline._incoming_parent_outputs())
             if self.parent_pipeline is not None:
                 self._resync_mirror_to_parent()
-        except BaseException:
+        except BaseException as exc:
+            recovery_errors: list[str] = []
+            preserve_rollback_dir = False
             for original, backup in prepared.output_backups:
-                if original.is_dir():
-                    shutil.rmtree(original)
-                elif original.exists():
-                    original.unlink()
-                original.parent.mkdir(parents=True, exist_ok=True)
-                if backup.is_dir():
-                    shutil.copytree(backup, original)
-                else:
-                    shutil.copy2(backup, original)
+                try:
+                    if original.is_dir():
+                        shutil.rmtree(original)
+                    elif original.exists():
+                        original.unlink()
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    if backup.is_dir():
+                        shutil.copytree(backup, original)
+                    else:
+                        shutil.copy2(backup, original)
+                except Exception as recovery_exc:
+                    recovery = original.with_name(
+                        f".{original.name}.rollback-{uuid4().hex}"
+                    )
+                    try:
+                        if backup.is_dir():
+                            shutil.copytree(backup, recovery)
+                        else:
+                            shutil.copy2(backup, recovery)
+                    except OSError:
+                        try:
+                            backup.replace(recovery)
+                        except OSError:
+                            recovery = backup
+                            preserve_rollback_dir = True
+                    message = (
+                        f"Could not restore artifact '{original}' during clean-start "
+                        f"rollback: {type(recovery_exc).__name__}: {recovery_exc}; "
+                        f"recovery copy retained at '{recovery}'"
+                    )
+                    recovery_errors.append(message)
+                    self.logger.warning(message)
             for (pipeline, state, config, namespace, gate, bindings, entries, skipped) in snapshots:
-                pipeline._config = config
-                pipeline._restore_runtime_state(state)
-                pipeline._expression_runtime_namespace_cache = namespace
-                pipeline._gate_cleanup_predecided = gate
-                pipeline._inspection_cache_bindings = bindings
-                pipeline._inspection_cache_entries = entries
-                pipeline._inspection_copy_skipped = skipped
+                try:
+                    pipeline._config = config
+                    pipeline._restore_runtime_state(state)
+                    pipeline._expression_runtime_namespace_cache = namespace
+                    pipeline._gate_cleanup_predecided = gate
+                    pipeline._inspection_cache_bindings = bindings
+                    pipeline._inspection_cache_entries = entries
+                    pipeline._inspection_copy_skipped = skipped
+                except Exception as recovery_exc:
+                    message = (
+                        f"Could not restore runtime state for pipeline "
+                        f"'{pipeline.registration_name}' during clean-start rollback: "
+                        f"{type(recovery_exc).__name__}: {recovery_exc}"
+                    )
+                    recovery_errors.append(message)
+                    self.logger.warning(message)
             root._optuna_study_group_names = group_names
             root._optuna_study_group_addresses = group_addresses
-            self._discard_prepared_artifacts(prepared)
+            try:
+                self._discard_prepared_artifacts(
+                    prepared, keep_rollback_dir=preserve_rollback_dir
+                )
+            except Exception as cleanup_exc:
+                message = (
+                    f"Clean-start rollback cleanup failed: "
+                    f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                )
+                recovery_errors.append(message)
+                self.logger.warning(message)
+            for message in recovery_errors:
+                exc.add_note(message)
             raise
         shutil.rmtree(prepared.rollback_dir, ignore_errors=True)
         for pipeline, values in old_constants:

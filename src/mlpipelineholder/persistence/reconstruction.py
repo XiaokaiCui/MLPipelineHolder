@@ -117,6 +117,7 @@ class ReconstructionMixin:
         pipeline._clean_baseline_error = payload.get("clean_baseline_error")
         pipeline._seed = payload.get("seed") if parent is None else None
         pipeline._deterministic_torch = payload.get("deterministic_torch", False) if parent is None else False
+        pipeline._recover_baseline_publication(pipeline)
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)
         if parent is not None:

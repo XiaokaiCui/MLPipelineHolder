@@ -117,14 +117,18 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
                     "Saved pipeline has an invalid constant baseline name"
                 )
             if isinstance(entry, bytes):
-                # Legacy in-memory baseline from a development save; it is
-                # discarded and recaptured on the next execution entry.
+                # Legacy in-memory baseline from a development save. It is
+                # retained so clean_start reports a migration error instead of
+                # silently recapturing different values; replace the constant
+                # and call snapshot_constants() to migrate it.
                 continue
             if not isinstance(entry, dict):
                 raise PersistenceError(
                     "Saved pipeline has an invalid constant baseline entry"
                 )
-            if entry.get("kind") not in {"artifact", "torch_state", "dask", "pickle"}:
+            if entry.get("kind") not in {
+                "artifact", "torch_state", "dask", "pickle", "optuna",
+            }:
                 raise PersistenceError(
                     "Saved pipeline has an unknown constant baseline kind"
                 )
@@ -132,6 +136,17 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
                 raise PersistenceError(
                     "Saved pipeline has an invalid constant baseline file"
                 )
+            if entry["kind"] == "optuna":
+                for field in (
+                    "study_name",
+                    "original_study_name",
+                    "study_owner_kind",
+                    "study_owner_key",
+                ):
+                    if not isinstance(entry.get(field), str) or not entry[field]:
+                        raise PersistenceError(
+                            "Saved pipeline has invalid Optuna baseline metadata"
+                        )
             if entry["kind"] == "artifact" and (
                 not isinstance(entry.get("serializer"), str)
                 or not isinstance(entry.get("torch_load_weights_only", False), bool)

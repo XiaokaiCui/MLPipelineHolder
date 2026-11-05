@@ -276,7 +276,7 @@ class ExecutionInspectionTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             value = Uncopyable()
             pipeline = PipelineHandler("root", {}, Path(tmp) / "root")
-            # Legacy uncopyable constant: new registrations reject this value.
+            # Legacy uncopyable constant stored by reference.
             pipeline.manual_values["value"] = value
             pipeline.para_value_dict["value"] = value
             block = pipeline.add_block("use", 1)

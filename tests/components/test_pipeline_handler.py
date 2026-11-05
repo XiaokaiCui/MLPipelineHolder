@@ -2438,7 +2438,7 @@ class PipelineHandlerTests(unittest.TestCase):
             with self.assertRaises(RegistrationError):
                 root.set_constant_value("seed", 5)
 
-    def test_set_constant_value_rejects_sibling_produced_value_name(self) -> None:
+    def test_set_constant_value_allows_sibling_only_output_name(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             root = PipelineHandler("root", DemoConfig(base=2), tmp_path / "root")
@@ -2450,8 +2450,11 @@ class PipelineHandlerTests(unittest.TestCase):
             root.add_child_pipeline(sibling_b, 20)
             root.run_all()
 
-            with self.assertRaises(RegistrationError):
-                sibling_b.set_constant_value("seed", 5)
+            sibling_b.set_constant_value("seed", 5)
+            self.assertEqual(sibling_b.get_constant_value("seed"), 5)
+            root.snapshot_constants()
+            root.run_all(clean_start=True)
+            self.assertEqual(sibling_b.get_constant_value("seed"), 5)
 
     def test_register_function_skips_output_conflicting_with_constant(self) -> None:
         with TemporaryDirectory() as temp_dir:
