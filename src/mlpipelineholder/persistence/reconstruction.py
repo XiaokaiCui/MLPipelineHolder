@@ -105,6 +105,19 @@ class ReconstructionMixin:
             ),
             pipeline_backup_directory=payload.get("pipeline_backup_directory"),
         )
+        pipeline._clean_config_baseline = cls._deserialize_saved_config(
+            payload.get("definition_config", payload["config"]),
+            verbose=verbose,
+            warn=reconstruction_warnings.append,
+        )
+        saved_baseline = payload.get("clean_constant_baseline")
+        # Keep legacy in-memory baselines for an explicit clean-start error.
+        # Silently recapturing current values would replace their original baseline.
+        pipeline._clean_constant_baseline = saved_baseline
+        pipeline._clean_baseline_error = payload.get("clean_baseline_error")
+        pipeline._seed = payload.get("seed") if parent is None else None
+        pipeline._deterministic_torch = payload.get("deterministic_torch", False) if parent is None else False
+        pipeline._recover_baseline_publication(pipeline)
         for message in reconstruction_warnings:
             pipeline.logger.warning(message)
         if parent is not None:
@@ -132,11 +145,13 @@ class ReconstructionMixin:
                 block = pipeline.add_block(
                     node_payload["registration_name"],
                     node_payload["execution_priority"],
+                    exclude_self_outputs=node_payload.get("exclude_self_outputs", []),
                 )
                 if block is None:
                     block = pipeline._add_block_strict(
                         node_payload["registration_name"],
                         node_payload["execution_priority"],
+                        exclude_self_outputs=node_payload.get("exclude_self_outputs", []),
                     )
                 for args_payload in node_payload.get("registered_args", []):
                     block.register_args(

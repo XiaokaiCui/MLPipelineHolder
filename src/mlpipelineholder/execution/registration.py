@@ -147,6 +147,8 @@ class AtomRegistrationMixin:
         )
 
     def _atom_block_equal(self, old_block: Any, new_block: Any) -> bool:
+        if old_block.exclude_self_outputs != new_block.exclude_self_outputs:
+            return False
         if old_block.execution_priority != new_block.execution_priority:
             return False
         if len(old_block.functions) != len(new_block.functions):
@@ -293,17 +295,21 @@ class RegistrationMixin:
         def _pipeline_by_name(self, pipeline_name: str) -> Any: ...
         def _node_declared_outputs(self, node: Any) -> set[str]: ...
         def _create_execution_block(
-            self, registration_name: str, execution_priority: float
+            self, registration_name: str, execution_priority: float,
+            *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
         ) -> Any: ...
         @staticmethod
         def _is_execution_block(node: Any) -> bool: ...
 
     def add_block(
-        self: Any, registration_name: str, execution_priority: float, forced: bool = True
+        self: Any, registration_name: str, execution_priority: float, forced: bool = True,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         validate_registration_name(registration_name, owner_label="block")
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
-        block = self._create_execution_block(registration_name, execution_priority)
+        block = self._create_execution_block(
+            registration_name, execution_priority, exclude_self_outputs=exclude_self_outputs,
+        )
         conflicts = self._registration_conflicts(block, execution_priority)
         self._raise_on_priority_conflict_with_different_name(
             registration_name,
@@ -316,6 +322,7 @@ class RegistrationMixin:
             and existing_block is not None
             and self._is_execution_block(existing_block)
             and existing_block.execution_priority == execution_priority
+            and existing_block.exclude_self_outputs == block.exclude_self_outputs
             and len(existing_block.functions) == 1
             and isinstance(existing_block.functions[0], ExpressionRegistration)
         ):
@@ -336,10 +343,15 @@ class RegistrationMixin:
             return None
         return block
 
-    def _add_block_strict(self: Any, registration_name: str, execution_priority: float):
+    def _add_block_strict(
+        self: Any, registration_name: str, execution_priority: float,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
+    ):
         validate_registration_name(registration_name, owner_label="block")
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
-        block = self._create_execution_block(registration_name, execution_priority)
+        block = self._create_execution_block(
+            registration_name, execution_priority, exclude_self_outputs=exclude_self_outputs,
+        )
         self._register_node(block)
         return block
 
@@ -423,6 +435,9 @@ class RegistrationMixin:
             child_pipeline._invalidation_forbidden = self._invalidation_forbidden
             child_pipeline._sync_invalidation_flag()
         self._register_node(child_pipeline)
+        self._root_pipeline()._warn_seeded_parallel_blocks(
+            child_pipeline._iter_attached_pipelines()
+        )
         if child_pipeline.para_value_dict:
             self.producer_outputs[child_pipeline.registration_name] = (
                 child_pipeline._locally_produced_outputs()
@@ -506,6 +521,7 @@ class RegistrationMixin:
         *,
         param_mapping: dict[str, str | None] | None = None,
         overridden_outputs: dict[str, tuple[str, str]] | None = None,
+        exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> None:
         atom_cls: Any = atom_pipeline_class()
         atom_cls.create(
@@ -524,6 +540,7 @@ class RegistrationMixin:
             block_priority=block_priority,
             param_mapping=param_mapping,
             overridden_outputs=overridden_outputs,
+            exclude_self_outputs=exclude_self_outputs,
         )
 
     def _validate_strict_attach(

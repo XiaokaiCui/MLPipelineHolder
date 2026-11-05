@@ -73,7 +73,8 @@ class ExecutionBlock:
     """Represents one priority level whose registered functions run in parallel."""
 
     def __init__(
-        self, parent: PipelineHolder, registration_name: str, execution_priority: float
+        self, parent: PipelineHolder, registration_name: str, execution_priority: float,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> None:
         self.parent = parent
         self.registration_name = validate_registration_name(
@@ -82,6 +83,15 @@ class ExecutionBlock:
         )
         validate_execution_priority(execution_priority, owner_label="block", allow_none=False)
         self.execution_priority = execution_priority
+        if exclude_self_outputs is not None and (
+            not isinstance(exclude_self_outputs, (list, tuple, set, frozenset))
+            or any(
+                not isinstance(name, str) or not name or name == "_"
+                for name in exclude_self_outputs
+            )
+        ):
+            raise RegistrationError("exclude_self_outputs must contain non-empty output names")
+        self.exclude_self_outputs: frozenset[str] = frozenset(exclude_self_outputs or ())
         self.functions: list[FunctionRegistration | ExpressionRegistration] = []
         self.registered_args: dict[str, BlockArgsRegistration] = {}
         self.registered_kwargs: dict[str, BlockKwargsRegistration] = {}
@@ -760,6 +770,10 @@ class ExecutionBlock:
         if commit:
             self.functions.append(registration)
             self.parent._register_node(self)
+            if len(self.functions) == 2:
+                self.parent._root_pipeline()._warn_seeded_parallel_blocks(
+                    [self.parent], only_block=self
+                )
         return registration
 
     def _warn_on_unmapped_resolvable_inputs(
@@ -1562,11 +1576,15 @@ class ExecutionBlock:
         )
         for constant_name in visible_constants:
             visible_outputs.pop(constant_name, None)
-        previous = dict(
+        previous_values = (
             self.parent.producer_outputs.get(self.registration_name, {})
             if previous_outputs is None
             else previous_outputs
         )
+        previous = {
+            name: value for name, value in previous_values.items()
+            if name not in self.exclude_self_outputs
+        }
         visible_outputs.update(previous)
         return (
             visible_outputs,

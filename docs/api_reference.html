@@ -209,7 +209,7 @@ mark { background: #ffedb5; color: #382b00; border-radius: 2px; }
   <div class="eyebrow">Public API · Developer reference</div>
   <h1>MLPipelineHolder</h1>
   <p>Build, inspect, and evolve your experiments.<br>Every class, method, and model, organised around the way you work.</p>
-  <div class="hero-meta"><span class="badge">v0.4.5</span><span class="badge">Python &ge; 3.11</span><span class="badge">Offline-ready reference</span></div>
+  <div class="hero-meta"><span class="badge">v0.4.6</span><span class="badge">Python &ge; 3.11</span><span class="badge">Offline-ready reference</span></div>
 </header>
 
 <div class="app-bar">
@@ -626,18 +626,23 @@ pipeline.refresh_loaded_objects()</pre></div>
 <section class="reference-page" data-section="pipelineholder" data-label="Blocks &amp; child pipelines" aria-labelledby="pipeline-registration">
 <h2 class="section" id="pipeline-registration">Blocks &amp; child pipelines</h2>
 <h4 class="method-name" id="PipelineHolder.add_block">add_block()</h4>
-<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">ExecutionBlock | None</span></div>
+<div class="sig"><span class="kw">add_block</span>(registration_name: <span class="arg">str</span>, execution_priority: <span class="arg">float</span>, forced: <span class="arg">bool</span> = True, *, exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None) -&gt; <span class="ret">ExecutionBlock | None</span></div>
 <p>Registers a new execution block. Blocks run in ascending priority order; functions registered inside one block run in parallel and therefore cannot depend on each other's outputs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>registration_name</code>: unique public name used for lookup, path targeting, logs, and persistence.</li>
   <li><code>execution_priority</code>: numeric position in this pipeline. Priorities with the same integer part form an alternative group.</li>
   <li><code>forced</code>: replace a conflicting node by default; pass <code>False</code> to log a warning and return <code>None</code> instead. Replacement may remove the prior node's outputs and invalidate dependent outputs.</li>
+  <li><code>exclude_self_outputs</code>: output names whose previous committed values this block must not reuse as inputs during targeted reruns or inspection. An earlier node's same-named output remains visible; other inputs retain normal resolution precedence. Default: empty.</li>
 </ul>
 <p>Returns the new <code>ExecutionBlock</code>, an identical existing expression block during a forced re-registration, or <code>None</code> when non-strict registration is skipped. Invalid names and strict-mode conflicts raise <code>RegistrationError</code>.</p>
 
 <div class="field-label">Returns</div><p>The registered <code>ExecutionBlock</code>, an existing equivalent expression block, or <code>None</code> when registration is skipped. Invalid priorities raise <code>RegistrationError</code> before mutation; priorities must be finite, non-negative real numbers, excluding bool.</p>
-<div class="example"><div class="example-title">Example</div><pre>training = pipeline.add_block("training", 2)</pre></div>
+<div class="example"><div class="example-title">Example</div><pre>def transform(value):
+    return value + 1
+
+training = pipeline.add_block("training", 2, exclude_self_outputs={"value"})
+training.register_function(transform, ["value"], param_mapping={"value": "value"})</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.add_child_pipeline">add_child_pipeline()</h4>
 <div class="sig"><span class="kw">add_child_pipeline</span>(child_pipeline: <span class="arg">PipelineHolder</span>, execution_priority: <span class="arg">float</span>, registration_name: <span class="arg">str | None</span> = None, forced: <span class="arg">bool</span> = True) -&gt; <span class="ret">PipelineHolder | None</span></div>
@@ -672,7 +677,8 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
   block_priority: <span class="arg">float</span> = 10.0,
   *,
   param_mapping: <span class="arg">dict[str, str | None] | None</span> = None,
-  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None
+  overridden_outputs: <span class="arg">dict[str, tuple[str, str]] | None</span> = None,
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Builds and attaches a single-function child pipeline around <code>target_function</code>, wiring gate configuration, parameter mapping, positional and keyword arguments, and disk-backed outputs in one call.</p>
@@ -692,6 +698,7 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
   <li><code>block_priority</code>: priority of the atom's internal implementation block.</li>
   <li><code>param_mapping</code>: preferred keyword-only parameter-to-pipeline-name mapping.</li>
   <li><code>overridden_outputs</code>: current output name to globally-upstream <code>(pipeline_name, node_name)</code> address.</li>
+  <li><code>exclude_self_outputs</code>: names of the atom's previous outputs to ignore as its own inputs during targeted reruns or inspection; upstream values with those names remain available.</li>
 </ul>
 <p>The created atom child is <strong>immutable</strong>: after creation, adding blocks, child pipelines, functions, expressions, args/kwargs helpers, gates, or local configuration to it raises <code>RegistrationError</code>; constant values remain mutable. Atom creation always reuses its framework-managed child directory and never prompts for or controls directory cleanup. See <a href="#atompipeline"><code>AtomPipeline</code></a> for the complete list of sealed operations and the full class description.</p>
 <p>An atom owns no configuration. Its <code>config</code>, <code>get_config()</code>, <code>get_config_value()</code>, <code>get_full_config()</code>, and execution-time argument resolution always use the current parent configuration. Call <code>set_config()</code>, <code>set_configs()</code>, <code>update_config()</code>, or <code>update_configs()</code> on the parent; calling any of these methods on the atom raises <code>RegistrationError</code>. Parent configuration changes are runtime state and do not replace an otherwise identical atom during re-registration.</p>
@@ -699,7 +706,7 @@ pipeline.add_child_pipeline(child, 2)</pre></div>
 <p>If the target mutates a disk-backed input in place, that mutation is not persisted automatically. Declare the mutated name as an atom output (and include it in <code>save_to_disk_lst</code> when it should remain disk-backed), or return a new output value explicitly.</p>
 <p>The reserved output marker <code>"_"</code> discards the returned value at that position. It still counts when validating the callable's return annotation and returned tuple/list length, but it is never declared, made visible, persisted, or included in run results. Repeated markers are allowed, for example <code>["_", "o2e_root", "_", "bce"]</code>, and <code>["_"]</code> discards a single return value. Including <code>"_"</code> in <code>save_to_disk_lst</code> raises <code>RegistrationError</code>.</p>
 <p>If the target function cannot be registered, atom creation raises <code>RegistrationError</code> instead of attaching an atom without an executable function. An existing atom with the same name and its outputs remain unchanged.</p>
-<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
+<p>Re-calling <code>create_atom_child_pipeline</code> with an identical definition is a <strong>no-op</strong> that keeps the atom and every downstream output intact, even with <code>forced=True</code>. Identical means: same name, priority, gate (config field and expected value), and inner blocks (priorities, functions by identity, outputs, <code>save_to_disk</code>, mappings, args/kwargs helpers, and <code>exclude_self_outputs</code>). Parent configuration values are not part of the atom definition. Any difference in the compared structural fields replaces the atom and always erases its own outputs. Normally it then invalidates from the earliest downstream block that consumes an affected output name; when cascade invalidation is forbidden, those other cached outputs are retained and may therefore be stale.</p>
 <p><code>overridden_outputs={"output_name": ("pipeline_name", "node_name")}</code> declares that this atom supersedes the same-named output of an existing globally-upstream block or atom. The pointer is installed only after this atom commits successfully.</p>
 
 <div class="field-label">Returns</div><p><code>None</code>. Creates or replaces a sealed atom; retrieve it with <code>get_child_pipeline(child_name)</code>. Both <code>execution_priority</code> and <code>block_priority</code> must be finite, non-negative real numbers (not bool), validated before directories are created.</p>
@@ -715,13 +722,14 @@ atom = pipeline.get_child_pipeline("double")</pre></div>
 <section class="reference-page" data-section="pipelineholder" data-label="Execution" aria-labelledby="pipeline-execution">
 <h2 class="section" id="pipeline-execution">Execution</h2>
 <h4 class="method-name" id="PipelineHolder.run_all">run_all()</h4>
-<div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes every node in the pipeline tree in ascending priority order. Returns a <a class="anchor" href="#runrecord"><code>RunRecord</code></a> summarising the run.</p>
+<div class="sig"><span class="kw">run_all</span>(overrides: <span class="arg">dict[str, Any] | None</span> = None, *, clean_start: <span class="arg">bool</span> = False) -&gt; <span class="ret">RunRecord</span></div>
+<p>Executes every node in the selected pipeline in ascending priority order. Before the first execution entry anywhere in an attached tree, attempts to snapshot constant names and values into independent, file-backed baselines. An automatic snapshot failure warns but does not block ordinary runs; <code>clean_start=True</code> requires a valid snapshot or raises before changing execution state. A required clean start on a child captures and restores only that child and its descendants; unrelated ancestors and siblings are neither staged nor modified, and their baseline errors do not block the child. Root-wide capture remains atomic across participating pipelines. Restoration stages artifact copies before clearing outputs and rolls back the active state, including shared SQLite study state, if the restore commit fails. Restored lazy Dask values use an independent managed copy, and managed Optuna Studies are re-persisted with their original physical name, ownership metadata, and sampler state. Rolling back disk-backed outputs can temporarily require additional disk space proportional to those outputs. When a root seed is configured, each direct <code>run_all()</code> seeds Python, NumPy, and installed PyTorch global RNGs once before evaluating the gate; nested nodes never reseed. With no seed configured, random behaviour is unchanged.</p>
 <div class="field-label">Parameters</div>
-<ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li></ul>
+<ul class="param-desc"><li><code>overrides</code>: optional per-run input values that take precedence during argument resolution without changing saved config or constants.</li><li><code>clean_start</code>: restore definition-time configuration and snapshotted constant names and values, clear produced outputs and inspection caches in this subtree, then evaluate gates and run. Use <code>snapshot_config()</code> or <code>snapshot_constants()</code> to refresh those baselines explicitly. The default <code>False</code> preserves ordinary execution semantics. A child clean start captures and restores only its own subtree; it does not reset ancestor configuration or siblings and is not blocked by their baseline failures. Disk-backed output rollback can temporarily require substantial additional disk space. Stored objects, run history, and logs are retained. Requires object invalidation to be allowed.</li></ul>
 
 <div class="field-label">Returns</div><p>A <code>RunRecord</code> describing the run, including executed block names, status, and produced output names.</p>
-<div class="example"><div class="example-title">Example</div><pre>record = pipeline.run_all()
+<div class="example"><div class="example-title">Example</div><pre>pipeline.set_seed(42)
+record = pipeline.run_all(clean_start=True)
 print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_until">run_until()</h4>
@@ -738,7 +746,7 @@ print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_from">run_from()</h4>
 <div class="sig"><span class="kw">run_from</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Executes the target node and everything after it. Outputs produced strictly before the target remain visible, the target may consume its own previous output, and outputs from later nodes are hidden until those nodes rerun. These rules apply recursively to nested paths such as <code>run_from("modeling_pipeline", "predictor_training_pipeline")</code>. Previous pointer-backed and disk-backed target inputs are materialized before invalidation, so nested restarts do not leave dangling pointers or delete an upstream artifact that the target still needs.</p>
+<p>Executes the target node and everything after it. Outputs produced strictly before the target remain visible, the target may consume its own previous output unless its <code>exclude_self_outputs</code> setting excludes that name, and outputs from later nodes are hidden until those nodes rerun. These rules apply recursively to nested paths such as <code>run_from("modeling_pipeline", "predictor_training_pipeline")</code>. Previous pointer-backed and disk-backed target inputs are materialized before invalidation, so nested restarts do not leave dangling pointers or delete an upstream artifact that the target still needs.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path_parts</code>: one immediate target name or a nested path ending at the block or child pipeline where rerunning starts.</li>
@@ -750,7 +758,7 @@ print(record.status, record.produced_outputs)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.run_block">run_block()</h4>
 <div class="sig"><span class="kw">run_block</span>(*path_parts: <span class="arg">str</span>, overrides: <span class="arg">dict[str, Any] | None</span> = None) -&gt; <span class="ret">RunRecord</span></div>
-<p>Invalidates from the target's priority but executes only the selected block or child pipeline. Earlier outputs remain available; the target's previous outputs are materialized when needed.</p>
+<p>Invalidates from the target's priority but executes only the selected block or child pipeline. Earlier outputs remain available; the target's previous outputs are materialized when needed, except names configured in <code>exclude_self_outputs</code>.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">
   <li><code>path_parts</code>: one immediate target name or a nested path ending at the single node to execute.</li>
@@ -878,9 +886,9 @@ print(pipeline.list_visible_constant())</pre></div>
   <li><code>verbose</code>: log when a mutable value is copied or falls back to reference storage.</li>
   <li><code>to_disk</code>: serialize the constant into the managed artifact tree instead of retaining it in memory.</li>
 </ul>
-<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name is a declared output or an existing produced value anywhere in the pipeline tree, and for reserved builtin names.</p>
-<p>By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference; values that cannot be deep-copied fall back to a reference with a warning. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; a non-serializable value raises <code>PersistenceError</code>); replacing a disk-backed constant deletes the previous artifact file.</p>
-<p>Optuna <code>Study</code> constants are always persisted eagerly. A new constant owns an independent exact-suffix copy; resetting the same constant key overwrites and retains that owner's physical Study name. A Study handle proven to belong to another managed constant or storage record cannot create a second owner; use <code>set_constant_value()</code> or <code>update_storage()</code> on the existing owner. Textual name equality alone does not imply ownership, so unrelated external Studies remain valid independent sources.</p>
+<p>Raises <a class="anchor" href="#registrationerror"><code>RegistrationError</code></a> if the name conflicts with configuration visible from this pipeline and its ancestors, an output declared in this pipeline's own scope (including its descendants), or a reserved builtin name. An unrelated sibling's output name is not a conflict in a non-strict tree; strict-mode attachment still validates cross-boundary names.</p>
+<p>By default mutable values (dict, list, NumPy arrays, pandas, Dask, PyTorch tensors/modules, dataclasses, ...) are stored as a deep copy so later in-place mutation outside the pipeline does not affect the constant. Pass <code>copy=False</code> to store by reference; values that cannot be deep-copied fall back to a reference with a warning. With <code>verbose=True</code>, an info line is logged when a mutable value is deeply copied. With <code>to_disk=True</code> the value is serialized to the artifact store instead of kept in memory (protected from in-place mutation; unsupported serialization raises <code>PersistenceError</code>); clean starts restore disk-backed baseline constants as independent artifact copies.</p>
+<p>Optuna <code>Study</code> constants are always persisted eagerly. A clean baseline captures detached trials, attributes, sampler state, and the original physical name and ownership metadata rather than a reference to the working Study database. A clean start re-persists the Study into the shared managed SQLite database as a new <code>optuna-study</code> ArtifactRecord, keeping its physical study name, <code>original_study_name</code> lineage, and owner kind/key; it is never downgraded to an in-memory Study. A new constant owns an independent exact-suffix copy; resetting the same constant key overwrites and retains that owner's physical Study name. A Study handle proven to belong to another managed constant or storage record cannot create a second owner; use <code>set_constant_value()</code> or <code>update_storage()</code> on the existing owner. Textual name equality alone does not imply ownership, so unrelated external Studies remain valid independent sources.</p>
 <div class="example">
   <div class="example-title">Example</div>
 <pre>pipeline.set_constant_value("learning_rate", 0.01)
@@ -889,6 +897,22 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
 </div>
 
 <div class="field-label">Returns</div><p><code>None</code>. Stores a visible constant, copying mutable values by default and optionally persisting it immediately.</p>
+
+<h4 class="method-name" id="PipelineHolder.snapshot_constants">snapshot_constants()</h4>
+<div class="sig"><span class="kw">snapshot_constants</span>() -&gt; <span class="ret">None</span></div>
+<p>On the root pipeline only, capture current constant names and independently restorable values across all attached descendants. This manually replaces the automatic constant snapshot taken before the first execution entry anywhere in the tree. Definition-time configuration baselines are not changed; use <a class="anchor" href="#PipelineHolder.snapshot_config"><code>snapshot_config()</code></a> to refresh those. Each capture is written to an immutable, generation-identified directory under <code>clean_baseline/generations/</code>, and the small manifest records the generation id. Restoration resolves that id, so a later capture that reuses file names can never be mistaken for an earlier committed generation. Previous generations are retained until save-time cleanup, which also removes unreferenced generations; saved bundles copy both the manifest and the generations it references. A disk-backed artifact is copied without loading it, including directory artifacts; an in-memory constant is pickled directly to its baseline file. In-memory Dask DataFrames with external dependencies are written as independent partitioned Parquet baselines and restored into a separate managed generation, so replacing the baseline never invalidates a live lazy graph. SQLite-backed Optuna Studies capture detached trials, attributes, sampler state, physical study name, original-study-name lineage, and owner metadata; a clean start re-persists them into the shared managed database instead of downgrading them to an in-memory Study. Baseline roots and entries are validated against symlinks and path traversal before any copy or load. An interrupted publication leaves the recorded generation intact; a legacy mutable-directory backup is restored conservatively. An explicit snapshot failure preserves the previous baseline. Legacy saved placeholder constants cannot be restored by a clean start; replace them with valid values, then take a fresh snapshot.</p>
+<div class="field-label">Parameters</div><p>None.</p>
+<div class="field-label">Returns</div><p><code>None</code>; call <code>run_all(clean_start=True)</code> to restore this snapshot.</p>
+<div class="example"><div class="example-title">Example</div><pre>pipeline.snapshot_constants()</pre></div>
+
+<h4 class="method-name" id="PipelineHolder.snapshot_config">snapshot_config()</h4>
+<div class="sig"><span class="kw">snapshot_config</span>() -&gt; <span class="ret">None</span></div>
+<p>On the root pipeline only, replace the definition-time configuration baseline with the current configuration of the root and every attached descendant. This uses the same in-memory <code>definition_config</code> representation as the automatic baseline, so it is copied with saved pipelines and restored by <code>run_all(clean_start=True)</code>. Constant baselines and their generation directories are not changed. A child pipeline cannot call this method; <code>snapshot_configs()</code> is an alias.</p>
+<div class="field-label">Parameters</div><p>None.</p>
+<div class="field-label">Returns</div><p><code>None</code>; the new configuration baseline applies to subsequent clean starts.</p>
+<div class="example"><div class="example-title">Example</div><pre>pipeline.set_config("model_name", "final")
+pipeline.snapshot_config()
+record = pipeline.run_all(clean_start=True)</pre></div>
 
 <h4 class="method-name" id="PipelineHolder.set_value">set_value()</h4>
 <div class="sig"><span class="kw">set_value</span>(variable_name: <span class="arg">str</span>, value: <span class="arg">Any</span>, *, copy: <span class="arg">bool</span> = True, verbose: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
@@ -1028,7 +1052,7 @@ pipeline.set_constant_value("big_frame", frame, to_disk=True, verbose=True)</pre
   <li><code>path</code>: destination project root; <code>None</code> saves in place.</li>
   <li><code>save_log_to_file</code>: optional additional file receiving a copy of the current pipeline log.</li>
   <li><code>verbose</code>: expose advisory callable-reference and placeholder warnings that are suppressed by default.</li>
-  <li><code>cleanup</code>: obsolete saved-object policy for in-place saves: <code>"auto"</code> deletes automatically, <code>"confirm"</code> prompts first, and <code>"none"</code> retains obsolete framework-generated artifacts and child trees.</li>
+  <li><code>cleanup</code>: obsolete saved-object policy: <code>"auto"</code> deletes automatically, <code>"confirm"</code> prompts first, and <code>"none"</code> retains obsolete framework-generated artifacts and child trees. In-place saves also prune obsolete legacy baseline files, unreferenced immutable baseline generations, and baseline-restored artifact generations. Saves to external bundles apply the same option under <code>clean_baseline/</code>.</li>
 </ul>
 <p>Cleanup runs only after the new state payload commits and treats that payload as the liveness authority. Referenced artifacts are retained; inspection or deletion failures are logged without invalidating the successful save.</p>
 <p>When Optuna is installed, live <code>optuna.study.Study</code> outputs are persisted eagerly to the owning pipeline tree's lazily created <code>optuna_studies.db</code>; the literal persisted name, exact source-name lineage, owner metadata, and a separately pickled <code>study.sampler</code> are recorded in the artifact. A new output group claims its incoming literal name only when it is free across output, constant, and storage owners in the shared database; otherwise it receives the next suffix appended to that exact name. Nodes that have produced the same Study output name form one group: the latest successful producer is the sole concrete terminal and every surviving peer points directly to it. This automatic Study grouping applies in normal and forbidden-invalidation modes and takes precedence over a user <code>overridden_outputs</code> declaration for that Study output without modifying the declaration. A successful rotation writes an info log describing the output, Study name, terminal, redirected count, invalidation mode, and ignored-override state. Explicitly overwriting a physical Study name can stale external Optuna handles to its former database ID; pipeline getters return a fresh persisted handle. <code>optuna.samplers.BaseSampler</code> values are stored as pickle artifacts and do not create the study database. Pipelines without Optuna values neither import Optuna as a required dependency nor create the database file.</p>
@@ -1308,6 +1332,13 @@ child = pipeline.get_child_pipeline("analysis")</pre></div>
 <div class="field-label">Returns</div><p><code>None</code>. Changes the policy stamped on future torch artifacts.</p>
 <div class="example"><div class="example-title">Example</div><pre>pipeline.set_torch_load_weights_only(True)</pre></div>
 
+<h4 class="method-name" id="PipelineHolder.set_seed">set_seed()</h4>
+<div class="sig"><span class="kw">set_seed</span>(seed: <span class="arg">int | None</span>, *, deterministic_torch: <span class="arg">bool</span> = False) -&gt; <span class="ret">None</span></div>
+<p>Set an optional root-only global seed for direct <code>run_all()</code> calls, including calls on attached children. A top-level call resets Python <code>random</code>, NumPy's global RNG and PyTorch's RNG when available, once before gates and nodes run. User code may reseed; global RNG state remains advanced after the run. Reseeding from system entropy or time within user code can still change results. <code>None</code> disables managed seeding. An independently created <code>np.random.default_rng()</code> or a retained external generator is not controlled by this setting; a Generator stored as a pipeline constant is restored from its baseline by <code>clean_start=True</code>. Parallel functions keep running concurrently and log a warning when configured under a seed: shared global RNG draws may interleave differently. PyTorch does not guarantee identical results across platforms or releases.</p>
+<div class="field-label">Parameters</div><ul class="param-desc"><li><code>seed</code>: integer in <code>[0, 2**32)</code>, excluding bool, or <code>None</code>.</li><li><code>deterministic_torch</code>: optionally enable PyTorch deterministic algorithms and disable cuDNN benchmarking during the run, restoring those flags afterwards; requires PyTorch. Some CUDA operations also require <code>CUBLAS_WORKSPACE_CONFIG</code> to be set before CUDA initializes.</li></ul>
+<div class="field-label">Returns</div><p><code>None</code>. The setting is persisted with the root pipeline.</p>
+<div class="example"><div class="example-title">Example</div><pre>pipeline.set_seed(42)</pre></div>
+
 <h4 class="method-name" id="PipelineHolder.set_strict_mode">set_strict_mode()</h4>
 <div class="sig"><span class="kw">set_strict_mode</span>(enabled: <span class="arg">bool</span>) -&gt; <span class="ret">None</span></div>
 <p>Enables or disables strict-mode registration validation and explicit registered-function input resolution for this pipeline and all attached descendants. Strict functions resolve pipeline values only through <code>param_mapping</code> and registered args/kwargs helpers; unmapped parameters use callable defaults, except <code>logger</code>, which is injected automatically. Unmapped required parameters raise <code>ResolutionError</code> at execution. Callable gates retain their existing implicit input resolution. The setting is persisted with the pipeline.</p>
@@ -1474,7 +1505,9 @@ print(atom.inspect())</pre></div>
 <span class="kw">class</span> mlpipelineholder.ExecutionBlock(
   parent: <span class="arg">PipelineHolder</span>,
   registration_name: <span class="arg">str</span>,
-  execution_priority: <span class="arg">float</span>
+  execution_priority: <span class="arg">float</span>,
+  *,
+  exclude_self_outputs: <span class="arg">list[str] | tuple[str, ...] | set[str] | frozenset[str] | None</span> = None
 ) -&gt; <span class="ret">None</span>
 </div>
 <p>Constructed via <a class="anchor" href="#PipelineHolder.add_block"><code>PipelineHolder.add_block()</code></a>; you rarely instantiate it directly.</p>
@@ -1483,6 +1516,7 @@ print(atom.inspect())</pre></div>
   <li><code>parent</code>: owning <code>PipelineHolder</code> that supplies config, visible values, artifacts, and logging.</li>
   <li><code>registration_name</code>: unique block name within the parent.</li>
   <li><code>execution_priority</code>: numeric position among the parent's immediate nodes. Must be a finite, non-negative real number (not bool).</li>
+  <li><code>exclude_self_outputs</code>: optional names of previous block outputs to skip when resolving inputs in targeted runs and inspection.</li>
 </ul>
 <div class="field-label">Returns</div><p>A new <code>ExecutionBlock</code>; registering it is normally done through <code>add_block()</code>.</p>
 <div class="example"><div class="example-title">Example</div><pre>from mlpipelineholder import ExecutionBlock
@@ -1490,7 +1524,7 @@ block = ExecutionBlock(pipeline, "prepare", 1)</pre></div>
 
 <h4 class="method-name" id="ExecutionBlock.inspect">inspect()</h4>
 <div class="sig"><span class="kw">inspect</span>(function_name: <span class="arg">str | None</span> = None, overrides: <span class="arg">dict[str, Any] | None</span> = None, strict_mode: <span class="arg">bool | None</span> = None, resolve_only: <span class="arg">bool</span> = False, allow_mutable_objects: <span class="arg">bool</span> = True, memory_safety_margin: <span class="arg">float</span> = 0.25) -&gt; <span class="ret">Any | ResolvedInspectionCall</span></div>
-<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
+<p>Resolves and optionally invokes one registered function or expression using the same visible inputs as a targeted block run, including previous committed outputs from this node except names in <code>exclude_self_outputs</code>. It returns the callable's raw Python result, ignoring declared output slots; an assignment expression returns its assigned value, while a print-only expression returns <code>None</code>. Inspection does not commit outputs, write declared artifacts, add run history, invalidate downstream state, or update output pointers.</p>
 <p>Inspection selects one registration, not the whole block. Other functions registered at the same priority are not run, so inspecting one registration is not equivalent to concurrently executing a multi-function block. Same-block dependency validation still applies, except that an original-parameter-name override fully replaces that parameter's dependency and removes it from the check.</p>
 <div class="field-label">Parameters</div>
 <ul class="param-desc">

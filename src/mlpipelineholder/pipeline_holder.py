@@ -24,7 +24,7 @@ from tempfile import TemporaryDirectory
 from textwrap import dedent
 from threading import RLock
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
@@ -93,6 +93,7 @@ from .presentation.description import DescriptionMixin
 from .presentation.logger import PipelineLogger
 from .core.configuration import ConfigurationMixin
 from .core.runtime_controls import RuntimeControlsMixin
+from .core.reproducibility import ReproducibilityMixin
 from .core.base import PipelineBase
 from .core.constants import (
     _IMMUTABLE_TYPES,
@@ -161,6 +162,7 @@ class PipelineHolder(
     PrintCaptureMixin,
     ConfigurationMixin,
     RuntimeControlsMixin,
+    ReproducibilityMixin,
     ReconstructionMixin,
     PlaceholderRecoveryMixin,
     ExpressionRuntimeMixin,
@@ -285,6 +287,11 @@ class PipelineHolder(
             self.memory_saving_mode = memory_saving_mode
             self.memory_profile_logging = memory_profile_logging
             self.torch_load_weights_only = bool(torch_load_weights_only)
+            self._seed: int | None = None
+            self._deterministic_torch = False
+            self._clean_config_baseline = self._copy_definition_config(self._config)
+            self._clean_constant_baseline: dict[str, dict[str, Any]] | None = None
+            self._clean_baseline_error: str | None = None
             self.strict_mode = bool(strict_mode)
             self._suppress_strict_validation = False
             self._invalidation_forbidden = False
@@ -382,11 +389,15 @@ class PipelineHolder(
         return self.describe_pipeline()
 
     def _create_execution_block(
-        self, registration_name: str, execution_priority: float
+        self, registration_name: str, execution_priority: float,
+        *, exclude_self_outputs: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
     ) -> Any:
         from .execution.block import ExecutionBlock
 
-        return ExecutionBlock(self, registration_name, execution_priority)
+        return ExecutionBlock(
+            self, registration_name, execution_priority,
+            exclude_self_outputs=exclude_self_outputs,
+        )
 
     @staticmethod
     def _is_execution_block(node: Any) -> bool:
@@ -1295,10 +1306,23 @@ class PipelineHolder(
         previous_outputs: dict[str, Any],
         overrides: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        materialized = dict(previous_outputs)
+        if isinstance(node, PipelineBase):
+            atom = cast(Any, node)
+            excluded = (
+                atom.nodes[0].exclude_self_outputs
+                if atom._is_atom and atom.nodes
+                else frozenset()
+            )
+        else:
+            excluded = node.exclude_self_outputs
+        materialized = {
+            name: value for name, value in previous_outputs.items()
+            if name not in excluded
+        }
         required_outputs = self._required_input_names(node).intersection(
             self._node_declared_outputs(node)
         )
+        required_outputs.difference_update(excluded)
         required_outputs.difference_update(overrides or {})
         for output_name in required_outputs:
             value = materialized.get(output_name)

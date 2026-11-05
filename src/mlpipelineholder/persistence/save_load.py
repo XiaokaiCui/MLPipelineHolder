@@ -21,6 +21,7 @@ from .pickle_io import (
 )
 from .cleanup import (
     _collect_obsolete_artifact_entries,
+    _collect_obsolete_baseline_entries,
     _collect_obsolete_child_dirs,
     _delete_saved_path,
     _referenced_payload_artifact_paths,
@@ -193,6 +194,8 @@ class SaveLoadMixin:
                     f"Skipped cleanup because saved paths could not be inspected: "
                     f"{type(exc).__name__}: {exc}"
                 )
+        else:
+            self._cleanup_export_baselines(payload, target, cleanup_mode)
         if save_log_to_file is not None:
             self.logger.flush()
             log_target = Path(save_log_to_file)
@@ -210,6 +213,31 @@ class SaveLoadMixin:
                     f"Pipeline has been saved to project backup path: {backup_root}"
                 )
         return target
+
+    def _cleanup_export_baselines(
+        self, payload: dict[str, Any], target: Path, cleanup_mode: str,
+    ) -> None:
+        """Prune only stale baseline copies in an existing external bundle."""
+        if cleanup_mode == "none":
+            return
+        obsolete: list[Path] = []
+        _collect_obsolete_baseline_entries(payload, target, obsolete)
+        if not obsolete:
+            return
+        if cleanup_mode == "confirm":
+            try:
+                answer = input(
+                    f"Delete {len(obsolete)} obsolete baseline file(s)? [y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                return
+        for path in obsolete:
+            try:
+                _delete_saved_path(path, target)
+            except OSError as exc:
+                self.logger.warning(f"Could not delete obsolete baseline '{path}': {exc}")
 
     def _cleanup_obsolete_saved_objects(
         self,
@@ -243,6 +271,7 @@ class SaveLoadMixin:
             live_paths,
             obsolete,
         )
+        _collect_obsolete_baseline_entries(payload, target_root, obsolete)
         obsolete.extend(obsolete_children)
         if not obsolete:
             return

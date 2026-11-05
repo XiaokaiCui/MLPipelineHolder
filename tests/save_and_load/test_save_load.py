@@ -734,7 +734,9 @@ class SaveLoadTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
             pipeline = PipelineHandler("persist-nonimportable-callable", SaveConfig(value=2), tmp_path / "project")
-            pipeline.set_constant_value("callable_value", self.local_callable)
+            # Legacy saved constants can still become reference placeholders.
+            pipeline.manual_values["callable_value"] = self.local_callable
+            pipeline.para_value_dict["callable_value"] = self.local_callable
 
             save_dir = tmp_path / "bundle"
             pipeline.save_project(save_dir)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..core.models import RuntimeCallableReference
@@ -99,6 +100,77 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
     )
     if not isinstance(payload["nodes"], list):
         raise PersistenceError("Saved pipeline payload has a non-list 'nodes' entry")
+    seed = payload.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32):
+        raise PersistenceError("Saved pipeline has an invalid root seed")
+    if not isinstance(payload.get("deterministic_torch", False), bool):
+        raise PersistenceError("Saved pipeline has an invalid deterministic_torch flag")
+    baseline_error = payload.get("clean_baseline_error")
+    if baseline_error is not None and not isinstance(baseline_error, str):
+        raise PersistenceError("Saved pipeline has an invalid clean baseline error")
+    baseline = payload.get("clean_constant_baseline")
+    if baseline is not None:
+        if not isinstance(baseline, dict):
+            raise PersistenceError("Saved pipeline has an invalid constant baseline")
+        for name, entry in baseline.items():
+            if not isinstance(name, str):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline name"
+                )
+            if isinstance(entry, bytes):
+                # Legacy in-memory baseline from a development save. It is
+                # retained so clean_start reports a migration error instead of
+                # silently recapturing different values; replace the constant
+                # and call snapshot_constants() to migrate it.
+                continue
+            if not isinstance(entry, dict):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline entry"
+                )
+            if entry.get("kind") not in {
+                "artifact", "torch_state", "dask", "pickle", "optuna",
+            }:
+                raise PersistenceError(
+                    "Saved pipeline has an unknown constant baseline kind"
+                )
+            if not isinstance(entry.get("file"), str) or not entry["file"]:
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline file"
+                )
+            generation = entry.get("generation")
+            if generation is not None and (
+                not isinstance(generation, str)
+                or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+            ):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid baseline generation"
+                )
+            if entry["kind"] == "optuna":
+                for field in (
+                    "study_name",
+                    "original_study_name",
+                    "study_owner_kind",
+                    "study_owner_key",
+                ):
+                    if not isinstance(entry.get(field), str) or not entry[field]:
+                        raise PersistenceError(
+                            "Saved pipeline has invalid Optuna baseline metadata"
+                        )
+            if entry["kind"] == "artifact" and (
+                not isinstance(entry.get("serializer"), str)
+                or not isinstance(entry.get("torch_load_weights_only", False), bool)
+            ):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid constant baseline serializer"
+                )
+            if entry["kind"] == "torch_state" and not isinstance(
+                entry.get("object_kind"), str
+            ):
+                raise PersistenceError("Saved pipeline has an invalid torch state baseline")
+            if entry["kind"] in {"artifact", "torch_state"} and not isinstance(
+                entry.get("metadata", {}), dict
+            ):
+                raise PersistenceError("Saved pipeline has invalid baseline metadata")
     for mapping_key in (
         "manual_values",
         "producer_outputs",
@@ -147,6 +219,13 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
             if not isinstance(node_payload["functions"], list):
                 raise PersistenceError(
                     f"Saved block '{node_payload['registration_name']}' has a non-list 'functions' entry"
+                )
+            excluded = node_payload.get("exclude_self_outputs", [])
+            if not isinstance(excluded, list) or any(
+                not isinstance(name, str) or not name or name == "_" for name in excluded
+            ):
+                raise PersistenceError(
+                    f"Saved block '{node_payload['registration_name']}' has invalid exclude_self_outputs"
                 )
             for args_payload in node_payload.get("registered_args", []):
                 if not isinstance(args_payload, dict):
@@ -306,7 +385,7 @@ def contains_missing_placeholder_outside_config(
             if contains_missing_placeholder_outside_config(
                 cls,
                 item,
-                inside_config=inside_config or key == "config",
+                inside_config=inside_config or key in {"config", "definition_config"},
             ):
                 return True
         return False

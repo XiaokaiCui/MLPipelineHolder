@@ -31,6 +31,7 @@ class OptunaStudy(Protocol):
     sampler: OptunaSampler
     directions: Sequence[_Direction]
     user_attrs: Mapping[str, _JsonValue]
+    system_attrs: Mapping[str, _JsonValue]
 
     def get_trials(self, *, deepcopy: bool) -> Sequence[_FrozenTrial]: ...
 
@@ -39,6 +40,8 @@ class PersistedOptunaStudy(OptunaStudy, Protocol):
     def add_trials(self, trials: Sequence[_FrozenTrial]) -> None: ...
 
     def set_user_attr(self, key: str, value: _JsonValue) -> None: ...
+
+    def set_system_attr(self, key: str, value: _JsonValue) -> None: ...
 
 
 class _StudyNamespace(Protocol):
@@ -89,6 +92,7 @@ class StudyArtifactOptions:
     original_study_name: str | None = None
     owner_kind: str | None = None
     owner_key: str | None = None
+    preserve_system_attrs: bool = False
 
 
 @final

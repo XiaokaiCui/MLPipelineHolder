@@ -11,9 +11,15 @@ from ..core.models import ArtifactRecord, TorchStateArtifactRecord
 from ..integrations.optuna.support import OPTUNA_STUDIES_DB_NAME
 
 _SAVED_GENERATION_RE = re.compile(
-    r"^.+__.+__.+__[0-9a-f]{32}\.(?:json|npy|pkl|pt|feather|parquet|bin)$"
+    r"^.+__.+__.+__[0-9a-f]{32}(?:\.(?:json|npy|pkl|pt|feather|parquet|bin))?$"
 )
-_MANAGED_CHILD_DIR_NAMES = ("artifacts", "children", "metadata", "history_logs")
+_MANAGED_CHILD_DIR_NAMES = (
+    "artifacts",
+    "children",
+    "clean_baseline",
+    "metadata",
+    "history_logs",
+)
 _MANAGED_CHILD_FILE_NAMES = (
     "pipeline_state.pkl",
     "config.pkl",
@@ -85,6 +91,58 @@ def _collect_obsolete_artifact_entries(
             live_paths,
             obsolete,
         )
+
+
+def _collect_obsolete_baseline_entries(
+    payload: dict[str, Any], target_root: Path, obsolete: list[Path],
+) -> None:
+    """Find stale baseline generations/files without touching user files."""
+    baseline_dir = target_root / "clean_baseline"
+    if not baseline_dir.is_symlink() and baseline_dir.is_dir():
+        manifest = payload.get("clean_constant_baseline")
+        live_generations: set[str] = set()
+        live_legacy_files: set[str] = set()
+        if isinstance(manifest, dict):
+            for entry in manifest.values():
+                if not isinstance(entry, dict):
+                    continue
+                generation = entry.get("generation")
+                file_name = entry.get("file")
+                if isinstance(generation, str):
+                    live_generations.add(generation)
+                elif isinstance(file_name, str):
+                    live_legacy_files.add(file_name)
+        generations_dir = baseline_dir / "generations"
+        if not generations_dir.is_symlink() and generations_dir.is_dir():
+            for generation_dir in generations_dir.iterdir():
+                if generation_dir.is_symlink() or not generation_dir.is_dir():
+                    continue
+                if re.fullmatch(r"[0-9a-f]{32}", generation_dir.name) is None:
+                    continue
+                if generation_dir.name not in live_generations:
+                    obsolete.append(generation_dir)
+        for entry in baseline_dir.iterdir():
+            if entry.is_symlink():
+                continue
+            if entry.name == "generations":
+                continue
+            if re.fullmatch(
+                r"constant_\d+(?:\.[A-Za-z0-9_-]+)*", entry.name
+            ) is None:
+                continue
+            if entry.name not in live_legacy_files:
+                obsolete.append(entry)
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("kind") != "pipeline":
+            continue
+        name, child_payload = node.get("registration_name"), node.get("payload")
+        if isinstance(name, str) and isinstance(child_payload, dict):
+            _collect_obsolete_baseline_entries(
+                child_payload, target_root / "children" / name, obsolete,
+            )
 
 
 def _collect_obsolete_child_dirs(

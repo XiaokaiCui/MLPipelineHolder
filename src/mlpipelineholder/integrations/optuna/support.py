@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import pickle
 import sys
+import warnings
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Final, TypeGuard, cast
+from typing import Any, Final, TypeGuard, cast
 
 from ...exceptions import PersistenceError
 from .api import (
@@ -77,6 +78,8 @@ def save_study_to_db(
     db_path: str | Path,
     study_name: str | None = None,
     overwrite: bool = True,
+    *,
+    preserve_system_attrs: bool = False,
 ) -> PersistedOptunaStudy:
     optuna = _load_optuna()
     storage = _get_sqlite_storage_url(db_path)
@@ -84,6 +87,11 @@ def save_study_to_db(
     directions = tuple(study.directions)
     trials = tuple(study.get_trials(deepcopy=True))
     user_attrs = dict(study.user_attrs)
+    system_attrs: dict[str, Any] = {}
+    if preserve_system_attrs:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            system_attrs = dict(study.system_attrs)
     existing_studies = optuna.get_all_study_names(storage=storage)
     previous_state = None
     if persisted_name in existing_studies:
@@ -96,10 +104,16 @@ def save_study_to_db(
             storage=storage,
             sampler=study.sampler,
         )
+        previous_system_attrs: dict[str, Any] = {}
+        if preserve_system_attrs:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                previous_system_attrs = dict(previous_study.system_attrs)
         previous_state = (
             tuple(previous_study.directions),
             tuple(previous_study.get_trials(deepcopy=True)),
             dict(previous_study.user_attrs),
+            previous_system_attrs,
         )
         optuna.delete_study(study_name=persisted_name, storage=storage)
     created = False
@@ -113,11 +127,18 @@ def save_study_to_db(
         saved_study.add_trials(trials)
         for key, value in user_attrs.items():
             saved_study.set_user_attr(key, value)
+        for key, value in system_attrs.items():
+            saved_study.set_system_attr(key, value)
     except BaseException:
         if created:
             optuna.delete_study(study_name=persisted_name, storage=storage)
         if previous_state is not None:
-            previous_directions, previous_trials, previous_user_attrs = previous_state
+            (
+                previous_directions,
+                previous_trials,
+                previous_user_attrs,
+                previous_system_attrs,
+            ) = previous_state
             restored_study = optuna.create_study(
                 study_name=persisted_name,
                 storage=storage,
@@ -126,6 +147,8 @@ def save_study_to_db(
             restored_study.add_trials(previous_trials)
             for key, value in previous_user_attrs.items():
                 restored_study.set_user_attr(key, value)
+            for key, value in previous_system_attrs.items():
+                restored_study.set_system_attr(key, value)
         raise
     return saved_study
 
@@ -207,6 +230,7 @@ def save_study_artifact(
                     db_path,
                     study.study_name,
                     overwrite=False,
+                    preserve_system_attrs=options.preserve_system_attrs,
                 )
             except (StudyAlreadyExistsError, optuna.duplicated_study_error):
                 saved_study = copy_study_to_db(study, db_path)
@@ -216,6 +240,7 @@ def save_study_artifact(
                 db_path,
                 study.study_name if options.study_name is None else options.study_name,
                 overwrite=True,
+                preserve_system_attrs=options.preserve_system_attrs,
             )
         os.replace(temporary_path, sampler_path)
     finally:

@@ -19,8 +19,14 @@ class TopologyMixin:
     if TYPE_CHECKING:
         parent_pipeline: Any = None
         nodes_by_name: dict[str, Any] = {}
+        _config: Any = None
+        _clean_config_baseline: Any = None
+        _is_atom: bool = False
 
         def _sorted_nodes(self) -> list[Any]: ...
+        def list_declared_outputs(self) -> set[str]: ...
+        @staticmethod
+        def _config_name_mapping(config_obj: Any) -> dict[str, Any]: ...
 
     def _root_pipeline(self) -> Any:
         current = self
@@ -88,4 +94,33 @@ class TopologyMixin:
         names: set[str] = set()
         for pipeline in self._root_pipeline()._iter_attached_pipelines():
             names.update(pipeline.list_declared_outputs())
+        return names
+
+    def _constant_conflict_names(
+        self,
+        configs: dict[int, Any] | None = None,
+    ) -> set[str]:
+        """Names that can actually conflict with a constant in this scope.
+
+        A constant declared on this pipeline is visible to the pipeline and its
+        descendants, so only locally declared outputs (including descendants,
+        via ``list_declared_outputs``) and configuration visible from this
+        pipeline and its ancestors can conflict with it. Sibling declarations
+        are intentionally excluded; strict-mode attachment performs its own
+        cross-boundary validation.
+
+        Pass ``configs`` (keyed by ``id(pipeline)``) to validate against
+        definition-time configuration during clean-start preparation. Without
+        it, the current runtime configuration is used.
+        """
+        names: set[str] = set(self.list_declared_outputs())
+        current: Any = self
+        while current is not None:
+            if not (current._is_atom and current.parent_pipeline is not None):
+                if configs is None:
+                    config = current._config
+                else:
+                    config = configs.get(id(current), current._clean_config_baseline)
+                names.update(current._config_name_mapping(config))
+            current = current.parent_pipeline
         return names
