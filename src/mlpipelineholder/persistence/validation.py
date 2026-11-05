@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..core.models import RuntimeCallableReference
@@ -135,6 +136,14 @@ def validate_loaded_payload_structure(cls: Any, payload: Any) -> None:
             if not isinstance(entry.get("file"), str) or not entry["file"]:
                 raise PersistenceError(
                     "Saved pipeline has an invalid constant baseline file"
+                )
+            generation = entry.get("generation")
+            if generation is not None and (
+                not isinstance(generation, str)
+                or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+            ):
+                raise PersistenceError(
+                    "Saved pipeline has an invalid baseline generation"
                 )
             if entry["kind"] == "optuna":
                 for field in (

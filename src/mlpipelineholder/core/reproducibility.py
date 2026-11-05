@@ -6,6 +6,7 @@ import copy
 import os
 import pickle
 import random
+import re
 import shutil
 import sys
 import tempfile
@@ -294,14 +295,26 @@ class ReproducibilityMixin:
             return {"kind": "dask", "file": target.name}
         return self._write_pickle_baseline(directory, index, value)
 
-    def _stage_constant_baseline(self) -> tuple[dict[str, dict[str, Any]], Path]:
-        """Prepare this pipeline's baseline without touching its live snapshot."""
-        staging = Path(tempfile.mkdtemp(prefix=".clean-baseline-stage-", dir=self.metadata_root))
+    def _stage_constant_baseline(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], Path, str]:
+        """Prepare this pipeline's baseline without touching its live snapshot.
+
+        Each capture gets an immutable generation id. The staged files become
+        ``clean_baseline/generations/<id>/`` on publication, and the manifest
+        records that id so restoration never depends on reusable file names.
+        """
+        generation = uuid4().hex
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".clean-baseline-stage-{generation}-", dir=self.metadata_root,
+            )
+        )
         manifest: dict[str, dict[str, Any]] = {}
         try:
             for index, (name, value) in enumerate(self.manual_values.items()):
                 try:
-                    manifest[name] = self._write_baseline_entry(
+                    entry = self._write_baseline_entry(
                         staging, index, name, value,
                     )
                 except RegistrationError:
@@ -311,34 +324,30 @@ class ReproducibilityMixin:
                         f"Constant '{name}' cannot be independently snapshotted and "
                         f"restored: {type(exc).__name__}: {exc}"
                     ) from exc
+                entry["generation"] = generation
+                manifest[name] = entry
         except BaseException:
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        return manifest, staging
+        return manifest, staging, generation
 
     def _recover_baseline_publication(self, pipeline: Any) -> None:
-        """Reconcile an interrupted baseline directory swap.
+        """Reconcile leftovers from interrupted baseline publication.
 
-        Publication moves the previous generation to a deterministic backup,
-        promotes the staged generation, then records the new manifest. A crash
-        can therefore leave a backup next to a promoted (but uncommitted)
-        generation. Keep the promoted generation only when the recorded
-        manifest is fully present; otherwise restore the previous generation.
+        New baselines are immutable, generation-identified directories, so a
+        crash leaves either a stale staging directory or an unreferenced
+        generation; the recorded manifest still points at the complete previous
+        generation. Legacy projects used a single mutable directory plus a
+        ``.clean-baseline-previous`` swap backup; without a durable generation
+        id the only safe recovery is to restore that backup.
         """
         metadata_root = Path(pipeline.metadata_root)
         backup = metadata_root / ".clean-baseline-previous"
         directory = pipeline._clean_baseline_root
         if backup.exists() or backup.is_symlink():
-            manifest = pipeline._clean_constant_baseline
-            manifest_files: set[str] = set()
-            if isinstance(manifest, dict):
-                for entry in manifest.values():
-                    if isinstance(entry, dict) and isinstance(entry.get("file"), str):
-                        manifest_files.add(entry["file"])
-            committed = manifest is not None and all(
-                (directory / file_name).exists() for file_name in manifest_files
-            )
-            if committed:
+            if (directory / "generations").is_dir():
+                # The generation layout is already active; a legacy swap
+                # backup is stale and must not replace it.
                 shutil.rmtree(backup, ignore_errors=True)
             else:
                 if directory.exists() or directory.is_symlink():
@@ -348,15 +357,15 @@ class ReproducibilityMixin:
             shutil.rmtree(staging, ignore_errors=True)
 
     def _capture_constant_baselines(self, pipelines: list[Any]) -> None:
-        """Stage the entire tree first; publish all manifests or roll them back."""
+        """Stage every requested pipeline, then publish immutable generations."""
         for pipeline in pipelines:
             self._recover_baseline_publication(pipeline)
-        staged: list[tuple[Any, dict[str, dict[str, Any]], Path]] = []
-        published: list[tuple[Any, dict[str, dict[str, Any]] | None, Path | None]] = []
+        staged: list[tuple[Any, dict[str, dict[str, Any]], Path, str]] = []
+        published: list[tuple[Any, dict[str, dict[str, Any]] | None, Path]] = []
         try:
             for pipeline in pipelines:
                 try:
-                    manifest, staging = pipeline._stage_constant_baseline()
+                    manifest, staging, generation = pipeline._stage_constant_baseline()
                 except Exception as exc:
                     if isinstance(exc, _BaselineCaptureError):
                         raise
@@ -365,51 +374,44 @@ class ReproducibilityMixin:
                         f"Constant baseline for '{pipeline.registration_name}' could not be "
                         f"captured: {type(exc).__name__}: {exc}",
                     ) from exc
-                staged.append((pipeline, manifest, staging))
+                staged.append((pipeline, manifest, staging, generation))
             self._validate_constant_snapshot_names(
-                [(pipeline, manifest) for pipeline, manifest, _ in staged]
+                [(pipeline, manifest) for pipeline, manifest, _, _ in staged]
             )
-            for pipeline, manifest, staging in staged:
+            for pipeline, manifest, staging, generation in staged:
                 directory = pipeline._clean_baseline_root
                 if directory.is_symlink():
                     raise _BaselineCaptureError(
                         pipeline,
                         f"Refusing to replace symlinked clean baseline: {directory}",
                     )
-                backup = Path(pipeline.metadata_root) / ".clean-baseline-previous"
-                if backup.exists() or backup.is_symlink():
+                generations = directory / "generations"
+                if generations.is_symlink():
                     raise _BaselineCaptureError(
                         pipeline,
-                        f"Refusing to replace a baseline with an unresolved backup: {backup}",
+                        f"Refusing to use a symlinked baseline generation root: {generations}",
+                    )
+                generations.mkdir(parents=True, exist_ok=True)
+                destination = generations / generation
+                if destination.exists() or destination.is_symlink():
+                    raise _BaselineCaptureError(
+                        pipeline,
+                        f"Baseline generation already exists: {destination}",
                     )
                 old_manifest = pipeline._clean_constant_baseline
-                had_baseline = directory.exists()
-                if had_baseline:
-                    os.replace(directory, backup)
-                try:
-                    os.replace(staging, directory)
-                except BaseException:
-                    if had_baseline:
-                        os.replace(backup, directory)
-                    raise
+                os.replace(staging, destination)
                 pipeline._clean_constant_baseline = manifest
-                published.append((pipeline, old_manifest, backup if had_baseline else None))
+                published.append((pipeline, old_manifest, destination))
         except BaseException:
-            for pipeline, manifest, backup in reversed(published):
-                directory = pipeline._clean_baseline_root
-                if directory.exists():
-                    shutil.rmtree(directory)
-                if backup is not None:
-                    os.replace(backup, directory)
+            for pipeline, manifest, destination in reversed(published):
+                if destination.exists():
+                    shutil.rmtree(destination, ignore_errors=True)
                 pipeline._clean_constant_baseline = manifest
             raise
         finally:
-            for _, _, staging in staged:
+            for _, _, staging, _ in staged:
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
-        for _, _, backup in published:
-            if backup is not None:
-                shutil.rmtree(backup, ignore_errors=True)
 
     def _validate_constant_snapshot_names(
         self, snapshots: list[tuple[Any, dict[str, dict[str, Any]]]],
@@ -503,6 +505,28 @@ class ReproducibilityMixin:
         for pipeline in pipelines:
             pipeline._clean_baseline_error = None
 
+    def snapshot_config(self) -> None:
+        """Replace the definition-time configuration baseline for the root tree.
+
+        Only the root pipeline may call this. The current configuration of the
+        root and every attached descendant becomes the configuration restored
+        by ``run_all(clean_start=True)``. The snapshot uses the same in-memory
+        ``definition_config`` representation as the automatic baseline and is
+        persisted with the pipeline.
+        """
+        if self.parent_pipeline is not None:
+            raise RegistrationError("snapshot_config() must be called on the root pipeline")
+        snapshots = [
+            (pipeline, pipeline._copy_definition_config(pipeline._config))
+            for pipeline in self._iter_attached_pipelines()
+        ]
+        for pipeline, config in snapshots:
+            pipeline._clean_config_baseline = config
+
+    def snapshot_configs(self) -> None:
+        """Alias for :meth:`snapshot_config`."""
+        self.snapshot_config()
+
     @staticmethod
     def _rebuild_study(value: _StudyBaseline) -> Any:
         import optuna
@@ -537,7 +561,30 @@ class ReproducibilityMixin:
             raise RegistrationError(
                 f"Constant '{name}' baseline root is a symlink: {root}"
             )
-        source = root / candidate
+        generation = entry.get("generation")
+        if generation is not None:
+            if (
+                not isinstance(generation, str)
+                or re.fullmatch(r"[0-9a-f]{32}", generation) is None
+            ):
+                raise RegistrationError(
+                    f"Constant '{name}' has an unsafe baseline generation"
+                )
+            generations_root = root / "generations"
+            if generations_root.is_symlink():
+                raise RegistrationError(
+                    f"Constant '{name}' baseline generation root is a symlink: "
+                    f"{generations_root}"
+                )
+            generation_dir = generations_root / generation
+            if generation_dir.is_symlink():
+                raise RegistrationError(
+                    f"Constant '{name}' baseline generation is a symlink: "
+                    f"{generation_dir}"
+                )
+            source = generation_dir / candidate
+        else:
+            source = root / candidate
         if source.is_symlink():
             raise RegistrationError(
                 f"Constant '{name}' baseline file is a symlink: {source}"

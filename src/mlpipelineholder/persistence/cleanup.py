@@ -96,24 +96,41 @@ def _collect_obsolete_artifact_entries(
 def _collect_obsolete_baseline_entries(
     payload: dict[str, Any], target_root: Path, obsolete: list[Path],
 ) -> None:
-    """Find stale baseline files without touching unrelated export artifacts."""
+    """Find stale baseline generations/files without touching user files."""
     baseline_dir = target_root / "clean_baseline"
     if not baseline_dir.is_symlink() and baseline_dir.is_dir():
         manifest = payload.get("clean_constant_baseline")
-        live_names = (
-            {
-                entry["file"]
-                for entry in manifest.values()
-                if isinstance(entry, dict) and isinstance(entry.get("file"), str)
-            }
-            if isinstance(manifest, dict) else set()
-        )
+        live_generations: set[str] = set()
+        live_legacy_files: set[str] = set()
+        if isinstance(manifest, dict):
+            for entry in manifest.values():
+                if not isinstance(entry, dict):
+                    continue
+                generation = entry.get("generation")
+                file_name = entry.get("file")
+                if isinstance(generation, str):
+                    live_generations.add(generation)
+                elif isinstance(file_name, str):
+                    live_legacy_files.add(file_name)
+        generations_dir = baseline_dir / "generations"
+        if not generations_dir.is_symlink() and generations_dir.is_dir():
+            for generation_dir in generations_dir.iterdir():
+                if generation_dir.is_symlink() or not generation_dir.is_dir():
+                    continue
+                if re.fullmatch(r"[0-9a-f]{32}", generation_dir.name) is None:
+                    continue
+                if generation_dir.name not in live_generations:
+                    obsolete.append(generation_dir)
         for entry in baseline_dir.iterdir():
-            if entry.is_symlink() or re.fullmatch(
+            if entry.is_symlink():
+                continue
+            if entry.name == "generations":
+                continue
+            if re.fullmatch(
                 r"constant_\d+(?:\.[A-Za-z0-9_-]+)*", entry.name
             ) is None:
                 continue
-            if entry.name not in live_names:
+            if entry.name not in live_legacy_files:
                 obsolete.append(entry)
     nodes = payload.get("nodes")
     if not isinstance(nodes, list):

@@ -15,6 +15,13 @@ from mlpipelineholder import PipelineHolder, RegistrationError
 from mlpipelineholder.core.models import ArtifactRecord, RuntimeValueReference
 
 
+def _baseline_file(base: Path, entry: dict[str, Any]) -> Path:
+    generation = entry.get("generation")
+    if isinstance(generation, str):
+        base = base / "generations" / generation
+    return base / entry["file"]
+
+
 def draw(scale: int, items: list[int]) -> tuple[float, int, int]:
     items.append(10)
     return random.random(), int(np.random.randint(100_000)), scale + len(items)
@@ -254,6 +261,68 @@ class CleanStartScopeTests(unittest.TestCase):
                 RegistrationError, "conflicts with current registration"
             ):
                 root.run_all(clean_start=True)
+
+
+class ConfigSnapshotTests(unittest.TestCase):
+    def test_root_snapshot_replaces_configs_from_root_to_leaves(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_value": 1}, Path(tmp) / "root")
+            child = PipelineHolder("child", {"child_value": 2}, Path(tmp) / "child")
+            grandchild = PipelineHolder(
+                "grandchild", {"leaf_value": 3}, Path(tmp) / "grandchild"
+            )
+            child.add_child_pipeline(grandchild, 1)
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+
+            root.set_config("root_value", 9)
+            child.set_config("child_value", 8)
+            grandchild.set_config("leaf_value", 7)
+            root.snapshot_config()
+
+            root.set_config("root_value", 5)
+            child.set_config("child_value", 6)
+            grandchild.set_config("leaf_value", 4)
+            root.run_all(clean_start=True)
+
+            self.assertEqual(root.get_config_value("root_value"), 9)
+            self.assertEqual(child.get_config_value("child_value"), 8)
+            self.assertEqual(grandchild.get_config_value("leaf_value"), 7)
+
+    def test_child_snapshot_config_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {"value": 1}, Path(tmp) / "child")
+            root.add_child_pipeline(child, 1)
+
+            with self.assertRaisesRegex(RegistrationError, "root pipeline"):
+                child.snapshot_config()
+            with self.assertRaisesRegex(RegistrationError, "root pipeline"):
+                child.snapshot_configs()
+
+    def test_saved_config_snapshot_survives_round_trip(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {"root_value": 1}, Path(tmp) / "root")
+            child = PipelineHolder("child", {"child_value": 2}, Path(tmp) / "child")
+            root.add_child_pipeline(child, 1)
+            root.run_all()
+            root.set_config("root_value", 9)
+            child.set_config("child_value", 8)
+            root.snapshot_configs()
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+            loaded.set_config("root_value", 5)
+            loaded.get_child_pipeline("child").set_config("child_value", 6)
+            loaded.run_all(clean_start=True)
+
+            self.assertEqual(loaded.get_config_value("root_value"), 9)
+            self.assertEqual(
+                loaded.get_child_pipeline("child").get_config_value("child_value"), 8
+            )
 
 
 class CleanStartCaptureScopeTests(unittest.TestCase):
@@ -922,7 +991,7 @@ class CleanBaselineDiskTests(unittest.TestCase):
                 root.run_all()
             entry = (root._clean_constant_baseline or {})["data"]
             self.assertEqual(entry["kind"], "artifact")
-            baseline = root.project_root / "clean_baseline" / entry["file"]
+            baseline = _baseline_file(root.project_root / "clean_baseline", entry)
             self.assertTrue(baseline.is_file())
             self.assertEqual(baseline.stat().st_size, Path(root.manual_values["data"].file_path).stat().st_size)
             self.assertLess(len(pickle.dumps(root._serialize_payload())), 100_000)
@@ -968,8 +1037,12 @@ class CleanBaselineDiskTests(unittest.TestCase):
             root.snapshot_constants()
             before_root = dict(root._clean_constant_baseline or {})
             before_child = dict(child._clean_constant_baseline or {})
-            root_file = root.project_root / "clean_baseline" / before_root["base"]["file"]
-            child_file = child.project_root / "clean_baseline" / before_child["child_base"]["file"]
+            root_file = _baseline_file(
+                root.project_root / "clean_baseline", before_root["base"]
+            )
+            child_file = _baseline_file(
+                child.project_root / "clean_baseline", before_child["child_base"]
+            )
             original_root_bytes, original_child_bytes = root_file.read_bytes(), child_file.read_bytes()
             root.set_constant_value("base", [9])
             child.set_constant_value("child_base", [8])
@@ -1024,15 +1097,22 @@ class CleanBaselineLifecycleTests(unittest.TestCase):
             root.snapshot_constants()
             root_entry = (root._clean_constant_baseline or {})["base"]
             child_entry = (child._clean_constant_baseline or {})["child_base"]
-            root_file = root.project_root / "clean_baseline" / root_entry["file"]
-            child_file = child.project_root / "clean_baseline" / child_entry["file"]
+            root_file = _baseline_file(root.project_root / "clean_baseline", root_entry)
+            child_file = _baseline_file(
+                child.project_root / "clean_baseline", child_entry
+            )
             previous_root, previous_child = root_file.read_bytes(), child_file.read_bytes()
             root.set_constant_value("base", [9])
             child.set_constant_value("child_base", [8])
             original_replace = os.replace
 
             def fail_child_publish(source: Path, destination: Path) -> None:
-                if source.parent == child.metadata_root and source.name.startswith(".clean-baseline-stage-") and destination == child._clean_baseline_root:
+                if (
+                    source.parent == child.metadata_root
+                    and source.name.startswith(".clean-baseline-stage-")
+                    and destination.parent
+                    == child._clean_baseline_root / "generations"
+                ):
                     raise OSError("promotion failed")
                 original_replace(source, destination)
 
@@ -1053,7 +1133,10 @@ class CleanBaselineLifecycleTests(unittest.TestCase):
             root.run_all()
             bundle = Path(tmp) / "bundle"
             root.save_pipeline(bundle)
-            old_file = bundle / "clean_baseline" / (root._clean_constant_baseline or {})["second"]["file"]
+            old_file = _baseline_file(
+                bundle / "clean_baseline",
+                (root._clean_constant_baseline or {})["second"],
+            )
             self.assertTrue(old_file.exists())
             root.manual_values.pop("second")
             root.snapshot_constants()
@@ -1355,7 +1438,7 @@ class CleanBaselineSafetyTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = self._root_with_baseline(tmp)
             entry = (root._clean_constant_baseline or {})["items"]
-            source = root.project_root / "clean_baseline" / entry["file"]
+            source = _baseline_file(root.project_root / "clean_baseline", entry)
             external = Path(tmp) / "external.bin"
             external.write_bytes(b"payload")
             source.unlink()
@@ -1379,7 +1462,7 @@ class CleanBaselineSafetyTests(unittest.TestCase):
             )
             root.run_all()
             entry = (root._clean_constant_baseline or {})["frame"]
-            dataset = root.project_root / "clean_baseline" / entry["file"]
+            dataset = _baseline_file(root.project_root / "clean_baseline", entry)
             (dataset / "linked.parquet").symlink_to(Path(tmp) / "outside")
 
             with self.assertRaisesRegex(RegistrationError, "contains a symlink"):
@@ -1423,9 +1506,86 @@ class CleanBaselineSafetyTests(unittest.TestCase):
             root.run_all(clean_start=True)
 
             self.assertEqual(root.get_constant_value("items"), [1])
-            self.assertTrue((baseline_root / (root._clean_constant_baseline or {})["items"]["file"]).exists())
+            self.assertTrue(
+                _baseline_file(
+                    baseline_root,
+                    (root._clean_constant_baseline or {})["items"],
+                ).exists()
+            )
             self.assertFalse(backup.exists())
             self.assertFalse(staging.exists())
+
+
+    def test_identical_filenames_with_different_contents_use_the_saved_generation(self) -> None:
+        import shutil
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            root.set_constant_value("items", [1])
+            root.add_block("count", 1).register_function(read_items, ["count"])
+            root.run_all()
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+            old_entry = dict((root._clean_constant_baseline or {})["items"])
+
+            root.set_constant_value("items", [2])
+            root.snapshot_constants()
+            new_entry = (root._clean_constant_baseline or {})["items"]
+            self.assertEqual(new_entry["file"], old_entry["file"])
+            old_file = _baseline_file(bundle / "clean_baseline", old_entry)
+            new_source = _baseline_file(
+                root.project_root / "clean_baseline", new_entry
+            )
+            self.assertNotEqual(old_file.read_bytes(), new_source.read_bytes())
+
+            # Simulate a crash after promoting the new generation but before the
+            # new manifest was saved: the bundle payload still points at G1.
+            shutil.copytree(
+                new_source.parent,
+                bundle / "clean_baseline" / "generations" / new_entry["generation"],
+            )
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+            self.assertEqual(loaded.get_constant_value("items"), [1])
+            loaded.run_all(clean_start=True)
+            self.assertEqual(loaded.get_value("count"), 1)
+
+    def test_root_and_child_half_published_snapshot_uses_saved_generations(self) -> None:
+        import shutil
+
+        with TemporaryDirectory() as tmp:
+            root = PipelineHolder("root", {}, Path(tmp) / "root")
+            child = PipelineHolder("child", {}, Path(tmp) / "child")
+            root.set_constant_value("base", [1])
+            child.set_constant_value("child_base", [2])
+            root.add_child_pipeline(child, 1)
+            bundle = Path(tmp) / "bundle"
+            root.save_pipeline(bundle)
+
+            root.set_constant_value("base", [9])
+            child.set_constant_value("child_base", [8])
+            _, root_staging, root_generation = root._stage_constant_baseline()
+            _, child_staging, _ = child._stage_constant_baseline()
+            shutil.move(
+                str(root_staging),
+                str(bundle / "clean_baseline" / "generations" / root_generation),
+            )
+            child_metadata = bundle / "children" / "child" / "metadata"
+            child_metadata.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(child_staging), str(child_metadata / child_staging.name))
+
+            loaded = PipelineHolder.load_pipeline(
+                bundle, forced_deleting=True, trust_project=True
+            )
+
+            self.assertEqual(loaded.get_constant_value("base"), [1])
+            loaded_child = loaded.get_child_pipeline("child")
+            self.assertEqual(loaded_child.get_constant_value("child_base"), [2])
+            self.assertFalse(list(loaded_child.metadata_root.glob(".clean-baseline-stage-*")))
+            loaded.run_all(clean_start=True)
+            self.assertEqual(loaded.get_constant_value("base"), [1])
+            self.assertEqual(loaded_child.get_constant_value("child_base"), [2])
 
 
 class CleanBaselineRollbackErrorTests(unittest.TestCase):
